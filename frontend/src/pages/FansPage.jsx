@@ -246,6 +246,73 @@ function Controller({ dev, backups, onReload }) {
   )
 }
 
+const ENDED = {
+  manual: 'Test beendet.',
+  expired: 'Test nach 5 min automatisch beendet.',
+  live: 'Live hat die Anmeldung übernommen – Test beendet.',
+}
+
+function TestSession({ session, onChanged }) {
+  const [busy, setBusy] = useState(false)
+  const [msg, setMsg] = useState(null)
+  const [now, setNow] = useState(Date.now())
+  const until = session.active && session.until ? new Date(session.until).getTime() : null
+
+  useEffect(() => {
+    if (!until) return undefined
+    const timer = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(timer)
+  }, [until])
+
+  useEffect(() => {
+    // the backend ends the session after 5 min; reload then so the page shows it
+    if (until && now >= until + 1000) onChanged()
+  }, [until, now, onChanged])
+
+  const send = async (action) => {
+    setBusy(true)
+    setMsg(null)
+    try {
+      await api.post('/api/fans/session/', { action })
+      onChanged()
+    } catch (err) {
+      setMsg(errText(err, 'Befehl fehlgeschlagen.'))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const left = until ? Math.max(0, Math.round((until - now) / 1000)) : 0
+  return (
+    <div className="flex flex-wrap items-center gap-2 rounded-md border border-amber-500/60 bg-amber-500/10 p-3 text-xs">
+      <span className="font-semibold">Test-Umgebung</span>
+      {session.active ? (
+        <>
+          <span>
+            AC-Infinity-Anmeldung aktiv bis {when(session.until)} (noch {Math.floor(left / 60)}:
+            {String(left % 60).padStart(2, '0')}). Danach übernimmt Live beim nächsten Zugriff.
+          </span>
+          <Button size="sm" variant="secondary" disabled={busy} onClick={() => send('end')}>
+            {busy && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
+            Test beenden
+          </Button>
+        </>
+      ) : (
+        <>
+          <span>
+            {ENDED[session.ended] ? ENDED[session.ended] + ' ' : ''}Nicht angemeldet – Live nutzt die Anmeldung.
+          </span>
+          <Button size="sm" disabled={busy} onClick={() => send('activate')}>
+            {busy && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
+            Test aktivieren ({session.minutes || 5} min)
+          </Button>
+        </>
+      )}
+      {msg && <span className="text-destructive">{msg}</span>}
+    </div>
+  )
+}
+
 function Credentials({ configured, onSaved }) {
   const [open, setOpen] = useState(!configured)
   const [email, setEmail] = useState('')
@@ -362,8 +429,9 @@ export default function FansPage() {
         </Button>
         {error && <span className="text-xs text-destructive">{error}</span>}
       </div>
+      {data?.configured && data.session?.test && <TestSession session={data.session} onChanged={load} />}
       {data && <Credentials configured={!!data.configured} onSaved={load} />}
-      {data?.configured && data.devices.length === 0 && (
+      {data?.configured && data.devices.length === 0 && !(data.session?.test && !data.session.active) && (
         <p className="text-sm text-muted-foreground">Keine Controller im Konto gefunden.</p>
       )}
       {data?.devices.map((dev) => (

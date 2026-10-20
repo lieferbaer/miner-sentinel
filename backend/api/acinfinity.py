@@ -7,6 +7,10 @@ Sources: ober37/ac-infinity-mcp docs/API.md, keithah/homebridge-acinfinity (API_
 - writes POST /dev/addDevMode: always read the port settings first and send all fields back
   (without modeSetid, fieldSet, devSetting, ipcSetting); at least 1.5 s between writes (else 403)
 - the controller reports a new speed only after > 5 s
+
+Test environment (MINERSENTINEL_ENV=Test, e.g. a local copy on the iMac): it logs in only via
+"Test aktivieren", uses the session for at most TEST_SESSION_S and never logs in again by itself.
+Live (default) logs in again by itself on its next access, so it takes the session back.
 """
 import json
 import os
@@ -18,10 +22,14 @@ import urllib.request
 from datetime import datetime, timezone
 
 BASE = 'https://www.acinfinityserver.com/api'
-DATA_DIR = '/app/acinfinity_data'
+DATA_DIR = os.environ.get('ACINFINITY_DATA_DIR') or '/app/acinfinity_data'
 CRED_FILE = DATA_DIR + '/credentials'
 TOKEN_FILE = DATA_DIR + '/token'
-HOST_DIR = '/opt/minersentinel/backend/acinfinity_data'
+SESSION_FILE = DATA_DIR + '/test_session'
+HOST_DIR = os.environ.get('ACINFINITY_DATA_DIR') or '/opt/minersentinel/backend/acinfinity_data'
+ENV_NAME = os.environ.get('MINERSENTINEL_ENV') or 'Live'
+IS_TEST = ENV_NAME.lower() == 'test'
+TEST_SESSION_S = 300          # test environment: the AC Infinity session is used for at most 5 min
 WRITE_GAP = 1.5
 EXCLUDE = ('modeSetid', 'fieldSet', 'devSetting', 'ipcSetting')
 CODE_OK = 200
@@ -40,6 +48,10 @@ class ACError(Exception):
 
 class NotConfigured(ACError):
     pass
+
+
+class NotActive(ACError):
+    """Test environment without an active test session."""
 
 
 def _credentials():
@@ -148,7 +160,67 @@ def login():
         return token
 
 
+def _read_session():
+    try:
+        with open(SESSION_FILE, encoding='utf-8') as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return {}
+
+
+def _write_session(data):
+    with open(SESSION_FILE, 'w', encoding='utf-8') as fh:
+        json.dump(data, fh)
+    os.chmod(SESSION_FILE, 0o600)
+
+
+def _drop_token():
+    try:
+        os.remove(TOKEN_FILE)
+    except OSError:
+        pass
+
+
+def end_test(reason='manual'):
+    """Test environment: stop using the session (manual, expired, or 'live' when Live took it back)."""
+    with _login_lock:
+        _drop_token()
+        sess = _read_session()
+        if sess and not sess.get('ended'):
+            sess['ended'] = reason
+            sess['ended_at'] = datetime.now(timezone.utc).isoformat()
+            _write_session(sess)
+
+
+def activate_test():
+    """Test environment: log in now and use the session for TEST_SESSION_S."""
+    if not IS_TEST:
+        raise ACError('Nur in der Test-Umgebung möglich.')
+    login()
+    now = time.time()
+    _write_session({'started': datetime.fromtimestamp(now, timezone.utc).isoformat(),
+                    'until': datetime.fromtimestamp(now + TEST_SESSION_S, timezone.utc).isoformat(),
+                    'until_ts': now + TEST_SESSION_S})
+
+
+def session_info():
+    if not IS_TEST:
+        return {'env': ENV_NAME, 'test': False}
+    sess = _read_session()
+    if sess and not sess.get('ended') and time.time() >= sess.get('until_ts', 0):
+        end_test('expired')
+        sess = _read_session()
+    active = bool(sess) and not sess.get('ended') and os.path.exists(TOKEN_FILE)
+    return {'env': ENV_NAME, 'test': True, 'active': active, 'until': sess.get('until') if active else None,
+            'ended': sess.get('ended'), 'ended_at': sess.get('ended_at'), 'minutes': TEST_SESSION_S // 60}
+
+
 def _token():
+    if IS_TEST:
+        if not session_info()['active']:
+            raise NotActive('Test-Umgebung nicht aktiv: erst „Test aktivieren“.')
+        with open(TOKEN_FILE, encoding='utf-8') as fh:
+            return fh.read().strip()
     try:
         with open(TOKEN_FILE, encoding='utf-8') as fh:
             token = fh.read().strip()
@@ -174,6 +246,9 @@ def _call(path, build_params, write=False, headers=None, user_query=False):
                 _last_write[0] = time.monotonic()
         else:
             res = _post(path, params, token, headers, query)
+        if res.get('code') == CODE_SESSION_EXPIRED and IS_TEST:
+            end_test('live')           # Live (or the phone app) took the session back: never log in again here
+            raise NotActive('Live hat die Anmeldung übernommen – Test beendet.')
         if res.get('code') == CODE_SESSION_EXPIRED and attempt == 1:
             token = login()
             continue

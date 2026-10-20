@@ -12,8 +12,13 @@ READ_BACK_S = 10      # the controller reports a new speed only after > 5 s
 
 
 def _error(exc):
-    code = status.HTTP_400_BAD_REQUEST if isinstance(exc, ac.NotConfigured) else status.HTTP_502_BAD_GATEWAY
-    return Response({'error': str(exc)}, status=code)
+    if isinstance(exc, ac.NotActive):
+        code = status.HTTP_409_CONFLICT
+    elif isinstance(exc, ac.NotConfigured):
+        code = status.HTTP_400_BAD_REQUEST
+    else:
+        code = status.HTTP_502_BAD_GATEWAY
+    return Response({'error': str(exc), 'session': ac.session_info()}, status=code)
 
 
 @api_view(['GET'])
@@ -21,12 +26,34 @@ def _error(exc):
 def fans_status(request):
     if not ac.configured():
         return Response({'configured': False, 'hint': 'In %s/credentials AC_EMAIL und AC_PASSWORD eintragen.'
-                                                      % ac.HOST_DIR, 'devices': [], 'backups': []})
+                                                      % ac.HOST_DIR, 'devices': [], 'backups': [],
+                         'session': ac.session_info()})
     try:
         devs = [ac.summarize(d) for d in ac.devices()]
+    except ac.NotActive:
+        devs = []                     # test environment without an active test session: no AC Infinity access
     except ac.ACError as exc:
         return _error(exc)
-    return Response({'configured': True, 'devices': devs, 'backups': ac.list_backups()})
+    return Response({'configured': True, 'devices': devs, 'backups': ac.list_backups(),
+                     'session': ac.session_info()})
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated])
+def fans_session(request):
+    """Test environment only. GET: session state. POST {action: activate|end}."""
+    if request.method == 'POST':
+        action = request.data.get('action')
+        try:
+            if action == 'activate':
+                ac.activate_test()
+            elif action == 'end':
+                ac.end_test('manual')
+            else:
+                return Response({'error': 'Ungültige Aktion.'}, status=status.HTTP_400_BAD_REQUEST)
+        except ac.ACError as exc:
+            return _error(exc)
+    return Response(ac.session_info())
 
 
 @api_view(['GET', 'POST'])
