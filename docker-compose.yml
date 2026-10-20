@@ -47,8 +47,14 @@ services:
     container_name: minersentinel-data-service
     restart: unless-stopped
     env_file: ".env"
+    environment:
+      # Temperatur-Automatik: AC Infinity client and session of the backend
+      ACINFINITY_DATA_DIR: /acinfinity_data
+      ACINFINITY_MODULE_DIR: /backend_api
     volumes:
       - ./data-service:/app
+      - ./backend/acinfinity_data:/acinfinity_data
+      - ./backend/api:/backend_api:ro
     depends_on:
       postgres:
         condition: service_healthy

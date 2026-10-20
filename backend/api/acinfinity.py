@@ -10,7 +10,8 @@ Sources: ober37/ac-infinity-mcp docs/API.md, keithah/homebridge-acinfinity (API_
 
 Test environment (MINERSENTINEL_ENV=Test, e.g. a local copy on the iMac): it logs in only via
 "Test aktivieren", uses the session for at most TEST_SESSION_S and never logs in again by itself.
-Live (default) logs in again by itself on its next access, so it takes the session back.
+Live (default) logs in again by itself, but only RELOGIN_PAUSE_S after another login took the session
+(test environment or phone app), or at once via "Live jetzt übernehmen" (takeover).
 """
 import json
 import os
@@ -26,6 +27,8 @@ DATA_DIR = os.environ.get('ACINFINITY_DATA_DIR') or '/app/acinfinity_data'
 CRED_FILE = DATA_DIR + '/credentials'
 TOKEN_FILE = DATA_DIR + '/token'
 SESSION_FILE = DATA_DIR + '/test_session'
+PAUSE_FILE = DATA_DIR + '/relogin_after'
+RELOGIN_PAUSE_S = 300         # Live: wait this long before taking a session back
 HOST_DIR = os.environ.get('ACINFINITY_DATA_DIR') or '/opt/minersentinel/backend/acinfinity_data'
 ENV_NAME = os.environ.get('MINERSENTINEL_ENV') or 'Live'
 IS_TEST = ENV_NAME.lower() == 'test'
@@ -52,6 +55,41 @@ class NotConfigured(ACError):
 
 class NotActive(ACError):
     """Test environment without an active test session."""
+
+
+class SessionTaken(ACError):
+    """Live: another login took the session; Live logs in again after RELOGIN_PAUSE_S."""
+
+
+def _pause_until():
+    try:
+        with open(PAUSE_FILE, encoding='utf-8') as fh:
+            return float(fh.read().strip())
+    except (OSError, ValueError):
+        return 0.0
+
+
+def _pause_text(until):
+    return datetime.fromtimestamp(until, timezone.utc).isoformat()
+
+
+def _start_pause():
+    until = time.time() + RELOGIN_PAUSE_S
+    with open(PAUSE_FILE, 'w', encoding='utf-8') as fh:
+        fh.write(str(until))
+    os.chmod(PAUSE_FILE, 0o600)
+    return until
+
+
+def takeover():
+    """Live: log in now (ends a test session elsewhere)."""
+    if IS_TEST:
+        raise ACError('Nur in der Live-Umgebung möglich.')
+    try:
+        os.remove(PAUSE_FILE)
+    except OSError:
+        pass
+    login()
 
 
 def _credentials():
@@ -205,7 +243,9 @@ def activate_test():
 
 def session_info():
     if not IS_TEST:
-        return {'env': ENV_NAME, 'test': False}
+        until = _pause_until()
+        return {'env': ENV_NAME, 'test': False,
+                'paused_until': _pause_text(until) if until > time.time() else None}
     sess = _read_session()
     if sess and not sess.get('ended') and time.time() >= sess.get('until_ts', 0):
         end_test('expired')
@@ -228,31 +268,42 @@ def _token():
             return token
     except OSError:
         pass
-    return login()
+    until = _pause_until()
+    if until > time.time():
+        raise SessionTaken('Anmeldung wird gerade von einer anderen Umgebung genutzt – Live übernimmt um %s UTC.'
+                           % datetime.fromtimestamp(until, timezone.utc).strftime('%H:%M:%S'))
+    token = login()
+    try:
+        os.remove(PAUSE_FILE)
+    except OSError:
+        pass
+    return token
 
 
 def _call(path, build_params, write=False, headers=None, user_query=False):
-    """build_params(token) -> form fields. Re-login once if the session expired (code 10003)."""
+    """build_params(token) -> form fields. Code 10003 (session taken by another login): the test
+    environment stops, Live logs in again only after RELOGIN_PAUSE_S (see _token)."""
     token = _token()
-    for attempt in (1, 2):
-        params = build_params(token)
-        query = {'userId': token} if user_query else None
-        if write:
-            with _write_lock:
-                wait = WRITE_GAP - (time.monotonic() - _last_write[0])
-                if wait > 0:
-                    time.sleep(wait)
-                res = _post(path, params, token, headers, query)
-                _last_write[0] = time.monotonic()
-        else:
+    params = build_params(token)
+    query = {'userId': token} if user_query else None
+    if write:
+        with _write_lock:
+            wait = WRITE_GAP - (time.monotonic() - _last_write[0])
+            if wait > 0:
+                time.sleep(wait)
             res = _post(path, params, token, headers, query)
-        if res.get('code') == CODE_SESSION_EXPIRED and IS_TEST:
-            end_test('live')           # Live (or the phone app) took the session back: never log in again here
-            raise NotActive('Live hat die Anmeldung übernommen – Test beendet.')
-        if res.get('code') == CODE_SESSION_EXPIRED and attempt == 1:
-            token = login()
-            continue
-        return res
+            _last_write[0] = time.monotonic()
+    else:
+        res = _post(path, params, token, headers, query)
+    if res.get('code') == CODE_SESSION_EXPIRED and IS_TEST:
+        end_test('live')           # Live (or the phone app) took the session back: never log in again here
+        raise NotActive('Live hat die Anmeldung übernommen – Test beendet.')
+    if res.get('code') == CODE_SESSION_EXPIRED:
+        with _login_lock:
+            _drop_token()
+            until = _pause_until() if _pause_until() > time.time() else _start_pause()
+        raise SessionTaken('Anmeldung wird gerade von einer anderen Umgebung genutzt – Live übernimmt um %s UTC.'
+                           % datetime.fromtimestamp(until, timezone.utc).strftime('%H:%M:%S'))
     return res
 
 
@@ -269,6 +320,20 @@ def port_settings(dev_id, port):
 
 def write_settings(payload, headers=None):
     return _call('/dev/addDevMode', lambda t: payload, write=True, headers=headers)
+
+
+def set_fan_level(dev_id, port, level):
+    """Set the fan level (0-10) of one port: read its settings, send them back with the new onSpead."""
+    read = port_settings(dev_id, port)
+    settings = read.get('data')
+    if read.get('code') != CODE_OK or not isinstance(settings, dict):
+        raise ACError('Einstellungen von Port %s nicht lesbar (Code %s: %s)' % (port, read.get('code'), read.get('msg')))
+    payload = build_payload(settings, {'onSpead': int(level)})
+    payload.setdefault('devId', dev_id)
+    res = write_settings(payload, HEADERS_OBER37)
+    if res.get('code') != CODE_OK:
+        raise ACError('Stufe nicht gesetzt (Code %s: %s)' % (res.get('code'), res.get('msg')))
+    return res
 
 
 def build_payload(settings, overlay):

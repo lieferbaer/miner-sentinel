@@ -1,0 +1,157 @@
+"""Temperatur-Automatik (A15 + AC Infinity fan): clock keeps TMax 80-84 degC, fan fixed at the chosen level."""
+from datetime import datetime, timedelta, timezone
+
+import pytest
+
+import calibration
+import fan_automation as fa
+
+T0 = datetime(2026, 10, 21, 12, 0, tzinfo=timezone.utc)
+STOCK = [360, 360, 360]
+
+
+class FakeAC:
+    class ACError(Exception):
+        pass
+
+    def __init__(self, level=5):
+        self.level = level
+        self.writes = []
+
+    def speed_of(self, dev_id, port):
+        return self.level
+
+    def set_fan_level(self, dev_id, port, level):
+        self.writes.append(level)
+        self.level = level
+
+
+class Miner:
+    def __init__(self, tmax=82.0, points=None):
+        self.tmax = tmax
+        self.points = list(points or STOCK)
+        self.sets = []
+
+    def read(self, ip, port):
+        return {'fields': {'TMax': str(self.tmax)}, 'points': self.points, 'mode_key': '2/L4',
+                'status': 'Work: In Work', 'elapsed': 1000}
+
+    def set_frequency(self, ip, port, points):
+        self.sets.append(sum(points) / len(points))
+        self.points = list(points)
+
+
+@pytest.fixture
+def miner(monkeypatch):
+    mn = Miner()
+    monkeypatch.setattr(calibration, 'read_miner', mn.read)
+    monkeypatch.setattr(calibration, 'set_frequency', mn.set_frequency)
+    return mn
+
+
+def row(state=None, level=5, enabled=True, cal=False):
+    return {'id': 1, 'enabled': enabled, 'ac_dev_id': 'dev', 'ac_port': 1, 'level': level, 'state': state or {},
+            'ip_address': '10.0.0.15', 'port': 4028, 'cal_active': cal,
+            'connection_config': {'throttle': {'profiles': {'2/L4': {'points': STOCK}}}}}
+
+
+def run(st, miner, ac, seconds, level=5, cal=False, step_s=15, start=T0):
+    """Run rounds every step_s seconds; returns the state and the time after the last round."""
+    now = start
+    for _ in range(int(seconds // step_s)):
+        st = fa.step(row(st, level=level, cal=cal), now, ac)
+        now += timedelta(seconds=step_s)
+    return st, now
+
+
+def test_in_band_nothing_changes(miner):
+    ac = FakeAC(level=5)
+    st, _ = run({}, miner, ac, 600)
+    assert miner.sets == [] and ac.writes == [] and st['phase'] == 'normal'
+
+
+def test_too_hot_lowers_clock_then_waits(miner):
+    miner.tmax = 87.0
+    ac = FakeAC(level=5)
+    st, _ = run({}, miner, ac, 170)
+    assert miner.sets == [340.0]                 # 3 degC over 84 -> 20 MHz, then 3 min wait
+    assert ac.writes == []                       # fan stays at the chosen level
+
+
+def test_cool_raises_clock_up_to_stock(miner):
+    miner.tmax = 76.0
+    miner.points = [300, 300, 300]
+    ac = FakeAC(level=5)
+    st, _ = run({}, miner, ac, 15 * 60)
+    assert miner.sets[0] == 310.0 and max(miner.sets) <= 360
+
+
+def test_protection_88_and_90(miner):
+    ac = FakeAC(level=5)
+    miner.tmax = 88.5
+    st, now = run({}, miner, ac, 60)
+    assert ac.writes[-1] == 6 and miner.sets[0] == 330.0       # +1 level, -30 MHz
+    miner.tmax = 90.5
+    st, now = run(st, miner, ac, 60, start=now)
+    assert ac.writes[-1] == 7                                    # +2 levels
+    miner.tmax = 83.0
+    st, now = run(st, miner, ac, 90, start=now)
+    assert ac.writes[-1] == 5                                    # back to the chosen level
+
+
+def test_lower_fan_only_after_clock_and_wait(miner):
+    ac = FakeAC(level=7)
+    miner.tmax = 83.0
+    st, now = run({}, miner, ac, 60, level=7)
+    assert st['base'] == 7
+    st = fa.step(row(st, level=4), now, ac)
+    assert st['phase'] == 'senken' and ac.writes == []
+    # clock goes down until TMax <= 80, the fan stays at 7 meanwhile
+    for i in range(1, 40):
+        if miner.sets:
+            miner.tmax = 79.5
+        st = fa.step(row(st, level=4), now + timedelta(seconds=15 * i), ac)
+        if ac.writes:
+            break
+    assert miner.sets and miner.sets[0] < 360
+    assert ac.writes == [4]
+    assert (15 * i) >= fa.WAIT_S                                 # applied only after the wait
+
+
+def test_higher_fan_at_once(miner):
+    ac = FakeAC(level=4)
+    st, now = run({}, miner, ac, 60, level=4)
+    st = fa.step(row(st, level=8), now, ac)
+    assert ac.writes == [8]
+
+
+def test_calibration_run_no_clocks_fan_holds_80(miner):
+    ac = FakeAC(level=5)
+    miner.tmax = 83.0
+    st, now = run({}, miner, ac, 400, cal=True)
+    assert miner.sets == []                      # no clock changes during a run
+    assert ac.writes and ac.writes[0] == 6       # fan up to bring TMax to 80
+    miner.tmax = 77.0
+    st, _ = run(st, miner, ac, 400, cal=True, start=now)
+    assert ac.writes[-1] < 6
+
+
+def test_disable_gives_clocks_back(miner):
+    miner.tmax = 87.0
+    ac = FakeAC(level=5)
+    st, now = run({}, miner, ac, 60)
+    assert st['clock_set']
+    st = fa.step(row(st, enabled=False), now, ac)
+    assert miner.sets[-1] == 360.0 and st['off'] is True
+
+
+def test_ac_error_keeps_clock_regulation(miner):
+    class BrokenAC(FakeAC):
+        def speed_of(self, dev_id, port):
+            raise self.ACError('Cloud nicht erreichbar')
+
+    miner.tmax = 87.0
+    st = fa.step(row({'base': 5, 'seen_at': 'x', 'fan_set': 5}), T0, BrokenAC())
+    for i in range(1, 4):
+        st = fa.step(row(st), T0 + timedelta(seconds=15 * i), BrokenAC())
+    assert miner.sets and 'Cloud' in st['ac_error']

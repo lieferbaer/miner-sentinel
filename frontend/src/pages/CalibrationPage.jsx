@@ -128,6 +128,7 @@ const STANDARD = [
   { key: 'j_th', label: 'J/TH', get: (p) => fmt(p.j_th, 1) },
   { key: 'dh_pct', label: 'Fehlerquote', get: (p) => fmt(p.dh_pct, 2) + ' %' },
   { key: 'chip_temp_c', label: 'Chip-Temp.', get: (p) => fmt(p.chip_temp_c, 0) + ' °C' },
+  { key: 'fan_level', label: 'Lüfter (AC)', get: (p) => (p.fan_level == null ? '—' : 'Stufe ' + p.fan_level) },
 ]
 const BASE_EXTRA = [
   { key: 'miner_mhz', label: 'Takt laut Miner', get: (p) => fmt(p.miner_mhz, 1) + ' MHz' },

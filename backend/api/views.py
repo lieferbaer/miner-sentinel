@@ -24,6 +24,7 @@ from .models import (
     DeviceHardwareStats,
     DeviceMiningStats,
     DeviceSystemInfo,
+    FanAutomation,
     PoolStats,
 )
 from .serializers import (
@@ -232,7 +233,7 @@ class DeviceViewSet(viewsets.ModelViewSet):
                 'seq': p.seq, 'set_mhz': p.set_mhz, 'set_points': p.set_points, 'miner_mhz': p.miner_mhz,
                 'miner_points': p.miner_points, 'hashrate_ths': p.hashrate_ths, 'power_w': p.power_w,
                 'j_th': p.j_th, 'dh_pct': p.dh_pct, 'chip_temp_c': p.chip_temp_c, 'recorded_at': p.recorded_at,
-                'fields': fields}
+                'fan_level': data.get('fan_level'), 'fields': fields}
 
     def _cal_run(self, run):
         labels = dict(self.CAL_MODES)
@@ -547,6 +548,7 @@ class DeviceViewSet(viewsets.ModelViewSet):
         stock_avg = prof.get('avg_mhz')
         return {
             'supported': True,
+            'automation_active': FanAutomation.objects.filter(device=device, enabled=True).exists(),
             'min_mhz': round(stock_avg * self.THROTTLE_FLOOR) if stock_avg else None,
             'max_mhz': round(stock_avg) if stock_avg else None,
             'calibration_active': CalibrationRun.objects.filter(device=device, status__in=self.CAL_ACTIVE).exists(),
@@ -619,6 +621,9 @@ class DeviceViewSet(viewsets.ModelViewSet):
             return Response(self._throttle_payload(device, seen))
         if CalibrationRun.objects.filter(device=device, status__in=self.CAL_ACTIVE).exists():
             return Response({'error': 'Takt-Messung läuft – Drosseln ist gesperrt.'}, status=status.HTTP_409_CONFLICT)
+        if FanAutomation.objects.filter(device=device, enabled=True).exists():
+            return Response({'error': 'Die Temperatur-Automatik steuert den Takt (Menü „Lüfter“).'},
+                            status=status.HTTP_409_CONFLICT)
         try:
             live = self._throttle_live(device)
         except OSError as exc:

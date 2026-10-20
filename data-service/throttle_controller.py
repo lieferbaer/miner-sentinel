@@ -430,9 +430,10 @@ def run_throttle_controller(database_url):
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("SELECT id, ip_address, port, connection_config, name AS device_name, model, device_id "
-                        ", EXISTS (SELECT 1 FROM "
+                        ", (EXISTS (SELECT 1 FROM "
                         "calibration_runs r WHERE r.device_id = devices.id AND r.status IN "
-                        "('running', 'paused', 'cancelling', 'finishing')) AS calibrating "
+                        "('running', 'paused', 'cancelling', 'finishing')) OR EXISTS (SELECT 1 FROM "
+                        "fan_automation f WHERE f.device_id = devices.id AND f.enabled)) AS calibrating "
                         "FROM devices WHERE is_active AND protocol = 'cgminer_tcp'")
             devices = cur.fetchall()
         for dev in devices:

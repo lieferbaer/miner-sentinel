@@ -60,6 +60,7 @@ urlpatterns = [
     path('fans/restore/', fan_views.fans_restore, name='fans-restore'),
     path('fans/test/', fan_views.fans_test, name='fans-test'),
     path('fans/session/', fan_views.fans_session, name='fans-session'),
+    path('fans/automation/', fan_views.fans_automation, name='fans-automation'),
     # Authentication endpoints
     path('auth/csrf/', views.csrf_token_view, name='csrf-token'),
     path('auth/login/', views.login_view, name='login'),

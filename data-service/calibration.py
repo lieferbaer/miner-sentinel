@@ -210,6 +210,11 @@ def _save_point(conn, run, m, kind, key, seq, set_points):
     conf = {k: v for k, v in (m['conf'] or {}).items() if not k.startswith('passwd')}
     data = {'fields': m['fields'], 'summary': m['summary'], 'web': conf, 'estats_raw': m['estats']}
     with conn.cursor() as cur:
+        # AC Infinity fan level (Temperatur-Automatik): last read level, else the last set one
+        cur.execute("SELECT COALESCE(state->>'fan_read', state->>'fan_set') FROM fan_automation "
+                    "WHERE device_id = %s AND enabled", (run['device_id'],))
+        row = cur.fetchone()
+        data['fan_level'] = int(row[0]) if row and row[0] is not None else None
         if kind == 'step':
             cur.execute("DELETE FROM calibration_points WHERE run_id = %s AND seq = %s", (run['id'], seq))
         cur.execute(

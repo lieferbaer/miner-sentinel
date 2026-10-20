@@ -1,14 +1,69 @@
 """Lüfter (AC Infinity) test page: show controllers/ports, back up settings, test which write variant works."""
+import json
 import time
 
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from . import acinfinity as ac
+from .models import Device, FanAutomation
 
 READ_BACK_S = 5       # user choice (was 10); measured: the controller reports a new speed only after > 5 s
+
+
+def _a15():
+    """The A15 the Temperatur-Automatik works on (only one)."""
+    from .views import DeviceViewSet
+    for dev in Device.objects.filter(is_active=True, protocol=Device.PROTOCOL_CGMINER_TCP):
+        if DeviceViewSet._throttle_family(dev) == 'a15':
+            return dev
+    return None
+
+
+def _automation():
+    dev = _a15()
+    if not dev:
+        return None, None
+    auto, _ = FanAutomation.objects.get_or_create(device=dev)
+    return dev, auto
+
+
+def automation_payload():
+    dev, auto = _automation()
+    if not auto:
+        return None
+    st = auto.state or {}
+    return {
+        'device': {'id': dev.id, 'name': dev.name}, 'enabled': auto.enabled, 'dev_id': auto.ac_dev_id,
+        'port': auto.ac_port, 'level': auto.level,
+        'state': {k: st.get(k) for k in ('t', 'phase', 'base', 'boost', 'fan_set', 'fan_read', 'fan_read_at',
+                                         'clock_set', 'stock_mhz', 'changed_at', 'cal', 'cal_fan', 'ac_error',
+                                         'last_error', 'seen_at')},
+        'log': (st.get('log') or [])[-15:][::-1],
+    }
+
+
+def automation_on(dev_id, port):
+    """True if the Temperatur-Automatik controls this fan (manual fan buttons are then locked)."""
+    return FanAutomation.objects.filter(enabled=True, ac_dev_id=str(dev_id), ac_port=port).exists()
+
+
+def _lift_throttle(dev):
+    """A manual clock of the A15 is lifted when the automation takes over the clocks."""
+    from .views import DeviceViewSet
+    st = json.loads(json.dumps((dev.connection_config or {}).get('throttle') or {}))
+    active = st.get('active')
+    if not active:
+        return
+    st['active'] = None
+    st['last_event'] = {'type': 'automation', 'detail': 'für die Temperatur-Automatik aufgehoben',
+                        'at': timezone.now().isoformat(), 'target_ths': active.get('target_ths'),
+                        'clock_mhz': active.get('clock_mhz')}
+    st['stable_since'] = None
+    DeviceViewSet()._throttle_save(dev, st)
 
 
 def _error(exc):
@@ -30,12 +85,51 @@ def fans_status(request):
                          'session': ac.session_info()})
     try:
         devs = [ac.summarize(d) for d in ac.devices()]
-    except ac.NotActive:
-        devs = []                     # test environment without an active test session: no AC Infinity access
+    except (ac.NotActive, ac.SessionTaken):
+        devs = []                     # test session not active / Live waits before taking the session back
     except ac.ACError as exc:
         return _error(exc)
     return Response({'configured': True, 'devices': devs, 'backups': ac.list_backups(),
-                     'session': ac.session_info()})
+                     'session': ac.session_info(), 'automation': automation_payload()})
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated])
+def fans_automation(request):
+    """Temperatur-Automatik (A15). GET: settings + state. POST {action: enable, dev_id, port, level} |
+    {action: level, level} | {action: disable}. The data-service applies the changes."""
+    dev, auto = _automation()
+    if not auto:
+        return Response({'error': 'Kein Avalon A15 gefunden.'}, status=status.HTTP_404_NOT_FOUND)
+    if request.method == 'POST':
+        action = request.data.get('action')
+        try:
+            level = int(request.data.get('level')) if request.data.get('level') is not None else auto.level
+        except (TypeError, ValueError):
+            level = -1
+        if action in ('enable', 'level') and not 1 <= level <= 10:
+            return Response({'error': 'Stufe 1–10 wählen.'}, status=status.HTTP_400_BAD_REQUEST)
+        if action == 'enable':
+            dev_id = str(request.data.get('dev_id') or '')
+            try:
+                port = int(request.data.get('port'))
+            except (TypeError, ValueError):
+                port = 0
+            if not dev_id or port not in (1, 2, 3, 4):
+                return Response({'error': 'Controller und Port wählen.'}, status=status.HTTP_400_BAD_REQUEST)
+            if not ac.has_backup(dev_id):
+                return Response({'error': 'Bitte zuerst eine Sicherung erstellen.'}, status=status.HTTP_409_CONFLICT)
+            _lift_throttle(dev)
+            auto.enabled, auto.ac_dev_id, auto.ac_port, auto.level = True, dev_id, port, level
+        elif action == 'level' and auto.enabled:
+            auto.level = level
+        elif action == 'disable':
+            auto.enabled = False
+        else:
+            return Response({'error': 'Diese Aktion ist gerade nicht möglich.'}, status=status.HTTP_400_BAD_REQUEST)
+        auto.updated_at = timezone.now()
+        auto.save(update_fields=['enabled', 'ac_dev_id', 'ac_port', 'level', 'updated_at'])
+    return Response(automation_payload())
 
 
 @api_view(['GET', 'POST'])
@@ -47,6 +141,8 @@ def fans_session(request):
         try:
             if action == 'activate':
                 ac.activate_test()
+            elif action == 'takeover':
+                ac.takeover()
             elif action == 'end':
                 ac.end_test('manual')
             else:
@@ -109,6 +205,8 @@ def fans_test(request):
         return Response({'error': 'Ungültige Angaben.'}, status=status.HTTP_400_BAD_REQUEST)
     if not ac.has_backup(dev_id):
         return Response({'error': 'Bitte zuerst eine Sicherung erstellen.'}, status=status.HTTP_409_CONFLICT)
+    if automation_on(dev_id, port):
+        return Response({'error': 'Die Temperatur-Automatik steuert diesen Lüfter.'}, status=status.HTTP_409_CONFLICT)
 
     if action == 'set':        # tested on the 69 Pro: per port, only onSpead changes (modeType stays as it is)
         write_port, overlay, headers = port, {'onSpead': speed}, ac.HEADERS_OBER37

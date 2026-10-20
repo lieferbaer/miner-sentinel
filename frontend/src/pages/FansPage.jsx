@@ -46,7 +46,83 @@ function errText(err, fallback) {
   return err?.response?.data?.error || fallback
 }
 
-function Controller({ dev, backups, onReload }) {
+const PHASE = {
+  normal: 'regelt über den Takt (Lüfter fest auf der gewählten Stufe)',
+  senken: 'Lüfter wird gesenkt: erst Takt runter, bis 80 °C erreicht und 3 min stabil',
+  messung: 'Takt-Messung läuft: kein Takt-Eingriff, der Lüfter hält 80 °C',
+  aus: 'aus',
+}
+
+/** Temperatur-Automatik (A15): status and on/off; refreshed every 15 s without AC Infinity calls. */
+function useAutomation(initial) {
+  const [auto, setAuto] = useState(initial)
+  useEffect(() => setAuto(initial), [initial])
+  useEffect(() => {
+    if (!auto?.enabled) return undefined
+    const timer = setInterval(() => {
+      api.get('/api/fans/automation/').then(({ data }) => setAuto(data)).catch(() => {})
+    }, 15000)
+    return () => clearInterval(timer)
+  }, [auto?.enabled])
+  return [auto, setAuto]
+}
+
+function AutomationPanel({ auto, here, port, level, locked, onCommand, busy }) {
+  if (!auto) return null
+  const st = auto.state || {}
+  if (!auto.enabled) {
+    return (
+      <div className="space-y-2 rounded-md border border-border/80 p-3">
+        <p className="text-sm font-medium">Temperatur-Automatik · {auto.device?.name}</p>
+        <p className="text-xs text-muted-foreground">
+          Lüfter fest auf der gewählten Stufe, der Takt hält den heißesten Chip bei 80–84 °C. Schutz ab 88 °C (Lüfter
+          +1, Takt −30 MHz) und ab 90 °C (Lüfter +2).
+        </p>
+        <Button size="sm" disabled={locked || busy} onClick={() => onCommand({ action: 'enable', port, level })}>
+          {busy && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
+          Einschalten (Port {port}, Stufe {level})
+        </Button>
+      </div>
+    )
+  }
+  return (
+    <div className="space-y-1.5 rounded-md border border-emerald-500/60 bg-emerald-500/5 p-3 text-xs">
+      <div className="flex flex-wrap items-center gap-2">
+        <p className="text-sm font-medium">Temperatur-Automatik an · {auto.device?.name}</p>
+        <Button size="sm" variant="outline" className="ml-auto h-8" disabled={busy}
+          onClick={() => onCommand({ action: 'disable' })}>
+          Ausschalten
+        </Button>
+      </div>
+      {!here && <p className="text-amber-600">Steuert Port {auto.port} dieses Controllers.</p>}
+      <p>Status: {PHASE[st.phase] || '—'}</p>
+      <p>
+        Heißester Chip (60 s): <span className="font-semibold">{fmt(st.t, 1, ' °C')}</span> · Ziel 80–84 °C
+      </p>
+      <p>
+        Takt: {st.clock_set ? fmt(st.clock_set, 0, ' MHz') : 'Standardtakt'} · Standard {fmt(st.stock_mhz, 0, ' MHz')}
+      </p>
+      <p>
+        Lüfter: gewählt Stufe {auto.level} · läuft auf Stufe {st.fan_read ?? '—'}
+        {st.phase === 'messung' && st.cal_fan ? ' · Messung: Stufe ' + st.cal_fan : ''}
+        {st.boost ? ' · Schutz +' + st.boost : ''}
+      </p>
+      {st.ac_error && <p className="text-amber-600">AC Infinity: {st.ac_error}</p>}
+      {st.last_error && <p className="text-destructive">Fehler: {st.last_error}</p>}
+      {auto.log?.length > 0 && (
+        <ul className="space-y-0.5 pt-1 text-muted-foreground">
+          {auto.log.slice(0, 8).map(([at, text], i) => (
+            <li key={i}>
+              {when(at)} · {text}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  )
+}
+
+function Controller({ dev, backups, automation, onReload }) {
   const fanPorts = dev.ports.filter((p) => p.port >= 1 && p.port <= 4)
   const [port, setPortState] = useState(() => {
     const stored = storedPort(dev.dev_id)
@@ -57,6 +133,21 @@ function Controller({ dev, backups, onReload }) {
   const setPort = (value) => {
     setPortState(value)
     storePort(dev.dev_id, value)
+  }
+  const [auto, setAuto] = useAutomation(automation)
+  const autoOn = auto?.enabled && auto.dev_id === dev.dev_id
+  const autoHere = autoOn && auto.port === port
+  const autoCommand = async (body) => {
+    setBusy('auto')
+    setMsg(null)
+    try {
+      const { data } = await api.post('/api/fans/automation/', { dev_id: dev.dev_id, ...body })
+      setAuto(data)
+    } catch (err) {
+      setMsg({ tone: 'error', text: errText(err, 'Automatik-Befehl fehlgeschlagen.') })
+    } finally {
+      setBusy(null)
+    }
   }
   // the highlighted level is the one the controller reports for the selected port
   const current = dev.ports.find((p) => p.port === port)?.speak
@@ -117,6 +208,7 @@ function Controller({ dev, backups, onReload }) {
     }
   }
   const locked = !!busy || own.length === 0
+  const enableLevel = current >= 1 && current <= 10 ? current : 5
 
   return (
     <Card>
@@ -126,7 +218,7 @@ function Controller({ dev, backups, onReload }) {
           {dev.name || 'Controller'}
           <span className="ml-auto flex gap-2">
             {['on', 'off'].map((key) => (
-              <Button key={key} size="sm" variant="outline" className="h-8 px-4" disabled={locked}
+              <Button key={key} size="sm" variant="outline" className="h-8 px-4" disabled={locked || autoOn}
                 onClick={() => test(key)}>
                 {busy === key && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
                 {ACTIONS[key]}
@@ -201,26 +293,34 @@ function Controller({ dev, backups, onReload }) {
           )}
         </div>
 
+        <AutomationPanel auto={auto} here={autoHere} port={port} level={enableLevel} locked={locked}
+          busy={busy === 'auto'} onCommand={autoCommand} />
+
         <div className="space-y-2 rounded-md border border-border/80 p-3">
           <div className="flex flex-wrap items-center gap-1.5 text-xs">
             <span className="w-10">Port</span>
             {[1, 2, 3, 4].map((p) => (
               <Button key={p} size="sm" className="h-8 w-9 px-0 tabular-nums"
                 variant={port === p ? 'default' : 'outline'} aria-pressed={port === p}
-                disabled={!!busy} onClick={() => setPort(p)}>
+                disabled={!!busy || autoOn} onClick={() => setPort(p)}>
                 {p}
               </Button>
             ))}
           </div>
           <div className="flex flex-wrap items-center gap-1.5 text-xs">
             <span className="w-10">Stufe</span>
-            {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((s) => (
-              <Button key={s} size="sm" className="h-8 w-9 px-0 tabular-nums"
-                variant={current === s ? 'default' : 'outline'} aria-pressed={current === s}
-                disabled={locked} onClick={() => test('set', s)}>
-                {pending === s ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : s}
-              </Button>
-            ))}
+            {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((s) => {
+              // automation on: the button chooses the level (the data-service applies it safely)
+              const selected = autoHere ? auto.level === s : current === s
+              return (
+                <Button key={s} size="sm" className="h-8 w-9 px-0 tabular-nums"
+                  variant={selected ? 'default' : 'outline'} aria-pressed={selected}
+                  disabled={locked || (autoOn && (!autoHere || s === 0))}
+                  onClick={() => (autoHere ? autoCommand({ action: 'level', level: s }) : test('set', s))}>
+                  {pending === s ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : s}
+                </Button>
+              )
+            })}
           </div>
           {own.length === 0 && (
             <p className="text-xs text-muted-foreground">Erst eine Sicherung erstellen, dann sind die Buttons frei.</p>
@@ -338,6 +438,34 @@ function TestSession({ session, onChanged }) {
           </Button>
         </>
       )}
+      {msg && <span className="text-destructive">{msg}</span>}
+    </div>
+  )
+}
+
+/** Live: another environment uses the AC Infinity session; Live takes it back after 5 min or now. */
+function LiveTakeover({ until, onDone }) {
+  const [busy, setBusy] = useState(false)
+  const [msg, setMsg] = useState(null)
+  const take = async () => {
+    setBusy(true)
+    setMsg(null)
+    try {
+      await api.post('/api/fans/session/', { action: 'takeover' })
+      onDone()
+    } catch (err) {
+      setMsg(errText(err, 'Übernehmen fehlgeschlagen.'))
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <div className="flex flex-wrap items-center gap-2 rounded-md border border-amber-500/60 bg-amber-500/10 p-3 text-xs">
+      <span>Die AC-Infinity-Anmeldung nutzt gerade eine andere Umgebung. Live übernimmt um {when(until)}.</span>
+      <Button size="sm" disabled={busy} onClick={take}>
+        {busy && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
+        Live jetzt übernehmen
+      </Button>
       {msg && <span className="text-destructive">{msg}</span>}
     </div>
   )
@@ -464,8 +592,12 @@ export default function FansPage() {
       {data?.configured && data.devices.length === 0 && !(data.session?.test && !data.session.active) && (
         <p className="text-sm text-muted-foreground">Keine Controller im Konto gefunden.</p>
       )}
+      {data?.session && !data.session.test && data.session.paused_until && (
+        <LiveTakeover until={data.session.paused_until} onDone={load} />
+      )}
       {data?.devices.map((dev) => (
-        <Controller key={dev.dev_id} dev={dev} backups={data.backups || []} onReload={load} />
+        <Controller key={dev.dev_id} dev={dev} backups={data.backups || []} automation={data.automation}
+          onReload={load} />
       ))}
     </div>
   )

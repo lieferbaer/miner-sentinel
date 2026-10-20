@@ -744,3 +744,19 @@ class CalibrationPoint(models.Model):
         db_table = 'calibration_points'
         ordering = ['mode_key', 'seq', 'recorded_at']
         indexes = [models.Index(fields=['device', 'kind', 'mode_key'])]
+
+
+class FanAutomation(models.Model):
+    """Temperatur-Automatik (A15 + AC Infinity fan), executed by data-service/fan_automation.py.
+    The backend writes the settings (enabled, controller/port, chosen level); the data-service applies
+    them (lowering the fan only after lowering the clock) and writes only `state`."""
+    device = models.OneToOneField(Device, on_delete=models.CASCADE, related_name='fan_automation')
+    enabled = models.BooleanField(default=False)
+    ac_dev_id = models.CharField(max_length=40, blank=True, default='')
+    ac_port = models.IntegerField(default=1)
+    level = models.IntegerField(default=5)          # chosen fan level: the fan runs at it, never below
+    state = models.JSONField(default=dict, blank=True)
+    updated_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        db_table = 'fan_automation'

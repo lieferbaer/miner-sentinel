@@ -19,6 +19,7 @@ def acdir(tmp_path, monkeypatch):
     monkeypatch.setattr(ac, 'CRED_FILE', str(tmp_path / 'credentials'))
     monkeypatch.setattr(ac, 'TOKEN_FILE', str(tmp_path / 'token'))
     monkeypatch.setattr(ac, 'SESSION_FILE', str(tmp_path / 'test_session'))
+    monkeypatch.setattr(ac, 'PAUSE_FILE', str(tmp_path / 'relogin_after'))
     monkeypatch.setattr(ac, 'DATA_DIR', str(tmp_path))
     (tmp_path / 'credentials').write_text('AC_EMAIL=test@example.com\nAC_PASSWORD=geheim\n')
     return tmp_path
@@ -85,10 +86,28 @@ def test_live_took_over(client, acdir, server, test_env):
     assert server['logins'] == 1          # the test environment does not take the session back
 
 
-def test_live_unchanged_logs_in_again(client, acdir, server):
+def test_live_takes_session_back_after_5_minutes(client, acdir, server, monkeypatch):
     (acdir / 'token').write_text('old')
     server['dead'].add('old')              # the test environment logged in meanwhile
+    with pytest.raises(ac.SessionTaken):
+        ac.devices()
+    with pytest.raises(ac.SessionTaken):
+        ac.devices()                       # still within the pause: no login
+    assert server['logins'] == 0
+    assert client.get('/api/fans/session/').data['paused_until']
+    start = time.time()
+    monkeypatch.setattr(ac.time, 'time', lambda: start + ac.RELOGIN_PAUSE_S + 1)
     ac.devices()
-    assert server['logins'] == 1          # Live: re-login on code 10003 as before
+    assert server['logins'] == 1          # Live logs in again after the pause
     res = client.post('/api/fans/session/', {'action': 'activate'}, format='json')
     assert res.status_code == 502 and 'Test-Umgebung' in res.data['error']
+
+
+def test_live_takeover_at_once(client, acdir, server):
+    (acdir / 'token').write_text('old')
+    server['dead'].add('old')
+    with pytest.raises(ac.SessionTaken):
+        ac.devices()
+    res = client.post('/api/fans/session/', {'action': 'takeover'}, format='json')
+    assert res.status_code == 200 and res.data['paused_until'] is None
+    assert server['logins'] == 1
