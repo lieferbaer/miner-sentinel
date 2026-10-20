@@ -214,9 +214,16 @@ def step(row, now, ac):
             lowering = False
         if not lowering:
             st.pop('lower_since', None)
+        # a manual clock (allowed while a run is paused) has priority: no clock changes then
+        throttled = bool((((row['connection_config'] or {}).get('throttle') or {}).get('active')))
+        st['throttled'] = throttled
+        if lowering and throttled and _age(st.get('lower_since'), now) >= WAIT_S:
+            st['base'] = chosen
+            lowering = False
+            st.pop('lower_since', None)
         if t is not None:
             st['boost'] = _boost(st, t_fast)
-            if stock:
+            if stock and not throttled:
                 stock_avg = st['stock_mhz']
                 # the clock the miner runs now (also a manual clock from before the automation)
                 cur = sum(m['points']) / len(m['points']) if m['points'] else stock_avg

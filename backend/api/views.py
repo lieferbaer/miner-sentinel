@@ -222,6 +222,7 @@ class DeviceViewSet(viewsets.ModelViewSet):
                  ('2/L1', 'Power Mode 01'), ('2/L0', 'Power Mode 00'),
                  ('1/-', 'High Performance')]
     CAL_ACTIVE = ('running', 'paused', 'cancelling', 'finishing')
+    CAL_RUNNING = ('running', 'cancelling', 'finishing')      # paused: throttling is allowed
 
     @staticmethod
     def _cal_point(p):
@@ -233,7 +234,8 @@ class DeviceViewSet(viewsets.ModelViewSet):
                 'seq': p.seq, 'set_mhz': p.set_mhz, 'set_points': p.set_points, 'miner_mhz': p.miner_mhz,
                 'miner_points': p.miner_points, 'hashrate_ths': p.hashrate_ths, 'power_w': p.power_w,
                 'j_th': p.j_th, 'dh_pct': p.dh_pct, 'chip_temp_c': p.chip_temp_c, 'recorded_at': p.recorded_at,
-                'fan_level': data.get('fan_level'), 'fields': fields}
+                'fan_level': data.get('fan_level'), 'power_spread_pct': data.get('power_spread_pct'),
+                'fields': fields}
 
     def _cal_run(self, run):
         labels = dict(self.CAL_MODES)
@@ -311,7 +313,7 @@ class DeviceViewSet(viewsets.ModelViewSet):
                 if data.get('mode') not in keys:
                     return Response({'error': 'Unbekannter Modus.'}, status=status.HTTP_400_BAD_REQUEST)
                 modes = [data.get('mode')]
-            failed = self._cal_lift_throttle(device)
+            failed = self._cal_fan_automation_on(device) or self._cal_lift_throttle(device)
             if failed:
                 return failed
             run = CalibrationRun.objects.create(device=device, kind=action_name[6:], modes=modes, status='running',
@@ -319,6 +321,10 @@ class DeviceViewSet(viewsets.ModelViewSet):
         elif action_name == 'pause' and run and run.status == 'running':
             run.status, run.pause_reason, run.message = 'paused', 'user', 'Pausiert.'
         elif action_name == 'resume' and run and run.status == 'paused':
+            # first the throttle set during the pause is lifted, then the last point is measured again
+            failed = self._cal_fan_automation_on(device) or self._cal_lift_throttle(device)
+            if failed:
+                return failed
             st = dict(run.state or {})
             st['resume'] = True
             run.status, run.pause_reason, run.state = 'running', '', st
@@ -330,6 +336,18 @@ class DeviceViewSet(viewsets.ModelViewSet):
         run.updated_at = now
         run.save()
         return Response(self._cal_run(run))
+
+    @staticmethod
+    def _cal_fan_automation_on(device):
+        """A run needs the Temperatur-Automatik (the fan holds 80 degC): switched on here if it is off."""
+        auto = FanAutomation.objects.filter(device=device).first()
+        if not auto or not auto.ac_dev_id:
+            return Response({'error': 'Erst im Menü „Lüfter“ den Port wählen und die Temperatur-Automatik '
+                                      'einmal einschalten.'}, status=status.HTTP_409_CONFLICT)
+        if not auto.enabled:
+            auto.enabled, auto.updated_at = True, timezone.now()
+            auto.save(update_fields=['enabled', 'updated_at'])
+        return None
 
     def _cal_lift_throttle(self, device):
         """A running throttle is lifted before a measurement starts (the run lets the firmware set the clocks)."""
@@ -549,6 +567,7 @@ class DeviceViewSet(viewsets.ModelViewSet):
         return {
             'supported': True,
             'automation_active': FanAutomation.objects.filter(device=device, enabled=True).exists(),
+            'calibration_paused': CalibrationRun.objects.filter(device=device, status='paused').exists(),
             'min_mhz': round(stock_avg * self.THROTTLE_FLOOR) if stock_avg else None,
             'max_mhz': round(stock_avg) if stock_avg else None,
             'calibration_active': CalibrationRun.objects.filter(device=device, status__in=self.CAL_ACTIVE).exists(),
@@ -619,9 +638,10 @@ class DeviceViewSet(viewsets.ModelViewSet):
             if not seen or not seen['supported']:
                 return Response({'supported': False})
             return Response(self._throttle_payload(device, seen))
-        if CalibrationRun.objects.filter(device=device, status__in=self.CAL_ACTIVE).exists():
+        if CalibrationRun.objects.filter(device=device, status__in=self.CAL_RUNNING).exists():
             return Response({'error': 'Takt-Messung läuft – Drosseln ist gesperrt.'}, status=status.HTTP_409_CONFLICT)
-        if FanAutomation.objects.filter(device=device, enabled=True).exists():
+        paused = CalibrationRun.objects.filter(device=device, status='paused').exists()
+        if not paused and FanAutomation.objects.filter(device=device, enabled=True).exists():
             return Response({'error': 'Die Temperatur-Automatik steuert den Takt (Menü „Lüfter“).'},
                             status=status.HTTP_409_CONFLICT)
         try:

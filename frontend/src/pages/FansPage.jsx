@@ -96,6 +96,9 @@ function AutomationPanel({ auto, here, port, level, locked, onCommand, busy }) {
       </div>
       {!here && <p className="text-amber-600">Steuert Port {auto.port} dieses Controllers.</p>}
       <p>Status: {PHASE[st.phase] || '—'}</p>
+      {st.throttled && st.phase !== 'messung' && (
+        <p className="text-amber-600">Drosselung gesetzt (Messung pausiert): kein Takt-Eingriff, nur Schutz über den Lüfter.</p>
+      )}
       <p>
         Heißester Chip (60 s): <span className="font-semibold">{fmt(st.t, 1, ' °C')}</span> · Ziel 80–84 °C
       </p>

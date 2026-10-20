@@ -37,7 +37,8 @@ FLOOR_SHARE = 0.15         # lowest clock: 15 % of the stock clock
 MAX_MEASUREMENTS = 2       # clean measurements per mode in a max run
 SWITCH_TIMEOUT = 300       # s to wait for the miner to report the new mode
 STABLE_S = 180             # a measurement counts only if the power was stable this long ...
-STABLE_BAND = 0.01         # ... within +-1 % (steady state, not warm-up)
+STABLE_BAND = 0.03         # ... within +-3 % (user decision 21.10.: the fan holds 80 degC in steps during a run;
+                           # the real spread is stored with every point, maybe back to +-2 % later)
 CLOCK_STABLE_S = 120       # stock clocks of a mode are taken once they stayed unchanged this long
 MAX_WAIT = 300             # max run: each measurement waits at least this long after the mode switch
                            # or after the previous measurement
@@ -205,10 +206,11 @@ def avg(points):
     return sum(points) / len(points) if points else None
 
 
-def _save_point(conn, run, m, kind, key, seq, set_points):
+def _save_point(conn, run, m, kind, key, seq, set_points, spread=None):
     speed = m['ghsspd'] / 1000.0
     conf = {k: v for k, v in (m['conf'] or {}).items() if not k.startswith('passwd')}
-    data = {'fields': m['fields'], 'summary': m['summary'], 'web': conf, 'estats_raw': m['estats']}
+    data = {'fields': m['fields'], 'summary': m['summary'], 'web': conf, 'estats_raw': m['estats'],
+            'power_spread_pct': spread}
     with conn.cursor() as cur:
         # AC Infinity fan level (Temperatur-Automatik): last read level, else the last set one
         cur.execute("SELECT COALESCE(state->>'fan_read', state->>'fan_set') FROM fan_automation "
@@ -244,7 +246,8 @@ def _power_stable(st, power, now):
     window = [h[1] for h in hist if (now - _parse(h[0])).total_seconds() <= STABLE_S]
     covered = (now - _parse(hist[0][0])).total_seconds() >= STABLE_S
     mean = sum(window) / len(window)
-    # every reading within +-STABLE_BAND of the mean (before: max-min <= 1 %, i.e. only +-0.5 %)
+    # largest deviation from the mean in % (stored with the point); stable: every reading within +-STABLE_BAND
+    st['pw_spread'] = round(max(abs(x - mean) for x in window) / mean * 100, 2) if mean else None
     return covered and max(window) <= mean * (1 + STABLE_BAND) and min(window) >= mean * (1 - STABLE_BAND)
 
 
@@ -297,6 +300,10 @@ def step_run(conn, run):
             run['step_index'] = max(int(st.get('saved_steps', 0)) - 1, 0)
         else:
             st['count'] = 0
+            # during the pause a throttle or the Temperatur-Automatik may have set clocks: switch away and
+            # back once, so the firmware applies its own clocks again before measuring
+            if run['mode_index'] < len(run['modes']):
+                st['applied'] = [k for k in st.get('applied') or [] if k != run['modes'][run['mode_index']]]
             with conn.cursor() as cur:
                 cur.execute("DELETE FROM calibration_points WHERE run_id = %s AND mode_key = %s",
                             (run['id'], run['modes'][run['mode_index']]))
@@ -413,13 +420,14 @@ def step_run(conn, run):
             wait = MAX_WAIT if run['kind'] == 'max' else CLEAN_AFTER
             if fresh and st['stable'] and (now - changed).total_seconds() >= wait:
                 if run['kind'] == 'step':
-                    _save_point(conn, run, m, 'step', target, run['step_index'], st.get('set_points'))
+                    _save_point(conn, run, m, 'step', target, run['step_index'], st.get('set_points'),
+                                st.get('pw_spread'))
                     run['step_index'] += 1
                     st['saved_steps'] = run['step_index']
                     st['phase'] = 'set_clock'
                 else:
                     count = int(st.get('count', 0))
-                    _save_point(conn, run, m, 'max', target, count, m['points'])
+                    _save_point(conn, run, m, 'max', target, count, m['points'], st.get('pw_spread'))
                     count += 1
                     st['count'] = count
                     run['message'] = '%s: Messung %d von %d gespeichert.' % (mode_label(target), count,

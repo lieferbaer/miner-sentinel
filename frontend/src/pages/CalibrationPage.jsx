@@ -129,6 +129,11 @@ const STANDARD = [
   { key: 'dh_pct', label: 'Fehlerquote', get: (p) => fmt(p.dh_pct, 2) + ' %' },
   { key: 'chip_temp_c', label: 'Chip-Temp.', get: (p) => fmt(p.chip_temp_c, 0) + ' °C' },
   { key: 'fan_level', label: 'Lüfter (AC)', get: (p) => (p.fan_level == null ? '—' : 'Stufe ' + p.fan_level) },
+  {
+    key: 'power_spread_pct',
+    label: 'Schwankung',
+    get: (p) => (p.power_spread_pct == null ? '—' : '±' + fmt(p.power_spread_pct, 1) + ' %'),
+  },
 ]
 const BASE_EXTRA = [
   { key: 'miner_mhz', label: 'Takt laut Miner', get: (p) => fmt(p.miner_mhz, 1) + ' MHz' },
@@ -270,7 +275,7 @@ function RunStatus({ run, onCommand, busy, timing }) {
           {run.phase === 'measure'
             ? run.stable
               ? 'Leistung stabil, wartet auf eine saubere Messung (der Miner meldet etwa alle 130 s)'
-              : 'wartet, bis die Leistung 3 Minuten stabil ist (±1 %)'
+              : 'wartet, bis die Leistung 3 Minuten stabil ist (±3 %)'
             : PHASE_TEXT[run.phase] || run.phase}
         </p>
       )}

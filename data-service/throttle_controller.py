@@ -302,10 +302,12 @@ def control_device(conn, dev):
     rebooted = (last.get('elapsed') is not None and m['elapsed'] is not None
                 and m['elapsed'] < last['elapsed'])
     mode_changed = last.get('mode_key') not in (None, mkey)
-    observe = bool(dev.get('calibrating'))   # Takt-Messung läuft: nur lesen, nichts regeln
+    observe = bool(dev.get('calibrating'))   # Takt-Messung / Temperatur-Automatik: nur lesen, nichts regeln
+    # a manual clock (A15) may be set while a run is paused: it is watched and measured even then
+    manual = bool(active) and active.get('clock_mhz') is not None
 
     # 1) was an active throttle lifted on the miner?
-    if active and not observe:
+    if active and (not observe or manual):
         applied = active['applied_points']
         pending_until = _parse(active.get('pending_until'))
         pending = pending_until is not None and now < pending_until
@@ -324,12 +326,12 @@ def control_device(conn, dev):
         if event:
             st['active'] = None
             st['last_event'] = {'type': event[0], 'detail': event[1], 'at': _iso(now),
-                                'target_ths': active.get('target_ths')}
+                                'target_ths': active.get('target_ths'), 'clock_mhz': active.get('clock_mhz')}
             active = None
             logger.info('Throttle on device %s lifted: %s', dev['id'], event[1])
 
     # 2) unthrottled: the clocks the miner runs are the stock clocks of this mode; measure full power
-    if observe:
+    if observe and not (active and active.get('clock_mhz') is not None):
         st['profile'] = mkey
     elif not active:
         prof = profiles.setdefault(mkey, {'mode_key': mkey})

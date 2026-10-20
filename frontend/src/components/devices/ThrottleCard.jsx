@@ -304,10 +304,15 @@ export default function ThrottleCard({ deviceId, throttle, ip }) {
       </CardHeader>
       <CardContent className="space-y-2 pt-0">
         {state.stale && <p className="text-xs text-destructive">{staleText(state)}</p>}
-        {state.calibration_active && (
+        {state.calibration_active && !state.calibration_paused && (
           <p className="text-xs text-amber-600">Takt-Messung läuft – Drosseln ist gesperrt (Menü „Takt-Tabellen“).</p>
         )}
-        {state.automation_active && (
+        {state.calibration_paused && (
+          <p className="text-xs text-amber-600">
+            Takt-Messung pausiert – Drosseln ist möglich. Beim Fortsetzen wird die Drosselung aufgehoben.
+          </p>
+        )}
+        {state.automation_active && !state.calibration_paused && (
           <p className="text-xs text-amber-600">Die Temperatur-Automatik steuert den Takt (Menü „Lüfter“).</p>
         )}
         {lifted && !active && (
@@ -333,7 +338,8 @@ export default function ThrottleCard({ deviceId, throttle, ip }) {
           />
           <span className="text-sm text-muted-foreground">{unit}</span>
           <Button type="submit" size="sm"
-            disabled={busy || !inRange || !max || state.calibration_active || state.automation_active}>
+            disabled={busy || !inRange || !max ||
+              ((state.calibration_active || state.automation_active) && !state.calibration_paused)}>
             {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Setzen'}
           </Button>
           <Button

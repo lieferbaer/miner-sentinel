@@ -156,3 +156,14 @@ def test_ac_error_keeps_clock_regulation(miner):
     for i in range(1, 4):
         st = fa.step(row(st), T0 + timedelta(seconds=15 * i), BrokenAC())
     assert miner.sets and 'Cloud' in st['ac_error']
+
+
+def test_manual_throttle_has_priority(miner):
+    miner.tmax = 87.0
+    ac = FakeAC(level=5)
+    st = {}
+    for i in range(12):
+        r = row(st)
+        r['connection_config']['throttle']['active'] = {'clock_mhz': 300.0}
+        st = fa.step(r, T0 + timedelta(seconds=15 * i), ac)
+    assert miner.sets == [] and st['throttled'] is True

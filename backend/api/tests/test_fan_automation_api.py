@@ -61,3 +61,37 @@ def test_manual_buttons_and_clock_locked(client, a15, backup):
     assert res.status_code == 409
     res = client.post('/api/devices/%d/throttle/' % a15.id, {'clock_mhz': 300}, format='json')
     assert res.status_code == 409
+
+
+def test_run_start_needs_fan_and_switches_automation_on(client, a15, backup):
+    res = client.post('/api/devices/%d/calibration/' % a15.id, {'action': 'start_step', 'mode': '2/L4'},
+                      format='json')
+    assert res.status_code == 409                               # fan never set up
+    FanAutomation.objects.create(device=a15, ac_dev_id='dev1', ac_port=1, level=5, enabled=False)
+    res = client.post('/api/devices/%d/calibration/' % a15.id, {'action': 'start_step', 'mode': '2/L4'},
+                      format='json')
+    assert res.status_code == 200
+    assert FanAutomation.objects.get(device=a15).enabled is True
+
+
+def test_throttle_allowed_while_paused_and_lifted_on_resume(client, a15, backup):
+    from api.models import CalibrationRun
+    from api.views import DeviceViewSet
+    a15.connection_config['throttle']['active'] = None          # no throttle before the run
+    a15.save()
+    FanAutomation.objects.create(device=a15, ac_dev_id='dev1', ac_port=1, level=5, enabled=True)
+    run = CalibrationRun.objects.create(device=a15, kind='step', modes=['2/L4'], status='running', state={})
+    live = {'workmode': 4, 'supported': True, 'points': [360, 360, 360], 'mode_key': '2/L4',
+            'mode_label': 'Power Mode 04', 'ghsspd': 150000.0, 'mhs5': None}
+    url = '/api/devices/%d/throttle/' % a15.id
+    with patch.object(DeviceViewSet, '_throttle_live', lambda self, d: live), \
+            patch('api.views._cgminer_command', return_value='set OK'):
+        assert client.post(url, {'clock_mhz': 300}, format='json').status_code == 409     # running
+        run.status = 'paused'
+        run.save()
+        res = client.post(url, {'clock_mhz': 300}, format='json')
+        assert res.status_code == 200, res.data
+        assert res.data['active']['clock_mhz'] == 300.0
+    res = client.post('/api/devices/%d/calibration/' % a15.id, {'action': 'resume'}, format='json')
+    assert res.status_code == 200
+    assert Device.objects.get(pk=a15.pk).connection_config['throttle']['active'] is None
