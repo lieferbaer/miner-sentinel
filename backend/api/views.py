@@ -278,6 +278,7 @@ class DeviceViewSet(viewsets.ModelViewSet):
         step_points = list(CalibrationPoint.objects.filter(run_id=last.run_id, kind='step', mode_key=mode)
                            .order_by('seq')) if last else []
         step_run = CalibrationRun.objects.filter(pk=last.run_id).first() if last else None
+        manual = CalibrationPoint.objects.filter(device=device, kind='manual').order_by('-recorded_at')[:50]
         return Response({
             'device': {'id': device.id, 'name': device.name},
             'modes': [{'key': k, 'label': lbl, 'stock_mhz': (((device.connection_config or {}).get('throttle') or {})
@@ -289,6 +290,7 @@ class DeviceViewSet(viewsets.ModelViewSet):
             'step': [self._cal_point(p) for p in step_points],
             'step_run': {'id': step_run.id, 'created_at': step_run.created_at, 'status': step_run.status}
             if step_run else None,
+            'manual': [self._cal_point(p) for p in manual],
         })
 
     def _calibration_command(self, device, data):
@@ -338,7 +340,8 @@ class DeviceViewSet(viewsets.ModelViewSet):
         # firmware applies its own clocks
         st['active'] = None
         st['last_event'] = {'type': 'calibration', 'detail': 'für die Takt-Messung aufgehoben',
-                            'at': timezone.now().isoformat(), 'target_ths': active.get('target_ths')}
+                            'at': timezone.now().isoformat(), 'target_ths': active.get('target_ths'),
+                            'clock_mhz': active.get('clock_mhz')}
         st['stable_since'] = None
         self._throttle_save(device, st)
         return None
@@ -541,8 +544,11 @@ class DeviceViewSet(viewsets.ModelViewSet):
         max_ths = prof.get('measured_max_ths')
         from django.utils.dateparse import parse_datetime
         seen_at = parse_datetime(live['seen_at']) if live.get('seen_at') else None
+        stock_avg = prof.get('avg_mhz')
         return {
             'supported': True,
+            'min_mhz': round(stock_avg * self.THROTTLE_FLOOR) if stock_avg else None,
+            'max_mhz': round(stock_avg) if stock_avg else None,
             'calibration_active': CalibrationRun.objects.filter(device=device, status__in=self.CAL_ACTIVE).exists(),
             'seen_at': live.get('seen_at'),
             'stale': bool(seen_at and (timezone.now() - seen_at).total_seconds() > 60),
@@ -555,6 +561,8 @@ class DeviceViewSet(viewsets.ModelViewSet):
             'hashrate_ths': round(live['ghsspd'] / 1000.0, 2) if live['ghsspd'] else None,
             'throttled': bool(active),
             'active': {
+                'clock_mhz': active.get('clock_mhz'),
+                'manual_measured_at': active.get('manual_measured_at'),
                 'target_ths': active.get('target_ths'),
                 'status': active.get('status'),
                 'measured_ths': active.get('measured_ths'),
@@ -632,7 +640,24 @@ class DeviceViewSet(viewsets.ModelViewSet):
             target_points = stock
             st['active'] = None
             st['last_event'] = {'type': 'reset', 'detail': 'Drosselung aufgehoben', 'at': now,
-                                'target_ths': active.get('target_ths') if active else None}
+                                'target_ths': active.get('target_ths') if active else None,
+                                'clock_mhz': active.get('clock_mhz') if active else None}
+        elif self._throttle_family(device) == 'a15':
+            # A15: manual clock (MHz); the data-service stores a measured point after 15 min unchanged
+            stock_avg = sum(stock) / len(stock)
+            lo, hi = stock_avg * self.THROTTLE_FLOOR, stock_avg
+            try:
+                clock = float(str(request.data.get('clock_mhz')).replace(',', '.'))
+            except (TypeError, ValueError):
+                return Response({'error': 'Bitte einen Takt in MHz angeben.'}, status=status.HTTP_400_BAD_REQUEST)
+            if not lo <= clock <= hi:
+                return Response({'error': 'Erlaubt sind {:.0f}–{:.0f} MHz.'.format(lo, hi)},
+                                status=status.HTTP_400_BAD_REQUEST)
+            factor = clock / stock_avg
+            target_points = [min(max(int(round(p * factor)), int(p * self.THROTTLE_FLOOR)), p) for p in stock]
+            st['active'] = {'clock_mhz': round(clock, 1), 'profile': pkey, 'applied_points': target_points,
+                            'set_at': now, 'last_change_at': now, 'status': 'manual', 'steps': 0}
+            st['last_event'] = None
         else:
             max_ths = prof.get('measured_max_ths')
             if not max_ths:

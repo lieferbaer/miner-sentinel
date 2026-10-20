@@ -223,6 +223,11 @@ def _save_point(conn, run, m, kind, key, seq, set_points):
              m['dh'], m['tmax'], json.dumps(data), _now()))
 
 
+def save_manual_point(conn, device_id, m, key, set_points):
+    """Measured point of a manual clock (Drosselung A15), shown in the Takt-Tabellen; no commit."""
+    _save_point(conn, {'id': None, 'device_id': device_id}, m, 'manual', key, 0, set_points)
+
+
 def _power_stable(st, power, now):
     """Track the power readings since the last change; True once they stayed within
     STABLE_BAND for at least STABLE_S."""

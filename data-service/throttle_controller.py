@@ -25,6 +25,7 @@ from datetime import datetime, timedelta, timezone
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
+import calibration
 import miner_cache
 
 logger = logging.getLogger(__name__)
@@ -46,6 +47,7 @@ CAL_KEEP = 12                     # measured (clock, TH/s) points kept per mode
 CAL_SPACING = 0.02                # one point per ~2 % of clock; a newer one replaces an older one
 CACHE_MAX_AGE = 15                # s: readings of the collector (every 10 s) are used up to this age,
                                   # except while a throttle is regulated (always read fresh)
+MANUAL_MEASURE_S = 15 * 60        # A15 manual clock: a measured point is stored after 15 min unchanged
 
 A15_LEVEL_LABELS = {4: 'Power Mode 04', 3: 'Power Mode 03', 2: 'Power Mode 02', 1: 'Power Mode 01', 0: 'Power Mode 00'}
 A15_MODES = {1: 'High Performance'}   # WORKMODE 2 = Power Mode with levels 00-04
@@ -250,13 +252,32 @@ def next_clock(points, target, x_now):
     return x1 + (target - y1) * (x2 - x1) / (y2 - y1)
 
 
+def _manual_point(conn, dev, active, m, mkey, now):
+    speed = m['ghsspd_ths']
+    fresh = speed is not None and active.get('last_speed') is not None and abs(speed - active['last_speed']) > 1e-6
+    active['last_speed'] = speed
+    if active.get('manual_measured_at') or active.get('pending_until') or not fresh:
+        return
+    since = (now - (_parse(active.get('last_change_at')) or now)).total_seconds()
+    if since < MANUAL_MEASURE_S:
+        return
+    full = calibration.read_miner(dev['ip_address'], dev['port'])
+    if not full['ghsspd'] or 'Over Hot' in full['status'] or full['mode_key'] != mkey:
+        return
+    calibration.save_manual_point(conn, dev['id'], full, mkey, active['applied_points'])
+    active['manual_measured_at'] = _iso(now)
+    logger.info('Throttle device %s: manual clock %.1f MHz measured', dev['id'], active['clock_mhz'])
+
+
 def control_device(conn, dev):
     cfg = dev['connection_config'] or {}
     st = json.loads(json.dumps(cfg.get('throttle') or {}))
     rev = int(st.get('rev', 0) or 0)
     family = family_of(dev)
-    # regulating a throttle: values as fresh as before; otherwise the collector's readings suffice
-    age = None if st.get('active') and not dev.get('calibrating') else CACHE_MAX_AGE
+    # regulating a throttle: values as fresh as before; otherwise (also A15 manual clock) the
+    # collector's readings suffice
+    regulating = st.get('active') and st['active'].get('clock_mhz') is None and not dev.get('calibrating')
+    age = None if regulating else CACHE_MAX_AGE
     m = read_miner(dev['ip_address'], dev['port'], fresh=age is None)
     if not m['points']:
         return
@@ -329,6 +350,11 @@ def control_device(conn, dev):
             if value:
                 _record_measurement(prof, value, watts, now)
 
+    # 3a) A15 manual clock: nothing is regulated; after MANUAL_MEASURE_S unchanged the next fresh
+    #     GHSspd is stored as a measured point (Takt-Tabellen, kind 'manual'), once per setting
+    elif active.get('clock_mhz') is not None:
+        _manual_point(conn, dev, active, m, mkey, now)
+
     # 3) active: proportional regulation on the miner's own measured speed (GHSspd).
     #    GHSspd refreshes about every 130 s and averages that period, so only a refresh seen at
     #    least CLEAN_AFTER after the last clock change is used (and recorded as a measured point).
@@ -389,6 +415,9 @@ def control_device(conn, dev):
             "'{throttle}', %s::jsonb) WHERE id = %s "
             "AND COALESCE((connection_config->'throttle'->>'rev')::int, 0) = %s",
             (json.dumps(st), dev['id'], rev))
+        if cur.rowcount == 0:
+            conn.rollback()        # the user changed something meanwhile: drop this round (incl. a manual point)
+            return
     conn.commit()
 
 

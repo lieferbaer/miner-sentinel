@@ -367,7 +367,7 @@ export default function CalibrationPage() {
     }
   }
 
-  const allPoints = useMemo(() => [...(data?.max || []), ...(data?.step || [])], [data])
+  const allPoints = useMemo(() => [...(data?.max || []), ...(data?.step || []), ...(data?.manual || [])], [data])
   const timing = useMemo(() => {
     const r = data?.run
     if (!r || !r.active) return null
@@ -533,6 +533,22 @@ export default function CalibrationPage() {
         </CardHeader>
         <CardContent className="pt-0">
           <PointTable points={data.step} columns={cols.columns} />
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader className="pb-2">
+          <CardTitle className="text-base font-semibold">Manuell</CardTitle>
+          <CardDescription className="text-xs">
+            Messpunkte der Drosselung: gespeichert nach 15 Minuten mit unverändertem Takt (neueste zuerst).
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="pt-0">
+          <PointTable
+            points={data.manual || []}
+            columns={cols.columns}
+            lead={{ label: 'Zeit · Modus', get: (p) => when(p.recorded_at) + ' · ' + p.mode_label }}
+          />
         </CardContent>
       </Card>
     </div>
