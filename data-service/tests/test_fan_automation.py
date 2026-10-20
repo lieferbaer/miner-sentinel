@@ -32,7 +32,7 @@ class Miner:
         self.points = list(points or STOCK)
         self.sets = []
 
-    def read(self, ip, port):
+    def read(self, ip, port, fresh=False):
         return {'fields': {'TMax': str(self.tmax)}, 'points': self.points, 'mode_key': '2/L4',
                 'status': 'Work: In Work', 'elapsed': 1000}
 
@@ -167,3 +167,12 @@ def test_manual_throttle_has_priority(miner):
         r['connection_config']['throttle']['active'] = {'clock_mhz': 300.0}
         st = fa.step(r, T0 + timedelta(seconds=15 * i), ac)
     assert miner.sets == [] and st['throttled'] is True
+
+
+def test_protection_uses_latest_reading(miner):
+    ac = FakeAC(level=5)
+    miner.tmax = 82.0
+    st, now = run({}, miner, ac, 60)
+    miner.tmax = 89.0                                # one hot reading is enough for the protection
+    st = fa.step(row(st), now, ac)
+    assert st['t_now'] == 89.0 and st['boost'] == 1 and ac.writes[-1] == 6

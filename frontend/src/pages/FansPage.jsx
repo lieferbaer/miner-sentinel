@@ -53,7 +53,7 @@ const PHASE = {
   aus: 'aus',
 }
 
-/** Temperatur-Automatik (A15): status and on/off; refreshed every 15 s without AC Infinity calls. */
+/** Temperatur-Automatik (A15): status and on/off; refreshed every 10 s without AC Infinity calls. */
 function useAutomation(initial) {
   const [auto, setAuto] = useState(initial)
   useEffect(() => setAuto(initial), [initial])
@@ -61,7 +61,7 @@ function useAutomation(initial) {
     if (!auto?.enabled) return undefined
     const timer = setInterval(() => {
       api.get('/api/fans/automation/').then(({ data }) => setAuto(data)).catch(() => {})
-    }, 15000)
+    }, 10000)
     return () => clearInterval(timer)
   }, [auto?.enabled])
   return [auto, setAuto]
@@ -100,7 +100,9 @@ function AutomationPanel({ auto, here, port, level, locked, onCommand, busy }) {
         <p className="text-amber-600">Drosselung gesetzt (Messung pausiert): kein Takt-Eingriff, nur Schutz über den Lüfter.</p>
       )}
       <p>
-        Heißester Chip (60 s): <span className="font-semibold">{fmt(st.t, 1, ' °C')}</span> · Ziel 80–84 °C
+        Heißester Chip jetzt: <span className="font-semibold">{fmt(auto.now?.tmax, 0, ' °C')}</span>
+        {auto.now?.boards?.length > 1 ? ' (' + auto.now.boards.map((b) => (b == null ? '—' : b)).join(' / ') + ')' : ''}
+        {' '}· Regelwert (30 s): {fmt(st.t, 1, ' °C')} · Ziel 80–84 °C
       </p>
       <p>
         Takt: {fmt(st.clock_now, 0, ' MHz')} von {fmt(st.stock_mhz, 0, ' MHz')} (Standardtakt)

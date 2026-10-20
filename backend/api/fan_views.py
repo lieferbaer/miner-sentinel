@@ -9,7 +9,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from . import acinfinity as ac
-from .models import Device, FanAutomation
+from .models import Device, DeviceSystemInfo, FanAutomation
 
 READ_BACK_S = 5       # user choice (was 10); measured: the controller reports a new speed only after > 5 s
 
@@ -36,7 +36,12 @@ def automation_payload():
     if not auto:
         return None
     st = auto.state or {}
+    # the same value as the overview (latest MTmax of the collector, every 10 s)
+    row = DeviceSystemInfo.objects.filter(device=dev).order_by('-recorded_at').values('details', 'recorded_at').first()
+    boards = ((row or {}).get('details') or {}).get('chip_temp_boards') or []
+    valid = [b for b in boards if isinstance(b, (int, float)) and -50 < b < 200]
     return {
+        'now': {'tmax': max(valid) if valid else None, 'boards': boards, 'at': (row or {}).get('recorded_at')},
         'device': {'id': dev.id, 'name': dev.name}, 'enabled': auto.enabled, 'dev_id': auto.ac_dev_id,
         'port': auto.ac_port, 'level': auto.level,
         'state': {k: st.get(k) for k in ('t', 'phase', 'base', 'boost', 'fan_set', 'fan_read', 'fan_read_at',

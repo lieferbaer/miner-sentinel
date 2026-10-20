@@ -661,8 +661,11 @@ class DeviceViewSet(viewsets.ModelViewSet):
         stock = prof['points']
         now = timezone.now().isoformat()
 
+        # Temperatur-Automatik on (possible while a run is paused): lifting the throttle sends no clock,
+        # the automation continues from the current clock in its small steps (no jump to the stock clock)
+        handover = bool(request.data.get('reset')) and FanAutomation.objects.filter(device=device, enabled=True).exists()
         if request.data.get('reset'):
-            target_points = stock
+            target_points = None if handover else stock
             st['active'] = None
             st['last_event'] = {'type': 'reset', 'detail': 'Drosselung aufgehoben', 'at': now,
                                 'target_ths': active.get('target_ths') if active else None,
@@ -704,15 +707,17 @@ class DeviceViewSet(viewsets.ModelViewSet):
                             'set_at': now, 'last_change_at': now, 'status': 'adjusting', 'steps': 0}
             st['last_event'] = None
 
-        command = json.dumps({'command': 'ascset',
-                              'parameter': '0,frequency,{}-0-0'.format(':'.join(str(v) for v in target_points))})
-        try:
-            reply = _cgminer_command(device.ip_address, device.port, command, timeout=8)
-        except OSError as exc:
-            return Response({'error': 'Miner nicht erreichbar: {}'.format(exc)}, status=status.HTTP_502_BAD_GATEWAY)
-        if 'set OK' not in reply:
-            return Response({'error': 'Der Miner hat den Wert abgelehnt.', 'device_reply': reply},
-                            status=status.HTTP_502_BAD_GATEWAY)
+        if target_points is not None:
+            command = json.dumps({'command': 'ascset',
+                                  'parameter': '0,frequency,{}-0-0'.format(':'.join(str(v) for v in target_points))})
+            try:
+                reply = _cgminer_command(device.ip_address, device.port, command, timeout=8)
+            except OSError as exc:
+                return Response({'error': 'Miner nicht erreichbar: {}'.format(exc)},
+                                status=status.HTTP_502_BAD_GATEWAY)
+            if 'set OK' not in reply:
+                return Response({'error': 'Der Miner hat den Wert abgelehnt.', 'device_reply': reply},
+                                status=status.HTTP_502_BAD_GATEWAY)
         if st.get('active'):
             # the firmware ramps the clock over several seconds; the controller adopts
             # the settled values once this window has passed

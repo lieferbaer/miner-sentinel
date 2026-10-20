@@ -95,3 +95,20 @@ def test_throttle_allowed_while_paused_and_lifted_on_resume(client, a15, backup)
     res = client.post('/api/devices/%d/calibration/' % a15.id, {'action': 'resume'}, format='json')
     assert res.status_code == 200
     assert Device.objects.get(pk=a15.pk).connection_config['throttle']['active'] is None
+
+
+def test_lift_throttle_with_automation_sends_no_clock(client, a15, backup):
+    from api.models import CalibrationRun
+    from api.views import DeviceViewSet
+    a15.connection_config['throttle']['active'] = {'clock_mhz': 300.0, 'profile': '2/L4',
+                                                   'applied_points': [300, 300, 300]}
+    a15.save()
+    FanAutomation.objects.create(device=a15, ac_dev_id='dev1', ac_port=1, level=5, enabled=True)
+    CalibrationRun.objects.create(device=a15, kind='step', modes=['2/L4'], status='paused', state={})
+    live = {'workmode': 4, 'supported': True, 'points': [300, 300, 300], 'mode_key': '2/L4',
+            'mode_label': 'Power Mode 04', 'ghsspd': 150000.0, 'mhs5': None}
+    with patch.object(DeviceViewSet, '_throttle_live', lambda self, d: live), \
+            patch('api.views._cgminer_command', return_value='set OK') as cmd:
+        res = client.post('/api/devices/%d/throttle/' % a15.id, {'reset': True}, format='json')
+    assert res.status_code == 200 and not cmd.called           # the automation continues from 300 MHz
+    assert Device.objects.get(pk=a15.pk).connection_config['throttle']['active'] is None

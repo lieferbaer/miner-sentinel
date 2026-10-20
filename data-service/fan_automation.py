@@ -36,7 +36,7 @@ STEP_MHZ = 10
 C_PER_STEP = 1.5             # measured (run 7, 320 -> 280 MHz): ~1.5 degC per 10 MHz
 MAX_STEP_MHZ = 30
 FLOOR_SHARE = 0.15
-TEMP_WINDOW_S = 60
+TEMP_WINDOW_S = 60           # readings kept; the band uses the median of the last 30 s, protection the latest
 FAN_READ_S = 60
 FAN_WRITE_GAP_S = 20
 FAN_MIN, FAN_MAX = 1, 10
@@ -130,7 +130,7 @@ def step(row, now, ac):
         st = {'log': st.get('log') or []}
         _note(st, now, 'Automatik ein (Stufe %d).' % row['level'])
 
-    m = calibration.read_miner(ip, port)
+    m = calibration.read_miner(ip, port, fresh=True)     # always the miner's current values
     st['seen_at'] = _iso(now)
     rebooted = st.get('elapsed') is not None and m['elapsed'] is not None and m['elapsed'] < st['elapsed']
     if st.get('mode_key') not in (None, m['mode_key']) or rebooted:
@@ -146,10 +146,13 @@ def step(row, now, ac):
     if tmax is not None and -50 < tmax < 200 and 'Over Hot' not in m['status']:
         temps.append([_iso(now), tmax])
     st['temps'] = temps
-    t = statistics.median(x[1] for x in temps) if len(temps) >= 3 else None
-    # protection reacts faster: median of the last 3 readings (~30 s)
-    t_fast = statistics.median(x[1] for x in temps[-3:]) if len(temps) >= 3 else None
-    st['t'] = t
+    recent = [x[1] for x in temps if _age(x[0], now) <= 30]
+    # band 80-84: median of the last 30 s; protection (88/90): the latest reading
+    t = statistics.median(recent) if len(recent) >= 2 else None
+    t_fast = temps[-1][1] if temps and _age(temps[-1][0], now) < 1 else None
+    if t is not None and t_fast is None:
+        t_fast = t
+    st['t'], st['t_now'] = t, t_fast
 
     # --- fan: read every FAN_READ_S ---
     dev_id, fport = row['ac_dev_id'], row['ac_port']
