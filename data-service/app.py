@@ -27,7 +27,7 @@ from collectors.publicpool_collector import collect_publicpool_data
 import miner_cache
 from throttle_controller import run_throttle_controller
 from calibration import run_calibration
-from fan_automation import run_fan_automation
+from fan_automation import RUN_S as FAN_AUTOMATION_S, run_fan_automation
 from decouple import config
 from flask import Flask, jsonify, request
 from notifications.emitter import emit_alert, resolve_open_alerts
@@ -600,7 +600,7 @@ def reschedule_jobs():
     )
     scheduler.add_job(
         func=lambda: run_fan_automation(DATABASE_URL),
-        trigger=IntervalTrigger(seconds=15),
+        trigger=IntervalTrigger(seconds=FAN_AUTOMATION_S),
         id='fan_automation',
         name='Temperatur-Automatik (A15)',
         replace_existing=True,

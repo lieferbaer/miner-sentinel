@@ -1,4 +1,4 @@
-"""Temperatur-Automatik (A15 + AC Infinity fan), every 15 s from the data-service scheduler.
+"""Temperatur-Automatik (A15 + AC Infinity fan), every RUN_S seconds from the data-service scheduler.
 
 Normal operation: the fan runs at the level chosen on the "Lüfter" page (never below it); the A15 clock
 keeps the hottest chip (TMax, median of the last 60 s) between T_LOW and T_HIGH:
@@ -27,6 +27,7 @@ import calibration
 
 logger = logging.getLogger(__name__)
 
+RUN_S = 5                    # temperature read every 5 s (estats only; user decision 21.10.)
 T_LOW, T_HIGH = 80.0, 84.0
 T_PROTECT1, T_PROTECT2 = 88.0, 90.0
 T_CAL, CAL_BAND = 80.0, 1.0
@@ -130,7 +131,7 @@ def step(row, now, ac):
         st = {'log': st.get('log') or []}
         _note(st, now, 'Automatik ein (Stufe %d).' % row['level'])
 
-    m = calibration.read_miner(ip, port, fresh=True)     # always the miner's current values
+    m = calibration.read_miner(ip, port, fresh='estats')    # current temperatures and clocks
     st['seen_at'] = _iso(now)
     rebooted = st.get('elapsed') is not None and m['elapsed'] is not None and m['elapsed'] < st['elapsed']
     if st.get('mode_key') not in (None, m['mode_key']) or rebooted:

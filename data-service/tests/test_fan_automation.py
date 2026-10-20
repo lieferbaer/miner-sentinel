@@ -55,7 +55,7 @@ def row(state=None, level=5, enabled=True, cal=False):
             'connection_config': {'throttle': {'profiles': {'2/L4': {'points': STOCK}}}}}
 
 
-def run(st, miner, ac, seconds, level=5, cal=False, step_s=15, start=T0):
+def run(st, miner, ac, seconds, level=5, cal=False, step_s=fa.RUN_S, start=T0):
     """Run rounds every step_s seconds; returns the state and the time after the last round."""
     now = start
     for _ in range(int(seconds // step_s)):

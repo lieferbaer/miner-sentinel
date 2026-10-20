@@ -169,10 +169,13 @@ def _num(text):
 
 
 def read_miner(ip, port, fresh=False):
-    """fresh: read estats/summary from the miner, not from the collector's readings."""
+    """fresh: read estats/summary from the miner, not from the collector's readings;
+    fresh='estats': only estats (temperatures, clocks), summary from the collector (Temperatur-Automatik)."""
     age = None if fresh else CACHE_MAX_AGE
     estats = miner_cache.fetch(ip, 'estats', age, lambda: _retry(
         'cgminer-API estats', _cmd, ip, port, json.dumps({'command': 'estats'})))
+    if fresh == 'estats':
+        age = CACHE_MAX_AGE
     summ = miner_cache.fetch(ip, 'summary', age, lambda: _retry(
         'cgminer-API summary', _cmd, ip, port, json.dumps({'command': 'summary'}), 6))
     try:

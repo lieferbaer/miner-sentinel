@@ -149,3 +149,12 @@ def test_throttle_reads_fresh_only_while_regulating(monkeypatch):
     assert calls == [] and m['ghsspd_ths'] == 150.0
     throttle_controller.read_miner(IP, 4028, fresh=True)
     assert calls == ['estats', 'summary']
+
+
+def test_calibration_fresh_estats_only(monkeypatch):
+    calls = _count_calibration_requests(monkeypatch)
+    miner_cache.put(IP, 'estats', ESTATS)
+    miner_cache.put(IP, 'summary', SUMMARY)
+    miner_cache.put(IP, 'web', dict(CONF))
+    calibration.read_miner(IP, 4028, fresh='estats')
+    assert calls == ['estats']                   # Temperatur-Automatik every 5 s: one request
