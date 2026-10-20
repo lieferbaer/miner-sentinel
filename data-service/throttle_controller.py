@@ -25,6 +25,8 @@ from datetime import datetime, timedelta, timezone
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
+import miner_cache
+
 logger = logging.getLogger(__name__)
 
 PENDING_SECONDS = 60              # clock ramp after every change
@@ -42,6 +44,8 @@ MEASURE_KEEP = 3                  # stored value = mean of the last 3 valid meas
 MEASURE_OUTLIER = 0.10            # a single measurement >10 % off only counts once confirmed
 CAL_KEEP = 12                     # measured (clock, TH/s) points kept per mode
 CAL_SPACING = 0.02                # one point per ~2 % of clock; a newer one replaces an older one
+CACHE_MAX_AGE = 15                # s: readings of the collector (every 10 s) are used up to this age,
+                                  # except while a throttle is regulated (always read fresh)
 
 A15_LEVEL_LABELS = {4: 'Power Mode 04', 3: 'Power Mode 03', 2: 'Power Mode 02', 1: 'Power Mode 01', 0: 'Power Mode 00'}
 A15_MODES = {1: 'High Performance'}   # WORKMODE 2 = Power Mode with levels 00-04
@@ -67,7 +71,7 @@ def _parse(value):
 
 
 def _cmd(ip, port, payload, timeout=6):
-    with socket.create_connection((ip, port or 4028), timeout) as sock:
+    with miner_cache.lock(ip), socket.create_connection((ip, port or 4028), timeout) as sock:
         sock.sendall(json.dumps(payload).encode())
         chunks = []
         while True:
@@ -78,9 +82,11 @@ def _cmd(ip, port, payload, timeout=6):
     return b''.join(chunks).decode('utf-8', 'ignore').replace('\x00', '')
 
 
-def read_miner(ip, port):
-    est = _cmd(ip, port, {'command': 'estats'}, 8)
-    summ = _cmd(ip, port, {'command': 'summary'}, 6)
+def read_miner(ip, port, fresh=False):
+    """fresh: read estats/summary from the miner, not from the collector's readings."""
+    age = None if fresh else CACHE_MAX_AGE
+    est = miner_cache.fetch(ip, 'estats', age, lambda: _cmd(ip, port, {'command': 'estats'}, 8))
+    summ = miner_cache.fetch(ip, 'summary', age, lambda: _cmd(ip, port, {'command': 'summary'}, 6))
     boards = {}
     for name, values in re.findall(r'\b(SF\d+)\[([0-9 ]+)\]', est):
         if name not in boards and values.split():
@@ -108,7 +114,8 @@ def read_miner(ip, port):
 def _a15_conf(ip):
     """Pool/mode/power-level settings from the A15 web interface (readable without login)."""
     import urllib.request
-    raw = urllib.request.urlopen('http://%s/updatecgconf.cgi' % ip, timeout=5).read().decode('utf-8', 'replace')
+    with miner_cache.lock(ip):
+        raw = urllib.request.urlopen('http://%s/updatecgconf.cgi' % ip, timeout=5).read().decode('utf-8', 'replace')
     match = re.search(r'CGConfCallback\((\{.*?\})\);', raw, re.S)
     return json.loads(match.group(1)) if match else None
 
@@ -157,8 +164,9 @@ def close(a, b, tol):
 
 
 def set_frequency(ip, port, points):
-    reply = _cmd(ip, port, {'command': 'ascset',
-                            'parameter': '0,frequency,%s-0-0' % ':'.join(str(p) for p in points)}, 8)
+    with miner_cache.command(ip):
+        reply = _cmd(ip, port, {'command': 'ascset',
+                                'parameter': '0,frequency,%s-0-0' % ':'.join(str(p) for p in points)}, 8)
     if 'set OK' not in reply:
         raise RuntimeError('miner rejected frequency: ' + reply[:200])
     return points
@@ -247,11 +255,14 @@ def control_device(conn, dev):
     st = json.loads(json.dumps(cfg.get('throttle') or {}))
     rev = int(st.get('rev', 0) or 0)
     family = family_of(dev)
-    m = read_miner(dev['ip_address'], dev['port'])
+    # regulating a throttle: values as fresh as before; otherwise the collector's readings suffice
+    age = None if st.get('active') and not dev.get('calibrating') else CACHE_MAX_AGE
+    m = read_miner(dev['ip_address'], dev['port'], fresh=age is None)
     if not m['points']:
         return
     if family == 'a15' and m['workmode'] is not None and int(m['workmode']) == 2:
-        conf = _a15_conf(dev['ip_address'])        # raises OSError if the miner does not answer
+        # raises OSError if the miner does not answer
+        conf = miner_cache.fetch(dev['ip_address'], 'web', age, lambda: _a15_conf(dev['ip_address']))
         if not conf or conf.get('mode') != 2:
             return                                  # level unknown this round: do nothing
         m['a15_level'] = conf['power_level']

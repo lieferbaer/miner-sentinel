@@ -27,6 +27,8 @@ from datetime import datetime, timezone
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
+import miner_cache
+
 logger = logging.getLogger(__name__)
 
 CLEAN_AFTER = 145          # s after a change before a GHSspd refresh counts
@@ -41,6 +43,8 @@ MAX_WAIT = 300             # max run: each measurement waits at least this long 
                            # or after the previous measurement
 RESEND_S = 20              # a mode switch not confirmed after this long is sent again (the A15 often drops
                            # the connection of the switch command without applying it)
+CACHE_MAX_AGE = 15        # s: readings of the collector (every 10 s) are used up to this age, except
+                           # while the clocks of a point settle or a point is measured (always read fresh)
 A15_LEVEL_LABELS = {4: 'Power Mode 04', 3: 'Power Mode 03', 2: 'Power Mode 02', 1: 'Power Mode 01', 0: 'Power Mode 00'}
 A15_MODE_LABELS = {1: 'High Performance'}
 
@@ -61,7 +65,7 @@ def _parse(value):
 
 
 def _cmd(ip, port, payload, timeout=8):
-    with socket.create_connection((ip, port or 4028), timeout) as sock:
+    with miner_cache.lock(ip), socket.create_connection((ip, port or 4028), timeout) as sock:
         sock.sendall(payload.encode())
         chunks = []
         while True:
@@ -84,7 +88,8 @@ def _retry(label, fn, *args, **kwargs):
 
 
 def a15_conf(ip):
-    raw = urllib.request.urlopen('http://%s/updatecgconf.cgi' % ip, timeout=5).read().decode('utf-8', 'replace')
+    with miner_cache.lock(ip):
+        raw = urllib.request.urlopen('http://%s/updatecgconf.cgi' % ip, timeout=5).read().decode('utf-8', 'replace')
     match = re.search(r'CGConfCallback\((\{.*?\})\);', raw, re.S)
     return json.loads(match.group(1)) if match else None
 
@@ -98,7 +103,8 @@ def a15_set_mode(ip, conf, mode, level):
     req = urllib.request.Request('http://%s/cgconf.cgi' % ip, data=urllib.parse.urlencode(fields).encode(),
                                  method='POST')
     try:
-        urllib.request.urlopen(req, timeout=10).read()
+        with miner_cache.command(ip):
+            urllib.request.urlopen(req, timeout=10).read()
     except (ConnectionResetError, http.client.HTTPException) as exc:
         # the A15 sometimes drops the connection of the switch command (then it is usually NOT applied);
         # wait_mode reads the mode back and sends the command again after RESEND_S
@@ -114,8 +120,9 @@ def a15_set_mode(ip, conf, mode, level):
 
 
 def set_frequency(ip, port, points):
-    reply = _cmd(ip, port, json.dumps({'command': 'ascset',
-                                       'parameter': '0,frequency,%s-0-0' % ':'.join(str(p) for p in points)}))
+    with miner_cache.command(ip):
+        reply = _cmd(ip, port, json.dumps({'command': 'ascset',
+                                           'parameter': '0,frequency,%s-0-0' % ':'.join(str(p) for p in points)}))
     if 'set OK' not in reply:
         raise RuntimeError('miner rejected frequency: ' + reply[:200])
 
@@ -160,16 +167,20 @@ def _num(text):
     return float(match.group(1)) if match else None
 
 
-def read_miner(ip, port):
-    estats = _retry('cgminer-API estats', _cmd, ip, port, json.dumps({'command': 'estats'}))
-    summ = _retry('cgminer-API summary', _cmd, ip, port, json.dumps({'command': 'summary'}), 6)
+def read_miner(ip, port, fresh=False):
+    """fresh: read estats/summary from the miner, not from the collector's readings."""
+    age = None if fresh else CACHE_MAX_AGE
+    estats = miner_cache.fetch(ip, 'estats', age, lambda: _retry(
+        'cgminer-API estats', _cmd, ip, port, json.dumps({'command': 'estats'})))
+    summ = miner_cache.fetch(ip, 'summary', age, lambda: _retry(
+        'cgminer-API summary', _cmd, ip, port, json.dumps({'command': 'summary'}), 6))
     try:
         summary = json.loads(summ).get('SUMMARY', [{}])[0]
     except ValueError:
         summary = {}
     fields = _fields(estats)
     points = [int(v) for v in str(fields.get('SF0') or '').split()] if isinstance(fields.get('SF0'), str) else []
-    conf = _retry('A15-Einstellungsseite lesen', a15_conf, ip)
+    conf = miner_cache.fetch(ip, 'web', CACHE_MAX_AGE, lambda: _retry('A15-Einstellungsseite lesen', a15_conf, ip))
     wm = _num(fields.get('WORKMODE'))
     key = None
     if wm is not None:
@@ -245,7 +256,8 @@ def step_run(conn, run):
     st = run['state'] or {}
     now = _now()
     ip, port = run['ip_address'], run['port']
-    m = read_miner(ip, port)
+    # clocks settling / measuring: values as fresh as before; otherwise the collector's readings suffice
+    m = read_miner(ip, port, fresh=st.get('phase') in ('set_clock', 'measure'))
     if not m['points']:
         return run
     st['seen_at'] = _iso(now)

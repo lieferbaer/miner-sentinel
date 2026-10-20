@@ -11,6 +11,7 @@ import re
 import socket
 from datetime import datetime, timezone
 
+import miner_cache
 import psycopg2
 from collectors.normalized import (
     DeviceDataWriter,
@@ -30,6 +31,8 @@ from notifications.telegram_notifier import TelegramNotifier
 from retrying import retry
 
 logger = logging.getLogger(__name__)
+
+SLOW_MAX_AGE = 600      # s: 'version' and 'pools' (firmware, MAC, serial, pool URL/user) only every 10 min
 
 
 class AvalonCollector:
@@ -117,7 +120,13 @@ class AvalonCollector:
 
     @retry(stop_max_attempt_number=3, wait_exponential_multiplier=1000, wait_exponential_max=10000)
     def _socket_request(self, ip, command, timeout=10, port=4028):
-        """Make TCP socket request to Avalon device using cgminer API."""
+        """Make TCP socket request to Avalon device using cgminer API.
+        One request at a time per miner; estats/summary are shared with the throttle controller
+        and the Takt-Tabellen (miner_cache)."""
+        with miner_cache.lock(ip):
+            return self._socket_request_locked(ip, command, timeout, port)
+
+    def _socket_request_locked(self, ip, command, timeout, port):
         sock = None
         try:
             # Create socket connection to cgminer API (default port 4028)
@@ -148,6 +157,8 @@ class AvalonCollector:
 
             try:
                 parsed = json.loads(response_str)
+                if command in ('estats', 'summary') and response_str:
+                    miner_cache.put(ip, command, response_str)
                 # Return the actual data part based on command
                 if isinstance(parsed, dict):
                     if command.upper() in parsed and parsed[command.upper()]:
@@ -225,7 +236,11 @@ class AvalonCollector:
             return {}
 
     def restart_device(self, device_ip, device_id, device_name):
-        """Restart an Avalon device via socket API."""
+        """Restart an Avalon device via socket API (stored readings of the miner are cleared)."""
+        with miner_cache.command(device_ip):
+            return self._restart_device(device_ip, device_id, device_name)
+
+    def _restart_device(self, device_ip, device_id, device_name):
         try:
             # cgminer ascset requires command + parameter fields (not pipe-in-command)
             logger.info(f"Attempting to restart device {device_id} at {device_ip}:4028")
@@ -546,9 +561,13 @@ class AvalonCollector:
             return None          # A15 levels exist only in Power Mode (WORKMODE 2)
         try:
             import urllib.request
-            raw = urllib.request.urlopen('http://%s/updatecgconf.cgi' % device_ip, timeout=4).read()
-            match = re.search(r'CGConfCallback\((\{.*?\})\);', raw.decode('utf-8', 'replace'), re.S)
-            conf = json.loads(match.group(1)) if match else {}
+            with miner_cache.lock(device_ip):
+                raw = urllib.request.urlopen('http://%s/updatecgconf.cgi' % device_ip, timeout=4).read()
+                match = re.search(r'CGConfCallback\((\{.*?\})\);', raw.decode('utf-8', 'replace'), re.S)
+                conf = json.loads(match.group(1)) if match else {}
+                if conf:
+                    # shared with the throttle controller and the Takt-Tabellen
+                    miner_cache.put(device_ip, 'web', conf)
         except (OSError, ValueError):
             return None
         return conf.get('power_level') if conf.get('mode') == 2 else None
@@ -781,10 +800,12 @@ class AvalonCollector:
         """Collect mining and hardware data from a single Avalon device."""
         api_port = int(port or 4028)
         try:
-            version_info = self._socket_request(device_ip, 'version', port=api_port)
+            version_info = miner_cache.fetch(device_ip, 'version_info', SLOW_MAX_AGE,
+                                             lambda: self._socket_request(device_ip, 'version', port=api_port))
             summary_info = self._socket_request(device_ip, 'summary', port=api_port)
             stats_info = self._socket_request(device_ip, 'estats', port=api_port)
-            pools_info = self._socket_request(device_ip, 'pools', port=api_port)
+            pools_info = miner_cache.fetch(device_ip, 'pools_info', SLOW_MAX_AGE,
+                                           lambda: self._socket_request(device_ip, 'pools', port=api_port))
 
             conn = self.get_db_connection()
             cursor = conn.cursor()

@@ -24,6 +24,7 @@ from collectors.nerdnos_collector import NerdNOSCollector
 from collectors.nmaxe_collector import NMAxeCollector
 from collectors.parasite_collector import collect_parasite_data
 from collectors.publicpool_collector import collect_publicpool_data
+import miner_cache
 from throttle_controller import run_throttle_controller
 from calibration import run_calibration
 from decouple import config
@@ -827,13 +828,15 @@ def control_device():
         return jsonify({'ok': False, 'error': 'Device is inactive'}), 400
 
     try:
-        result = execute_control(
-            make=make,
-            ip_address=device['ip_address'],
-            port=device.get('port'),
-            action=action,
-            params=params,
-        )
+        # one request at a time per miner; its stored readings are cleared afterwards
+        with miner_cache.command(device['ip_address']):
+            result = execute_control(
+                make=make,
+                ip_address=device['ip_address'],
+                port=device.get('port'),
+                action=action,
+                params=params,
+            )
         result['device_id'] = device_id
         result['device_name'] = device.get('name')
         result['ok'] = True
