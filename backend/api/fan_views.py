@@ -40,7 +40,7 @@ def automation_payload():
         'device': {'id': dev.id, 'name': dev.name}, 'enabled': auto.enabled, 'dev_id': auto.ac_dev_id,
         'port': auto.ac_port, 'level': auto.level,
         'state': {k: st.get(k) for k in ('t', 'phase', 'base', 'boost', 'fan_set', 'fan_read', 'fan_read_at',
-                                         'clock_set', 'stock_mhz', 'changed_at', 'cal', 'cal_fan', 'ac_error',
+                                         'clock_set', 'clock_now', 'stock_mhz', 'changed_at', 'cal', 'cal_fan', 'ac_error',
                                          'last_error', 'seen_at')},
         'log': (st.get('log') or [])[-15:][::-1],
     }

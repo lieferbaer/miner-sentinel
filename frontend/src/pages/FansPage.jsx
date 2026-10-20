@@ -100,7 +100,8 @@ function AutomationPanel({ auto, here, port, level, locked, onCommand, busy }) {
         Heißester Chip (60 s): <span className="font-semibold">{fmt(st.t, 1, ' °C')}</span> · Ziel 80–84 °C
       </p>
       <p>
-        Takt: {st.clock_set ? fmt(st.clock_set, 0, ' MHz') : 'Standardtakt'} · Standard {fmt(st.stock_mhz, 0, ' MHz')}
+        Takt: {fmt(st.clock_now, 0, ' MHz')} von {fmt(st.stock_mhz, 0, ' MHz')} (Standardtakt)
+        {st.clock_set ? ' · zuletzt gesetzt ' + fmt(st.clock_set, 0, ' MHz') : ''}
       </p>
       <p>
         Lüfter: gewählt Stufe {auto.level} · läuft auf Stufe {st.fan_read ?? '—'}

@@ -68,6 +68,7 @@ def test_in_band_nothing_changes(miner):
     ac = FakeAC(level=5)
     st, _ = run({}, miner, ac, 600)
     assert miner.sets == [] and ac.writes == [] and st['phase'] == 'normal'
+    assert st['clock_now'] == 360.0             # the clock the miner really runs (shown on the page)
 
 
 def test_too_hot_lowers_clock_then_waits(miner):

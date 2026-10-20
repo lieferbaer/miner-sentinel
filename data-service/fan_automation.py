@@ -139,6 +139,7 @@ def step(row, now, ac):
         st['clock_set'] = None
         st['changed_at'] = _iso(now)
     st['mode_key'], st['elapsed'] = m['mode_key'], m['elapsed']
+    st['clock_now'] = round(sum(m['points']) / len(m['points']), 1) if m['points'] else None   # for the page
 
     tmax = calibration._num(m['fields'].get('TMax'))
     temps = [x for x in st.get('temps') or [] if _age(x[0], now) <= TEMP_WINDOW_S]
