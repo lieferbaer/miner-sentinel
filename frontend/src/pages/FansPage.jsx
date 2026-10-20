@@ -226,7 +226,7 @@ function Controller({ dev, backups, onReload }) {
             <p className="text-xs text-muted-foreground">Erst eine Sicherung erstellen, dann sind die Buttons frei.</p>
           )}
           {busy && busy !== 'backup' && busy !== 'restore' && (
-            <p className="text-xs text-muted-foreground">Befehl gesendet, warte 3 s und lese die Stufe neu …</p>
+            <p className="text-xs text-muted-foreground">Befehl gesendet, warte 5 s und lese die Stufe neu …</p>
           )}
           <p className="text-xs text-muted-foreground">
             Zwischen zwei Schreibbefehlen liegen mindestens 1,5 s. Während der Tests kann die Handy-App abgemeldet werden.
