@@ -1,3 +1,4 @@
+import OverHotBanner from '@/components/devices/OverHotBanner'
 import GlobalTimeRange from '@/components/layout/GlobalTimeRange'
 import { useTheme } from '@/components/theme-provider'
 import { Button } from '@/components/ui/button'
@@ -16,12 +17,14 @@ import {
   CircleDot,
   Cpu,
   Github,
+  Fan,
   Home,
   LogOut,
   Menu,
   Moon,
   Settings,
   Sun,
+  Table,
   TrendingUp,
   X,
 } from 'lucide-react'
@@ -71,6 +74,18 @@ const NAV_SECTIONS = [
         icon: Bell,
         match: (p) => p === '/activity' || p.startsWith('/activity/'),
       },
+      {
+        path: '/takt-tabellen',
+        label: 'Takt-Tabellen',
+        icon: Table,
+        match: (p) => p === '/takt-tabellen',
+      },
+      {
+        path: '/luefter',
+        label: 'Lüfter',
+        icon: Fan,
+        match: (p) => p === '/luefter',
+      },
     ],
   },
   {
@@ -103,6 +118,14 @@ const PAGE_META = {
   '/activity': {
     title: 'Activity',
     description: 'Alerts, records, and fleet events',
+  },
+  '/takt-tabellen': {
+    title: 'Takt-Tabellen',
+    description: 'A15: gemessene Takt-, Hashrate- und Leistungswerte je Modus',
+  },
+  '/luefter': {
+    title: 'Lüfter',
+    description: 'AC Infinity: Controller, Ports und Test der Lüftersteuerung',
   },
   '/settings': {
     title: 'Settings',
@@ -448,7 +471,10 @@ export default function Layout({ children }) {
           </div>
         </header>
 
-        <main className="p-4 sm:p-6 lg:p-8">{children}</main>
+        <main className="p-4 sm:p-6 lg:p-8">
+          <OverHotBanner />
+          {children}
+        </main>
       </div>
     </div>
   )

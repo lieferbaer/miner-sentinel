@@ -3,6 +3,7 @@ import StatusIndicator from '@/components/status/StatusIndicator'
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import DevicePoolSettings from '@/components/settings/DevicePoolSettings';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import {
   Dialog,
@@ -707,6 +708,15 @@ export default function SettingsPage() {
               </CardContent>
             </Card>
           )}
+
+          <div className="space-y-2">
+            <h3 className="text-sm font-semibold sm:text-base">Pool configuration per device</h3>
+            <p className="text-xs text-muted-foreground sm:text-sm">
+              Set where each miner mines and which pool MinerSentinel polls for its statistics.
+              Values can be copied from another device.
+            </p>
+          </div>
+          <DevicePoolSettings />
         </TabsContent>
 
         {/* Data Collector Tab */}

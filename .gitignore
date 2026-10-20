@@ -123,3 +123,6 @@ ENV/
 # Local tooling / caches (not part of the app)
 .tools/
 .docker-data/
+
+# AC Infinity credentials, token, backups
+backend/acinfinity_data/

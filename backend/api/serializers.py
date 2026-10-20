@@ -43,7 +43,7 @@ class DeviceWriteSerializer(serializers.ModelSerializer):
         model = Device
         fields = [
             'device_id', 'device_name', 'make', 'model', 'protocol',
-            'ip_address', 'port', 'is_active',
+            'ip_address', 'port', 'is_active', 'connection_config',
         ]
 
     def validate_make(self, value):

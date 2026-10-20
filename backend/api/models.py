@@ -696,3 +696,51 @@ class CollectorSettings(models.Model):
     def get_notification_rules(self):
         """Merged notification rules with defaults (safe for missing/partial JSON)."""
         return merge_notification_rules(self.notification_rules)
+
+
+class CalibrationRun(models.Model):
+    """Takt-Tabellen (A15): a measurement run executed by the data-service (calibration.py).
+    kind 'max': two clean measurements per selected work mode at stock clocks;
+    kind 'step': one work mode from its stock clock downwards in 10 MHz steps."""
+    device = models.ForeignKey(Device, on_delete=models.CASCADE, related_name='calibration_runs')
+    kind = models.CharField(max_length=10)
+    status = models.CharField(max_length=12, default='running')   # running|paused|cancelling|done|cancelled
+    pause_reason = models.CharField(max_length=40, blank=True, default='')   # user|overhot
+    modes = models.JSONField(default=list, blank=True)
+    mode_index = models.IntegerField(default=0)
+    step_index = models.IntegerField(default=0)
+    state = models.JSONField(default=dict, blank=True)
+    message = models.TextField(blank=True, default='')
+    created_at = models.DateTimeField(default=timezone.now)
+    updated_at = models.DateTimeField(default=timezone.now)
+    finished_at = models.DateTimeField(blank=True, null=True)
+
+    class Meta:
+        db_table = 'calibration_runs'
+        ordering = ['-created_at']
+
+
+class CalibrationPoint(models.Model):
+    """One clean measurement of a calibration run; `data` holds every value the miner reported."""
+    device = models.ForeignKey(Device, on_delete=models.CASCADE, related_name='calibration_points')
+    run = models.ForeignKey(CalibrationRun, on_delete=models.SET_NULL, null=True, blank=True, related_name='points')
+    kind = models.CharField(max_length=10)
+    mode_key = models.CharField(max_length=16)
+    mode_label = models.CharField(max_length=40, blank=True, default='')
+    seq = models.IntegerField(default=0)
+    set_mhz = models.FloatField(blank=True, null=True)
+    set_points = models.JSONField(default=list, blank=True)
+    miner_mhz = models.FloatField(blank=True, null=True)
+    miner_points = models.JSONField(default=list, blank=True)
+    hashrate_ths = models.FloatField(blank=True, null=True)
+    power_w = models.FloatField(blank=True, null=True)
+    j_th = models.FloatField(blank=True, null=True)
+    dh_pct = models.FloatField(blank=True, null=True)
+    chip_temp_c = models.FloatField(blank=True, null=True)
+    data = models.JSONField(default=dict, blank=True)
+    recorded_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        db_table = 'calibration_points'
+        ordering = ['mode_key', 'seq', 'recorded_at']
+        indexes = [models.Index(fields=['device', 'kind', 'mode_key'])]

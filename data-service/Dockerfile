@@ -1,4 +1,4 @@
-FROM python:3.11-alpine
+FROM docker.io/library/python:3.11-alpine
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1

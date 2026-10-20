@@ -277,49 +277,45 @@ class AvalonCollector:
             return False
 
     def check_hashrate_stagnation(self, device_db_id, device_id, device_name, current_hashrate, device_ip):
-        """Check if hashrate has been unchanged for N collections (unified table)."""
+        """Hang detection: the miner reports hashrate but no new accepted share for 15 minutes."""
         stagnation_on = self.notification_rules.enabled('hashrate_stagnation')
         restart_on = self.notification_rules.enabled('auto_restart')
         if not stagnation_on and not restart_on:
             return
-
+        if not current_hashrate or current_hashrate <= 0:
+            return          # not hashing (standby/off): not a hang
         threshold = int(self.notification_rules.get('hashrate_stagnation', 'threshold_collections', 3) or 3)
         threshold = max(2, min(20, threshold))
-        tolerance = float(self.notification_rules.get('hashrate_stagnation', 'tolerance_ghs', 0.1) or 0.1)
 
         conn = self.get_db_connection()
         cursor = conn.cursor()
-
         try:
             cursor.execute(
-                """
-                SELECT hashrate_ghs
-                FROM device_mining_stats
-                WHERE device_id = %s
-                ORDER BY recorded_at DESC
-                LIMIT %s
-            """,
-                (device_db_id, threshold),
+                "SELECT shares_accepted FROM device_mining_stats WHERE device_id = %s "
+                "AND recorded_at > NOW() - interval '15 minutes' ORDER BY recorded_at",
+                (device_db_id,),
             )
-
-            recent_hashrates = [row[0] for row in cursor.fetchall()]
-
-            if len(recent_hashrates) >= threshold:
-                if all(abs((hr or 0) - (recent_hashrates[0] or 0)) < tolerance for hr in recent_hashrates):
-                    logger.warning(f"Hashrate stagnation detected for {device_id}")
-                    if stagnation_on:
-                        self._notify(
-                            'hashrate_stagnation',
-                            'send_hashrate_alert',
-                            device_id,
-                            device_name,
-                            current_hashrate,
-                            threshold,
-                        )
-                    if restart_on:
-                        logger.info(f"Attempting automatic restart for device {device_id} due to hashrate stagnation")
-                        self.restart_device(device_ip, device_id, device_name)
-
+            rows = cursor.fetchall()
+            cursor.execute(
+                "SELECT MIN(recorded_at) < NOW() - interval '15 minutes' FROM device_mining_stats WHERE device_id = %s",
+                (device_db_id,),
+            )
+            covers_window = bool((cursor.fetchone() or [False])[0])
+            shares = [r[0] or 0 for r in rows]
+            if covers_window and len(shares) >= threshold and max(shares) == min(shares):
+                logger.warning(f"No accepted shares for 15 min on {device_id} while hashing")
+                if stagnation_on:
+                    self._notify(
+                        'hashrate_stagnation',
+                        'send_hashrate_alert',
+                        device_id,
+                        device_name,
+                        current_hashrate,
+                        threshold,
+                    )
+                if restart_on:
+                    logger.info(f"Attempting automatic restart for device {device_id}: no accepted shares")
+                    self.restart_device(device_ip, device_id, device_name)
         except Exception as e:
             logger.error(f"Error checking hashrate stagnation for {device_id}: {e}")
         finally:
@@ -468,11 +464,27 @@ class AvalonCollector:
         except (ValueError, TypeError):
             return 0.0
 
+    @staticmethod
+    def _mm_string(stats_info):
+        """Return the MM ID0 payload, whatever the firmware calls the key.
+
+        Nano models use 'MM ID0'; Avalon Q uses 'MM ID0:Summary'.
+        """
+        if not isinstance(stats_info, dict):
+            return ''
+        value = stats_info.get('MM ID0')
+        if value:
+            return value
+        for key, val in stats_info.items():
+            if isinstance(key, str) and key.startswith('MM ID0') and isinstance(val, str):
+                return val
+        return ''
+
     def _parse_temperature_from_stats(self, stats_info):
         """Parse temperature from estats response."""
         try:
             # Temperature data is in the MM ID0 field
-            mm_id0 = stats_info.get('MM ID0', '')
+            mm_id0 = self._mm_string(stats_info)
 
             # Look for OTemp[value] pattern
             otemp_match = re.search(r'OTemp\[(\d+)\]', mm_id0)
@@ -488,39 +500,106 @@ class AvalonCollector:
         except (ValueError, TypeError):
             return 0.0
 
+    def _parse_chip_temperature_from_stats(self, stats_info):
+        """Hottest ASIC temperature (TMax / MTmax / per-chip PVT_T0)."""
+        try:
+            mm_id0 = self._mm_string(stats_info)
+            for key in ('TMax', 'MTmax'):
+                value = self._bracket_field(mm_id0, key)
+                if value:
+                    celsius = float(value)
+                    if -50.0 < celsius < 200.0:
+                        return celsius
+            pvt = self._bracket_field(mm_id0, 'PVT_T0')
+            if pvt:
+                values = [float(v) for v in pvt.split() if v.strip()]
+                if values:
+                    return max(values)
+            avg = self._bracket_field(mm_id0, 'TAvg')
+            if avg:
+                return float(avg)
+            return None
+        except (ValueError, TypeError):
+            return None
+
+    def _parse_board_temperature_from_stats(self, stats_info):
+        """Hash board temperature where the firmware reports one (Avalon Q)."""
+        try:
+            mm_id0 = self._mm_string(stats_info)
+            for key in ('HBOTemp', 'HBITemp'):
+                value = self._bracket_field(mm_id0, key)
+                if value:
+                    celsius = float(value)
+                    if -50.0 < celsius < 200.0:
+                        return celsius
+            return None
+        except (ValueError, TypeError):
+            return None
+
+    def _work_level(self, stats_info, device_ip, version_info):
+        """WORKLEVEL from cgminer; the A15 does not report it there, so read its power level
+        (00-04) from its own web interface, the same value its configuration page shows."""
+        level = self._int_field(stats_info, 'WORKLEVEL')
+        if level is not None or '15-' not in str((version_info or {}).get('PROD') or ''):
+            return level
+        if self._int_field(stats_info, 'WORKMODE') != 2:
+            return None          # A15 levels exist only in Power Mode (WORKMODE 2)
+        try:
+            import urllib.request
+            raw = urllib.request.urlopen('http://%s/updatecgconf.cgi' % device_ip, timeout=4).read()
+            match = re.search(r'CGConfCallback\((\{.*?\})\);', raw.decode('utf-8', 'replace'), re.S)
+            conf = json.loads(match.group(1)) if match else {}
+        except (OSError, ValueError):
+            return None
+        return conf.get('power_level') if conf.get('mode') == 2 else None
+
+    def _int_list_field(self, stats_info, key):
+        '''Integer values of KEY[a b c] (e.g. MTmax: hottest chip per hash board), or None.'''
+        try:
+            value = self._bracket_field(self._mm_string(stats_info), key)
+            if not value:
+                return None
+            # -273 (no sensor value, e.g. while booting) and other impossible values -> None
+            return [int(float(v)) if -50.0 < float(v) < 200.0 else None for v in value.split()]
+        except (ValueError, TypeError):
+            return None
+
+    def _int_field(self, stats_info, key):
+        '''Integer value of KEY[...] from the MM stats block, or None.'''
+        try:
+            value = self._bracket_field(self._mm_string(stats_info), key)
+            return int(float(value)) if value else None
+        except (ValueError, TypeError):
+            return None
+
+    def _percent_field(self, stats_info, key):
+        '''Integer percentage of KEY[nn%] from the MM stats block, or None.'''
+        try:
+            value = self._bracket_field(self._mm_string(stats_info), key)
+            return int(float(value.replace('%', ''))) if value else None
+        except (ValueError, TypeError, AttributeError):
+            return None
+
     def _parse_power_from_stats(self, stats_info):
         """Parse power consumption from estats response.
 
         GH-16: Nano 3 (non-3s) reports different PS/MPO layout vs 3s.
         Reporter: low=60W, mid=80W, full=100W. Previously saw 326W bogus.
-        Prefer MPO (direct watts) when present; fallback to PS last value.
+        Measured values only: WALLPOWER, else PS[6]; otherwise 0 (unknown).
         """
         try:
-            mm_id0 = stats_info.get('MM ID0', '')
+            mm_id0 = self._mm_string(stats_info)
 
-            # Prefer MPO field (often the reliable direct watts value, especially for Nano 3)
-            mpo_match = re.search(r'MPO\[(\d+)\]', mm_id0)
-            if mpo_match:
-                return float(mpo_match.group(1))
-
-            # Fallback: PS array last value (index 6 in 7-element PS[...])
+            # WALLPOWER (A15 and newer) is the measured input power.
+            wall_match = re.search(r'WALLPOWER\[(\d+)\]', mm_id0)
+            if wall_match and float(wall_match.group(1)) > 0:
+                return float(wall_match.group(1))
+            # PS[...] index 6 is the measured PSU input power on Nano 3S / Q / A15.
             ps_match = re.search(r'PS\[([^\]]+)\]', mm_id0)
             if ps_match:
                 ps_values = ps_match.group(1).split()
-                if len(ps_values) >= 7:
-                    power_watts = float(ps_values[6])
-                    # Guard against obviously wrong high values for low-power Nano models
-                    if power_watts > 300:
-                        logger.warning(f"Suspicious high power {power_watts}W from PS for device; check model/firmware")
-                    return power_watts
-
-            # Fallback: Try ATA2 array first value
-            ata2_match = re.search(r'ATA2\[([^\]]+)\]', mm_id0)
-            if ata2_match:
-                ata2_values = ata2_match.group(1).split('-')
-                if len(ata2_values) >= 1:
-                    return float(ata2_values[0])
-
+                if len(ps_values) >= 7 and float(ps_values[6]) > 0:
+                    return float(ps_values[6])
             return 0.0
         except (ValueError, TypeError, IndexError):
             return 0.0
@@ -529,7 +608,7 @@ class AvalonCollector:
         """Parse fan speed from estats response."""
         try:
             # Fan speed is in MM ID0 field: Fan1[1520]
-            mm_id0 = stats_info.get('MM ID0', '')
+            mm_id0 = self._mm_string(stats_info)
             fan_match = re.search(r'Fan1\[(\d+)\]', mm_id0)
 
             if fan_match:
@@ -542,7 +621,7 @@ class AvalonCollector:
         """Parse frequency from estats response."""
         try:
             # Frequency is in MM ID0 field: Freq[464.89]
-            mm_id0 = stats_info.get('MM ID0', '')
+            mm_id0 = self._mm_string(stats_info)
             freq_match = re.search(r'Freq\[([\d.]+)\]', mm_id0)
 
             if freq_match:
@@ -551,19 +630,40 @@ class AvalonCollector:
         except (ValueError, TypeError):
             return 0.0
 
-    def _parse_voltage_from_stats(self, stats_info):
-        """Parse voltage from estats response."""
-        try:
-            # Voltage information is in PVT_V0 field: PVT_V0[299 303 301 303 300 301 306 301 297 296 303 305]
-            mm_id0 = stats_info.get('MM ID0', '')
-            pvt_v0_match = re.search(r'PVT_V0\[([^\]]+)\]', mm_id0)
+    @staticmethod
+    def _bracket_field(mm_id0, key):
+        """Return the raw text inside KEY[...] without regex."""
+        marker = key + '['
+        start = mm_id0.find(marker)
+        if start == -1:
+            return ''
+        start += len(marker)
+        end = mm_id0.find(']', start)
+        if end == -1:
+            return ''
+        return mm_id0[start:end]
 
-            if pvt_v0_match:
-                # Get first voltage value and convert from centivolts to volts
-                voltage_values = pvt_v0_match.group(1).split()
-                if voltage_values:
-                    voltage_cv = float(voltage_values[0])
-                    return voltage_cv / 100.0  # Convert centivolts to volts
+    def _parse_voltage_from_stats(self, stats_info):
+        """Parse hashboard voltage from estats response.
+
+        Nano models expose PVT_V0[...] in centivolts. Avalon Q has no PVT_V0;
+        its PS[...] array carries the PSU output instead:
+        PS[flag, aux_cv, out_cv, current_a, power_w, set_cv, ...]
+        """
+        try:
+            mm_id0 = self._mm_string(stats_info)
+            pvt = self._bracket_field(mm_id0, 'PVT_V0')
+            if pvt:
+                values = pvt.split()
+                if values:
+                    return float(values[0]) / 100.0
+            ps = self._bracket_field(mm_id0, 'PS')
+            if ps:
+                values = ps.split()
+                if len(values) >= 3:
+                    voltage = float(values[2]) / 100.0
+                    if 1.0 <= voltage <= 100.0:
+                        return voltage
             return 0.0
         except (ValueError, TypeError, IndexError):
             return 0.0
@@ -572,7 +672,7 @@ class AvalonCollector:
         """Parse memory usage from estats response."""
         try:
             # Memory free is in MM ID0 field: MEMFREE[63728]
-            mm_id0 = stats_info.get('MM ID0', '')
+            mm_id0 = self._mm_string(stats_info)
             memfree_match = re.search(r'MEMFREE\[(\d+)\]', mm_id0)
 
             if memfree_match:
@@ -588,7 +688,22 @@ class AvalonCollector:
         self, device_id, device_ip, device_name, version_info, summary_info, stats_info, pools_info
     ) -> NormalizedDeviceSnapshot:
         """Convert cgminer API responses into a NormalizedDeviceSnapshot."""
-        hashrate_ghs = self._parse_hashrate_mhs(summary_info.get('MHS 5s', '0'))
+        # 'MHS 5s' is a 5-second share-based estimate and swings wildly; the
+        # 5-minute window reflects what the hardware actually delivers.
+        # Prefer GHSspd: the speed the miner measures at its chips (same value as the
+        # device display). The share-based MHS figures swing strongly on small miners.
+        hashrate_ghs = 0.0
+        spd = self._bracket_field(self._mm_string(stats_info), 'GHSspd')
+        try:
+            hashrate_ghs = float(spd) if spd else 0.0
+        except ValueError:
+            hashrate_ghs = 0.0
+        # share-based MHS only for miners that do not report GHSspd at all
+        for key in (() if spd else ('MHS 5m', 'MHS 1m', 'MHS av', 'MHS 5s')):
+            value = self._parse_hashrate_mhs(summary_info.get(key, '0'))
+            if value > 0:
+                hashrate_ghs = value
+                break
         uptime_seconds = int(summary_info.get('Elapsed', 0) or 0)
         shares_accepted = int(summary_info.get('Accepted', 0) or 0)
         shares_rejected = int(summary_info.get('Rejected', 0) or 0)
@@ -598,6 +713,8 @@ class AvalonCollector:
         pool_user = pools_info.get('User') if pools_info else None
 
         temperature_c = self._parse_temperature_from_stats(stats_info)
+        chip_temperature_c = self._parse_chip_temperature_from_stats(stats_info)
+        board_temperature_c = self._parse_board_temperature_from_stats(stats_info)
         power_watts = self._parse_power_from_stats(stats_info)
         fan_speed_rpm = self._parse_fan_speed_from_stats(stats_info)
         frequency_mhz = self._parse_frequency_from_stats(stats_info)
@@ -613,6 +730,13 @@ class AvalonCollector:
             'active_pool': pool_url,
             'system_uptime_seconds': uptime_seconds,
             'device_ip': device_ip,
+            'work_mode': self._int_field(stats_info, 'WORKMODE'),
+            'work_level': self._work_level(stats_info, device_ip, version_info),
+            'temp_target': self._int_field(stats_info, 'TarT'),
+            'power_target_watts': self._int_field(stats_info, 'MPO'),
+            'fan_speed_percent': self._percent_field(stats_info, 'FanR'),
+            'chip_temp_boards': self._int_list_field(stats_info, 'MTmax'),
+            'system_status': (self._bracket_field(self._mm_string(stats_info), 'SYSTEMSTATU') or '').strip() or None,
         }
 
         return NormalizedDeviceSnapshot(
@@ -633,6 +757,8 @@ class AvalonCollector:
             ),
             hardware=HardwareMetrics(
                 temperature_c=temperature_c,
+                temperature_chip_c=chip_temperature_c,
+                temperature_board_c=board_temperature_c,
                 power_watts=power_watts,
                 efficiency_j_per_th=efficiency_j_per_th(power_watts, hashrate_ghs),
                 fan_speed_rpm=fan_speed_rpm,

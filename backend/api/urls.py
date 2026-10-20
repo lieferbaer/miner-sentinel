@@ -1,7 +1,7 @@
 from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 
-from . import views
+from . import fan_views, views
 
 router = DefaultRouter()
 
@@ -38,6 +38,7 @@ urlpatterns = [
     # Analytics endpoints
     path('overview/analytics/', views.overview_analytics, name='overview-analytics'),
     path('analytics/detailed/', views.detailed_analytics, name='detailed-analytics'),
+    path('analytics/devices/', views.device_analytics, name='device-analytics'),
     # Settings endpoints
     path('settings/collector/', views.collector_settings_view, name='collector-settings'),
     path('settings/collector/status/', views.collector_status_view, name='collector-status'),
@@ -52,6 +53,12 @@ urlpatterns = [
     path('activity/<int:pk>/acknowledge/', views.activity_event_acknowledge, name='activity-ack'),
     path('activity/<int:pk>/snooze/', views.activity_event_snooze, name='activity-snooze'),
     path('activity/<int:pk>/resolve/', views.activity_event_resolve, name='activity-resolve'),
+    # Lüfter (AC Infinity) test page
+    path('fans/status/', fan_views.fans_status, name='fans-status'),
+    path('fans/credentials/', fan_views.fans_credentials, name='fans-credentials'),
+    path('fans/backup/', fan_views.fans_backup, name='fans-backup'),
+    path('fans/restore/', fan_views.fans_restore, name='fans-restore'),
+    path('fans/test/', fan_views.fans_test, name='fans-test'),
     # Authentication endpoints
     path('auth/csrf/', views.csrf_token_view, name='csrf-token'),
     path('auth/login/', views.login_view, name='login'),

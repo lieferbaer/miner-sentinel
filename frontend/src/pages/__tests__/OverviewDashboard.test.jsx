@@ -2,9 +2,7 @@ import { ThemeProvider } from '@/components/theme-provider'
 import api from '@/lib/api'
 import { AuthProvider } from '@/lib/AuthContext'
 import { TimeRangeProvider } from '@/lib/TimeRangeContext'
-import { TIME_RANGE_STORAGE_KEY } from '@/lib/timeRange'
 import { render, screen, waitFor } from '@testing-library/react'
-import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import OverviewDashboard from '../OverviewDashboard'
@@ -20,89 +18,58 @@ vi.mock('@/lib/api', () => ({
   },
 }))
 
-const mockAnalytics = {
-  overview: {
-    active_devices: 2,
-    online_devices: 2,
-    enabled_devices: 2,
-    total_devices: 4,
-    offline_devices: 0,
-    inactive_devices: 2,
-    bitaxe_devices: 1,
-    avalon_devices: 1,
-    devices_by_make: { bitaxe: 3, avalon: 1 },
-  },
-  mining: {
-    current: {
-      total_hashrate_ghs: 1234.56,
-      acceptance_rate: 98.7,
-      total_shares_accepted: 45678,
-    },
-    period: {
-      hashrate_stability: 99.2,
-      best_share_difficulty: 123456789,
-      last_best_share_time: new Date(Date.now() - 1000 * 60 * 30).toISOString(),
-    },
-    efficiency: {},
-  },
-  hardware: {
-    current: {
-      total_power_watts: 850,
-      avg_temperature_c: 58,
-    },
-    period: {},
-    health: {
-      power_efficiency_gh_per_watt: 1.45,
-    },
-  },
-  pool: {
-    current: {
-      best_share: 987654321,
-      best_share_time: new Date(Date.now() - 1000 * 60 * 45).toISOString(),
-    },
-    performance: {},
-  },
-  trends: {
-    hourly_hashrate: [],
-    hourly_hardware: [],
-  },
-}
+const recent = () => new Date(Date.now() - 5000).toISOString()
 
-function renderWithProviders(ui) {
-  localStorage.setItem('sessionToken', 'test-token-123')
+const mockDevices = [
+  {
+    id: 3,
+    device_id: 'A15',
+    device_name: 'Avalon A15',
+    make: 'avalon',
+    model: 'A15',
+    ip_address: '192.168.178.149',
+    is_active: true,
+    last_seen_at: recent(),
+  },
+]
 
-  const getMock = api.get
-  getMock.mockImplementation((url) => {
+function mockApi({ devicesFail = false, devices = mockDevices } = {}) {
+  api.get.mockImplementation((url) => {
     if (url.includes('/api/auth/user/')) {
       return Promise.resolve({ data: { authenticated: true, user: { id: 1, username: 'test' } } })
     }
-    if (url.includes('/api/overview/analytics/')) {
-      return Promise.resolve({ data: mockAnalytics })
+    if (url.includes('/api/devices/system-latest/')) {
+      return Promise.resolve({
+        data: { A15: { id: 3, name: 'Avalon A15', work_mode: 1, chip_temp_boards: [80, 81, 79] } },
+      })
+    }
+    if (url === '/api/devices/') {
+      return devicesFail ? Promise.reject(new Error('Network error')) : Promise.resolve({ data: devices })
+    }
+    if (url.includes('/api/mining/latest/')) {
+      return Promise.resolve({ data: [{ device_id_str: 'A15', hashrate_ghs: 200000 }] })
+    }
+    if (url.includes('/api/hardware/latest/')) {
+      return Promise.resolve({ data: [{ device_id_str: 'A15', power_watts: 3500, temperature_chip_c: 81 }] })
     }
     if (url.includes('/api/activity/')) {
-      return Promise.resolve({
-        data: { results: [], open_count: 0, critical_open_count: 0 },
-      })
+      return Promise.resolve({ data: { results: [], open_count: 0, critical_open_count: 0 } })
     }
     if (url.includes('/api/settings/collector/status/')) {
-      return Promise.resolve({
-        data: {
-          reachable: true,
-          status: 'healthy',
-          next_run: null,
-          last_success_at: new Date().toISOString(),
-        },
-      })
+      return Promise.resolve({ data: { reachable: true, status: 'healthy' } })
     }
-    return Promise.resolve({ data: {} })
+    return Promise.resolve({ data: [] })
   })
+}
 
+function renderOverview() {
+  localStorage.setItem('sessionToken', 'test-token-123')
   return render(
     <MemoryRouter initialEntries={['/']}>
       <ThemeProvider defaultTheme="dark" storageKey="test-theme">
         <AuthProvider>
           <TimeRangeProvider>
-            {ui}
+            <OverviewDashboard />
           </TimeRangeProvider>
         </AuthProvider>
       </ThemeProvider>
@@ -110,7 +77,7 @@ function renderWithProviders(ui) {
   )
 }
 
-describe('OverviewDashboard (smoke + global time range)', () => {
+describe('OverviewDashboard (per-device overview)', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     localStorage.clear()
@@ -120,67 +87,24 @@ describe('OverviewDashboard (smoke + global time range)', () => {
     localStorage.clear()
   })
 
-  it('renders metrics and loads analytics without local PeriodSelector', async () => {
-    renderWithProviders(<OverviewDashboard />)
-
-    // Page chrome title lives in Layout; Overview content starts with range caption
-    expect(await screen.findByText(/Live metrics now/i)).toBeInTheDocument()
-    // Default global range is last 30 days
-    expect(screen.queryAllByText(/last 30 days/i).length).toBeGreaterThan(0)
-
-    await waitFor(() => {
-      expect(screen.queryAllByText(/Total Hashrate/i).length).toBeGreaterThan(0)
-    })
-
-    expect(screen.queryAllByText(/1.23 TH\/s/i).length).toBeGreaterThan(0)
-    expect(screen.queryAllByText(/Best Share/i).length).toBeGreaterThan(0)
-    expect(screen.getByText(/Updated/i)).toBeInTheDocument()
+  it('renders a section per device with live values', async () => {
+    mockApi()
+    renderOverview()
+    expect(await screen.findByText('Avalon A15')).toBeInTheDocument()
+    expect(screen.queryAllByText(/Total hashrate/i).length).toBeGreaterThan(0)
+    expect(screen.getByText('High Performance')).toBeInTheDocument()
+    expect(screen.getByText('80 / 81 / 79 °C')).toBeInTheDocument()
   })
 
-  it('refetches analytics when stored time range is 7d', async () => {
-    localStorage.setItem(
-      TIME_RANGE_STORAGE_KEY,
-      JSON.stringify({ mode: 'preset', key: '7d' }),
-    )
-    renderWithProviders(<OverviewDashboard />)
-
-    await screen.findByText(/Live metrics now/i)
-
-    await waitFor(() => {
-      const calls = api.get.mock.calls.filter(([url]) => url.includes('/api/overview/analytics/'))
-      expect(calls.length).toBeGreaterThanOrEqual(1)
-      const lastCall = calls[calls.length - 1]
-      expect(lastCall[1].params).toMatchObject({ hours: 168, days: 7 })
-      expect(lastCall[1].params.from).toBeTruthy()
-      expect(lastCall[1].params.to).toBeTruthy()
-    })
-
-    expect(screen.queryAllByText(/last 7 days/i).length).toBeGreaterThan(0)
+  it('shows the empty state without devices', async () => {
+    mockApi({ devices: [] })
+    renderOverview()
+    expect(await screen.findByText(/No devices yet/i)).toBeInTheDocument()
   })
 
-  it('shows error state when analytics fetch fails', async () => {
-    api.get.mockImplementation((url) => {
-      if (url.includes('/api/auth/user/')) {
-        return Promise.resolve({ data: { authenticated: true, user: null } })
-      }
-      if (url.includes('/api/overview/analytics/')) {
-        return Promise.reject(new Error('Network error'))
-      }
-      return Promise.resolve({ data: {} })
-    })
-
-    render(
-      <MemoryRouter initialEntries={['/']}>
-        <ThemeProvider defaultTheme="dark" storageKey="test-theme">
-          <AuthProvider>
-            <TimeRangeProvider>
-              <OverviewDashboard />
-            </TimeRangeProvider>
-          </AuthProvider>
-        </ThemeProvider>
-      </MemoryRouter>,
-    )
-
+  it('shows the error state when the device list fails', async () => {
+    mockApi({ devicesFail: true })
+    renderOverview()
     expect(await screen.findByText(/Unable to load overview/i)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /retry/i })).toBeInTheDocument()
   })

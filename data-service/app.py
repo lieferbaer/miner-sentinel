@@ -4,7 +4,10 @@ Polls Bitaxe and Avalon devices and CKPool/PublicPool periodically and stores da
 Settings are loaded from the database (collector_settings table).
 """
 
+import json
 import logging
+
+import requests
 import os
 import time
 from datetime import datetime, timedelta
@@ -16,10 +19,13 @@ from collectors.avalon_collector import AvalonCollector
 from collectors.bitaxe_collector import BitAxeCollector
 from collectors.btcpowlab_collector import collect_btcpowlab_data
 from collectors.ckpool_collector import collect_ckpool_data
+from collectors.f2pool_collector import collect_f2pool_data
 from collectors.nerdnos_collector import NerdNOSCollector
 from collectors.nmaxe_collector import NMAxeCollector
 from collectors.parasite_collector import collect_parasite_data
 from collectors.publicpool_collector import collect_publicpool_data
+from throttle_controller import run_throttle_controller
+from calibration import run_calibration
 from decouple import config
 from flask import Flask, jsonify, request
 from notifications.emitter import emit_alert, resolve_open_alerts
@@ -257,6 +263,114 @@ def load_active_devices():
 
 
 
+def update_network_data():
+    """Refresh BTC price (in the configured currency) and network stats."""
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        cursor = conn.cursor()
+        cursor.execute('SELECT energy_currency FROM collector_settings LIMIT 1')
+        row = cursor.fetchone()
+        currency = (row[0] if row and row[0] else 'EUR').lower()
+
+        price = None
+        try:
+            response = requests.get(
+                'https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd,eur',
+                timeout=15,
+            )
+            response.raise_for_status()
+            prices = response.json().get('bitcoin', {})
+            price = prices.get(currency) or prices.get('eur') or prices.get('usd')
+        except Exception as exc:
+            logger.warning(f"BTC price refresh failed: {exc}")
+
+        hashrate_ehs = None
+        difficulty = None
+        try:
+            response = requests.get('https://mempool.space/api/v1/mining/hashrate/3d', timeout=15)
+            response.raise_for_status()
+            payload = response.json()
+            if payload.get('currentHashrate'):
+                hashrate_ehs = float(payload['currentHashrate']) / 1e18
+            if payload.get('currentDifficulty'):
+                difficulty = float(payload['currentDifficulty'])
+        except Exception as exc:
+            logger.warning(f"Network stats refresh failed: {exc}")
+
+        sets = []
+        params = []
+        if price:
+            sets.append('cached_btc_price = %s')
+            params.append(price)
+        if hashrate_ehs:
+            sets.append('cached_network_hashrate = %s')
+            params.append(hashrate_ehs)
+        if difficulty:
+            sets.append('cached_network_difficulty = %s')
+            params.append(difficulty)
+        if sets:
+            sets.append('network_data_updated_at = NOW()')
+            cursor.execute('UPDATE collector_settings SET ' + ', '.join(sets), params)
+            conn.commit()
+            logger.info(
+                f"Network data updated: BTC {price} {currency.upper()}, "
+                f"network {hashrate_ehs:.0f} EH/s" if hashrate_ehs else f"BTC {price} {currency.upper()}"
+            )
+        cursor.close()
+        conn.close()
+    except Exception as exc:
+        logger.error(f"update_network_data failed: {exc}")
+
+
+def get_pool_targets():
+    """Collect pool-statistics targets: per-device configuration plus the global fallback.
+
+    A device carries its own target in connection_config['pool_stats'] as
+    {'type': 'ckpool'|'publicpool'|'f2pool'|'btcpowlab'|'parasite', 'address': '<btc address>', 'url': '<pool url>'}.
+    """
+    default_urls = {
+        'ckpool': collector_settings.get('ckpool_url', 'https://eusolo.ckpool.org'),
+        'publicpool': collector_settings.get('publicpool_url', 'http://localhost:3334'),
+        'btcpowlab': collector_settings.get('btcpowlab_url', 'https://btcpowlab-pool.com/public/v1'),
+        'parasite': collector_settings.get('parasite_url', 'https://parasite.space/api'),
+    }
+    targets = []
+    seen = set()
+
+    def add(pool_type, address, url, token=''):
+        pool_type = (pool_type or '').strip()
+        address = (address or '').strip()
+        if pool_type not in ('ckpool', 'publicpool', 'f2pool', 'btcpowlab', 'parasite') or not address:
+            return
+        url = (url or '').strip() or default_urls.get(pool_type, '')
+        key = (pool_type, address, url, (token or '').strip())
+        if key in seen:
+            return
+        seen.add(key)
+        targets.append(key)
+
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        cursor = conn.cursor()
+        cursor.execute("SELECT device_id, connection_config FROM devices WHERE is_active = true")
+        for device_id, config in cursor.fetchall():
+            if isinstance(config, str):
+                try:
+                    config = json.loads(config)
+                except ValueError:
+                    config = {}
+            stats = (config or {}).get('pool_stats') or {}
+            add(stats.get('type'), stats.get('address'), stats.get('url'), stats.get('token'))
+        cursor.close()
+        conn.close()
+    except Exception as exc:
+        logger.error(f"Could not read per-device pool settings: {exc}")
+
+    global_type = collector_settings.get('pool_type', 'ckpool')
+    add(global_type, collector_settings.get(f'{global_type}_address', ''), default_urls.get(global_type, ''))
+    return targets
+
+
 def poll_all_sources():
     """Poll all data sources and store in database."""
     global collection_health
@@ -302,80 +416,34 @@ def poll_all_sources():
         logger.error(f"Error polling NerdNOS devices: {e}", exc_info=True)
         cycle_errors.append(f"nerdnos: {e}")
 
-    # Poll pool statistics based on pool_type setting
-    pool_type = collector_settings.get('pool_type', 'ckpool')
-    pool_configured = False
+    # Poll pool statistics - one target per device plus the global fallback
+    targets = get_pool_targets()
+    pool_configured = bool(targets)
     pool_failed = False
     pool_error = ''
-
-    try:
-        if pool_type == 'btcpowlab':
-            btcpowlab_address = collector_settings.get('btcpowlab_address', '')
-            if btcpowlab_address:
-                pool_configured = True
-                logger.info(f"Polling BTC PoW Lab statistics for address: {btcpowlab_address[:10]}...")
-                conn = psycopg2.connect(DATABASE_URL)
-                collect_btcpowlab_data(
-                    conn,
-                    btcpowlab_address,
-                    collector_settings.get(
-                        'btcpowlab_url',
-                        'https://btcpowlab-pool.com/public/v1',
-                    ),
-                )
-                conn.close()
-                logger.info("BTC PoW Lab polling completed")
+    for pool_type, address, url, token in targets:
+        try:
+            logger.info(f"Polling {pool_type} statistics for account {address[:10]}...")
+            conn = psycopg2.connect(DATABASE_URL)
+            if pool_type == 'publicpool':
+                collect_publicpool_data(conn, address, url)
+            elif pool_type == 'f2pool':
+                collect_f2pool_data(conn, address, token)
+            elif pool_type == 'btcpowlab':
+                collect_btcpowlab_data(conn, address, url)
+            elif pool_type == 'parasite':
+                collect_parasite_data(conn, address, url)
             else:
-                logger.info("Skipping BTC PoW Lab polling - no address configured")
-        elif pool_type == 'parasite':
-            parasite_address = collector_settings.get('parasite_address', '')
-            if parasite_address:
-                pool_configured = True
-                logger.info(f"Polling Parasite statistics for address: {parasite_address[:10]}...")
-                conn = psycopg2.connect(DATABASE_URL)
-                collect_parasite_data(
-                    conn,
-                    parasite_address,
-                    collector_settings.get(
-                        'parasite_url',
-                        'https://parasite.space/api',
-                    ),
-                )
-                conn.close()
-                logger.info("Parasite polling completed")
-            else:
-                logger.info("Skipping Parasite polling - no address configured")
-        elif pool_type == 'publicpool':
-            publicpool_address = collector_settings.get('publicpool_address', '')
-            if publicpool_address:
-                pool_configured = True
-                logger.info(f"Polling PublicPool statistics for address: {publicpool_address[:10]}...")
-                conn = psycopg2.connect(DATABASE_URL)
-                collect_publicpool_data(
-                    conn,
-                    publicpool_address,
-                    collector_settings.get('publicpool_url', 'http://localhost:3334')
-                )
-                conn.close()
-                logger.info("PublicPool polling completed")
-            else:
-                logger.info("Skipping PublicPool polling - no address configured")
-        else:
-            ckpool_address = collector_settings.get('ckpool_address', '')
-            if ckpool_address:
-                pool_configured = True
-                logger.info(f"Polling CKPool statistics for address: {ckpool_address[:10]}...")
-                conn = psycopg2.connect(DATABASE_URL)
-                collect_ckpool_data(conn, ckpool_address, collector_settings.get('ckpool_url', 'https://eusolo.ckpool.org'))
-                conn.close()
-                logger.info("CKPool polling completed")
-            else:
-                logger.info("Skipping CKPool polling - no address configured")
-    except Exception as e:
-        logger.error(f"Error polling pool ({pool_type}): {e}", exc_info=True)
-        pool_failed = True
-        pool_error = str(e)
-        cycle_errors.append(f"pool: {e}")
+                collect_ckpool_data(conn, address, url)
+            conn.close()
+        except Exception as e:
+            logger.error(f"Error polling {pool_type} for {address[:10]}: {e}", exc_info=True)
+            pool_failed = True
+            pool_error = str(e)
+            cycle_errors.append(f"pool {pool_type}: {e}")
+    # staleness check per pool type only when all targets use the same pool
+    pool_types = {t[0] for t in targets}
+    pool_type = pool_types.pop() if len(pool_types) == 1 else ''
 
     prefs = _alert_preferences_from_settings(collector_settings)
     tg = bitaxe_collector.telegram_notifier
@@ -482,9 +550,20 @@ def reschedule_jobs():
     device_check_interval = collector_settings.get('device_check_interval_minutes', 5)
 
     # Schedule periodic polling
+    polling_seconds = 0
+    try:
+        polling_seconds = int(os.environ.get('POLLING_INTERVAL_SECONDS', '0') or 0)
+    except (TypeError, ValueError):
+        polling_seconds = 0
+    polling_trigger = (
+        IntervalTrigger(seconds=polling_seconds)
+        if polling_seconds > 0
+        else IntervalTrigger(minutes=polling_interval)
+    )
+
     scheduler.add_job(
         func=poll_all_sources,
-        trigger=IntervalTrigger(minutes=polling_interval),
+        trigger=polling_trigger,
         id='poll_all_sources',
         name='Poll all data sources',
         replace_existing=True
@@ -497,6 +576,34 @@ def reschedule_jobs():
         id='check_devices',
         name='Check for new devices',
         replace_existing=True
+    )
+
+    scheduler.add_job(
+        func=update_network_data,
+        trigger=IntervalTrigger(minutes=30),
+        id='network_data',
+        name='Refresh BTC price and network stats',
+        replace_existing=True,
+        next_run_time=datetime.now(),
+    )
+
+    scheduler.add_job(
+        func=lambda: run_throttle_controller(DATABASE_URL),
+        trigger=IntervalTrigger(seconds=15),
+        id='throttle_controller',
+        name='Throttle controller (Avalon)',
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+    scheduler.add_job(
+        func=lambda: run_calibration(DATABASE_URL),
+        trigger=IntervalTrigger(seconds=15),
+        id='calibration',
+        name='Takt-Tabellen (A15)',
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
     )
 
     # Schedule settings reload (check for settings changes every 2 minutes)
@@ -517,7 +624,10 @@ def reschedule_jobs():
         replace_existing=True
     )
 
-    logger.info(f"Scheduled jobs: polling every {polling_interval}min, device check every {device_check_interval}min")
+    if polling_seconds > 0:
+        logger.info(f"Scheduled jobs: polling every {polling_seconds}s (env override), device check every {device_check_interval}min")
+    else:
+        logger.info(f"Scheduled jobs: polling every {polling_interval}min, device check every {device_check_interval}min")
 
 
 def check_and_apply_settings_changes():

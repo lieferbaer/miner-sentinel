@@ -1,0 +1,303 @@
+"""AC Infinity cloud API (unofficial) for the fan test page ("Lüfter").
+
+Sources: ober37/ac-infinity-mcp docs/API.md, keithah/homebridge-acinfinity (API_REFERENCE, CHANGELOG 1.3.3).
+- login POST /user/appUserLogin (appEmail, appPasswordl - the "l" is required, password max 25 chars)
+  -> token = data.appId, sent as header "token"
+- only ONE session per account: every login can log out the phone app, so the token is cached
+- writes POST /dev/addDevMode: always read the port settings first and send all fields back
+  (without modeSetid, fieldSet, devSetting, ipcSetting); at least 1.5 s between writes (else 403)
+- the controller reports a new speed only after > 5 s
+"""
+import json
+import os
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from datetime import datetime, timezone
+
+BASE = 'https://www.acinfinityserver.com/api'
+DATA_DIR = '/app/acinfinity_data'
+CRED_FILE = DATA_DIR + '/credentials'
+TOKEN_FILE = DATA_DIR + '/token'
+HOST_DIR = '/opt/minersentinel/backend/acinfinity_data'
+WRITE_GAP = 1.5
+EXCLUDE = ('modeSetid', 'fieldSet', 'devSetting', 'ipcSetting')
+CODE_OK = 200
+CODE_SESSION_EXPIRED = 10003
+HEADERS_OBER37 = {}
+HEADERS_KEITHAH = {'phoneType': '1', 'appVersion': '1.9.7', 'minversion': '3.5'}
+
+_write_lock = threading.Lock()
+_last_write = [0.0]
+_login_lock = threading.Lock()
+
+
+class ACError(Exception):
+    pass
+
+
+class NotConfigured(ACError):
+    pass
+
+
+def _credentials():
+    vals = {}
+    try:
+        with open(CRED_FILE, encoding='utf-8') as fh:
+            for line in fh:
+                line = line.strip()
+                if line and not line.startswith('#') and '=' in line:
+                    key, value = line.split('=', 1)
+                    vals[key.strip()] = value.strip()
+    except OSError:
+        pass
+    if not vals.get('AC_EMAIL') or not vals.get('AC_PASSWORD'):
+        raise NotConfigured('Zugangsdaten fehlen: in %s/credentials AC_EMAIL und AC_PASSWORD eintragen.' % HOST_DIR)
+    return vals['AC_EMAIL'], vals['AC_PASSWORD']
+
+
+def credential_info():
+    """E-mail and whether a password is stored (the password itself is never returned)."""
+    try:
+        email, _ = _credentials()
+        return {'email': email, 'password_set': True}
+    except NotConfigured:
+        vals = {}
+        try:
+            with open(CRED_FILE, encoding='utf-8') as fh:
+                for line in fh:
+                    if line.strip().startswith('AC_EMAIL='):
+                        vals['email'] = line.strip().split('=', 1)[1].strip()
+        except OSError:
+            pass
+        return {'email': vals.get('email', ''), 'password_set': False}
+
+
+def save_credentials(email, password=None):
+    """Write the credentials file; password None/'' keeps the stored one. A new login is done on next use."""
+    email = (email or '').strip()
+    if not email or any(c in email for c in '\r\n') or '@' not in email:
+        raise ACError('Bitte eine gültige E-Mail-Adresse eingeben.')
+    if password:
+        if any(c in password for c in '\r\n'):
+            raise ACError('Das Passwort darf keinen Zeilenumbruch enthalten.')
+    else:
+        try:
+            _, password = _credentials()
+        except NotConfigured:
+            raise ACError('Bitte ein Passwort eingeben.')
+    tmp = CRED_FILE + '.new'
+    with open(tmp, 'w', encoding='utf-8') as fh:
+        fh.write('# AC-Infinity-App-Zugangsdaten nur fuer den MinerSentinel-Luefter-Test\n')
+        fh.write('AC_EMAIL=%s\nAC_PASSWORD=%s\n' % (email, password))
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, CRED_FILE)
+    try:
+        os.remove(TOKEN_FILE)        # old token belongs to the old account/password
+    except OSError:
+        pass
+
+
+def configured():
+    try:
+        _credentials()
+        return True
+    except NotConfigured:
+        return False
+
+
+def _post(path, params=None, token=None, headers=None, query=None):
+    url = BASE + path + ('?' + urllib.parse.urlencode(query) if query else '')
+    head = {'User-Agent': 'okhttp/3.10.0', 'Content-Type': 'application/x-www-form-urlencoded'}
+    if token:
+        head['token'] = token
+    head.update(headers or {})
+    data = urllib.parse.urlencode(params or {}).encode()
+    req = urllib.request.Request(url, data=data, headers=head, method='POST')
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            http, body = resp.status, resp.read().decode('utf-8', 'replace')
+    except urllib.error.HTTPError as exc:
+        http, body = exc.code, exc.read().decode('utf-8', 'replace')
+    except OSError as exc:
+        raise ACError('AC-Infinity-Server nicht erreichbar: %s' % exc)
+    try:
+        out = json.loads(body)
+        if not isinstance(out, dict):
+            out = {'code': None, 'msg': str(out)[:200]}
+    except ValueError:
+        out = {'code': None, 'msg': body[:200]}
+    out['_http'] = http
+    return out
+
+
+def login():
+    """New login (logs out the phone app if it is signed in with the same account)."""
+    email, password = _credentials()
+    with _login_lock:
+        res = _post('/user/appUserLogin', {'appEmail': email, 'appPasswordl': password[:25]})
+        token = (res.get('data') or {}).get('appId') if isinstance(res.get('data'), dict) else None
+        if res.get('code') != CODE_OK or not token:
+            raise ACError('Anmeldung fehlgeschlagen (Code %s: %s)' % (res.get('code'), res.get('msg')))
+        token = str(token)
+        with open(TOKEN_FILE, 'w', encoding='utf-8') as fh:
+            fh.write(token)
+        os.chmod(TOKEN_FILE, 0o600)
+        return token
+
+
+def _token():
+    try:
+        with open(TOKEN_FILE, encoding='utf-8') as fh:
+            token = fh.read().strip()
+        if token:
+            return token
+    except OSError:
+        pass
+    return login()
+
+
+def _call(path, build_params, write=False, headers=None, user_query=False):
+    """build_params(token) -> form fields. Re-login once if the session expired (code 10003)."""
+    token = _token()
+    for attempt in (1, 2):
+        params = build_params(token)
+        query = {'userId': token} if user_query else None
+        if write:
+            with _write_lock:
+                wait = WRITE_GAP - (time.monotonic() - _last_write[0])
+                if wait > 0:
+                    time.sleep(wait)
+                res = _post(path, params, token, headers, query)
+                _last_write[0] = time.monotonic()
+        else:
+            res = _post(path, params, token, headers, query)
+        if res.get('code') == CODE_SESSION_EXPIRED and attempt == 1:
+            token = login()
+            continue
+        return res
+    return res
+
+
+def devices():
+    res = _call('/user/devInfoListAll', lambda t: {'userId': t}, user_query=True)
+    if res.get('code') != CODE_OK:
+        raise ACError('Geräteliste: Code %s: %s' % (res.get('code'), res.get('msg')))
+    return res.get('data') or []
+
+
+def port_settings(dev_id, port):
+    return _call('/dev/getdevModeSettingList', lambda t: {'devId': dev_id, 'port': port, 'appId': t})
+
+
+def write_settings(payload, headers=None):
+    return _call('/dev/addDevMode', lambda t: payload, write=True, headers=headers)
+
+
+def build_payload(settings, overlay):
+    """All flat fields of the read settings (without the excluded ones), overlaid with the changes."""
+    out = {}
+    for key, value in (settings or {}).items():
+        if key in EXCLUDE or isinstance(value, (dict, list)) or value is None:
+            continue
+        out[key] = int(value) if isinstance(value, bool) else value
+    for key, value in overlay.items():
+        out[key] = value
+    return out
+
+
+def _scaled(value, div=100.0):
+    try:
+        return round(float(value) / div, 2)
+    except (TypeError, ValueError):
+        return None
+
+
+def summarize(dev):
+    info = dev.get('deviceInfo') or {}
+    ports = []
+    for p in info.get('ports') or []:
+        ports.append({'port': p.get('port'), 'name': p.get('portName'), 'speak': p.get('speak'),
+                      'online': p.get('online'), 'cur_mode': p.get('curMode'),
+                      'raw': {k: v for k, v in p.items() if not isinstance(v, (dict, list))}})
+    return {
+        'dev_id': str(dev.get('devId')), 'name': dev.get('devName'), 'dev_type': dev.get('devType'),
+        'online': dev.get('online'),
+        'temperature_c': _scaled(info.get('temperature')), 'humidity_pct': _scaled(info.get('humidity')),
+        'vpd_kpa': _scaled(info.get('vpdnums', info.get('vpdNums'))),
+        'ports': ports,
+    }
+
+
+def find_device(dev_id):
+    for dev in devices():
+        if str(dev.get('devId')) == str(dev_id):
+            return dev
+    raise ACError('Controller %s nicht gefunden.' % dev_id)
+
+
+def speed_of(dev_id, port):
+    dev = find_device(dev_id)
+    for p in (dev.get('deviceInfo') or {}).get('ports') or []:
+        if str(p.get('port')) == str(port):
+            return p.get('speak')
+    return None
+
+
+# ---- backups of the port settings (ports 0-4) ----
+
+def _backup_files():
+    try:
+        names = sorted((n for n in os.listdir(DATA_DIR) if n.startswith('backup-') and n.endswith('.json')),
+                       reverse=True)
+    except OSError:
+        names = []
+    return names
+
+
+def list_backups():
+    out = []
+    for name in _backup_files():
+        try:
+            with open(os.path.join(DATA_DIR, name), encoding='utf-8') as fh:
+                data = json.load(fh)
+            out.append({'file': name, 'dev_id': data.get('dev_id'), 'created_at': data.get('created_at'),
+                        'ports': sorted(int(k) for k, v in (data.get('ports') or {}).items() if v.get('ok'))})
+        except (OSError, ValueError):
+            continue
+    return out
+
+
+def has_backup(dev_id):
+    return any(b['dev_id'] == str(dev_id) for b in list_backups())
+
+
+def make_backup(dev_id):
+    ports = {}
+    for port in range(0, 5):
+        res = port_settings(dev_id, port)
+        data = res.get('data')
+        ok = res.get('code') == CODE_OK and isinstance(data, dict) and bool(data)
+        ports[str(port)] = {'ok': ok, 'code': res.get('code'), 'msg': res.get('msg'), 'settings': data if ok else None}
+    now = datetime.now(timezone.utc)
+    name = 'backup-%s-%s.json' % (now.strftime('%Y%m%d-%H%M%S'), dev_id)
+    with open(os.path.join(DATA_DIR, name), 'w', encoding='utf-8') as fh:
+        json.dump({'dev_id': str(dev_id), 'created_at': now.isoformat(), 'ports': ports}, fh, indent=1)
+    os.chmod(os.path.join(DATA_DIR, name), 0o600)
+    return name, ports
+
+
+def restore_backup(name):
+    if name not in _backup_files():
+        raise ACError('Sicherung %s nicht gefunden.' % name)
+    with open(os.path.join(DATA_DIR, name), encoding='utf-8') as fh:
+        data = json.load(fh)
+    results = []
+    for port, entry in sorted((data.get('ports') or {}).items(), key=lambda kv: int(kv[0])):
+        if not entry.get('ok'):
+            continue
+        res = write_settings(build_payload(entry['settings'], {}))
+        results.append({'port': int(port), 'code': res.get('code'), 'msg': res.get('msg'), 'http': res.get('_http')})
+    return data.get('dev_id'), results

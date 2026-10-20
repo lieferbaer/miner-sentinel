@@ -40,6 +40,7 @@ class UnifiedHardwareSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'device', 'device_name', 'device_id', 'recorded_at',
             'power_watts', 'efficiency_j_per_th', 'temperature_c',
+            'temperature_chip_c', 'temperature_board_c',
             'fan_speed_rpm', 'voltage', 'frequency_mhz', 'created_at',
         ]
 
@@ -83,6 +84,9 @@ class UnifiedSystemSerializer(serializers.ModelSerializer):
     fallback_stratum_url = serializers.CharField(source='fallback_pool_url', read_only=True, allow_null=True)
     fallback_stratum_port = serializers.SerializerMethodField()
     is_using_fallback = serializers.BooleanField(source='using_fallback_pool', read_only=True, allow_null=True)
+    work_mode = serializers.SerializerMethodField()
+    work_level = serializers.SerializerMethodField()
+    power_target_watts = serializers.SerializerMethodField()
     free_heap = serializers.SerializerMethodField()
     is_psram_available = serializers.SerializerMethodField()
 
@@ -100,6 +104,7 @@ class UnifiedSystemSerializer(serializers.ModelSerializer):
             'display_type', 'display_rotation', 'invert_screen', 'display_timeout',
             'stratum_url', 'stratum_port', 'stratum_user',
             'fallback_stratum_url', 'fallback_stratum_port', 'is_using_fallback',
+            'work_mode', 'work_level', 'power_target_watts',
             'free_heap', 'is_psram_available', 'created_at',
         ]
 
@@ -144,6 +149,15 @@ class UnifiedSystemSerializer(serializers.ModelSerializer):
 
     def get_temp_target(self, obj):
         return self._d(obj, 'temp_target')
+
+    def get_work_mode(self, obj):
+        return self._d(obj, 'work_mode')
+
+    def get_work_level(self, obj):
+        return self._d(obj, 'work_level')
+
+    def get_power_target_watts(self, obj):
+        return self._d(obj, 'power_target_watts')
 
     def get_overheat_mode(self, obj):
         return self._d(obj, 'overheat_mode', 0)

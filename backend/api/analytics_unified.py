@@ -320,13 +320,15 @@ def overview_analytics(request):
     }
 
     btc_block_reward = 3.125
-    network_hashrate_ehs = 650
-    btc_price_usd = 67000
+    _settings = CollectorSettings.get_settings()
+    network_hashrate_ehs = float(_settings.cached_network_hashrate or 0) or 650
+    btc_price_usd = float(_settings.cached_btc_price or 0) or 0.0
+    currency = _settings.energy_currency or 'EUR'
     network_hashrate_ghs = network_hashrate_ehs * 1e9
     pool_percentage = (current_hashrate_total_ghs / network_hashrate_ghs) * 100 if network_hashrate_ghs else 0
     blocks_per_day = 144
     expected_btc_per_day = (current_hashrate_total_ghs / network_hashrate_ghs) * blocks_per_day * btc_block_reward if network_hashrate_ghs else 0
-    kwh_price = 0.12
+    kwh_price = float(_settings.energy_rate or 0)
     energy_consumption_kwh_per_day = (current_power_total / 1000) * 24
     energy_cost_per_day = energy_consumption_kwh_per_day * kwh_price
 
@@ -340,17 +342,19 @@ def overview_analytics(request):
         'energy_cost_per_month_usd': round(energy_cost_per_day * 30, 2),
         'net_profit_per_day_usd': round((expected_btc_per_day * btc_price_usd) - energy_cost_per_day, 2),
         'net_profit_per_month_usd': round(((expected_btc_per_day * btc_price_usd) - energy_cost_per_day) * 30, 2),
-        'roi_years': (
-            round(1500 / (((expected_btc_per_day * btc_price_usd) - energy_cost_per_day) * 365), 2)
-            if (expected_btc_per_day * btc_price_usd) > energy_cost_per_day
-            and ((expected_btc_per_day * btc_price_usd) - energy_cost_per_day) > 0
-            else None
-        ),
+        'roi_years': None,
         'assumptions': {
+            'btc_price': btc_price_usd,
             'btc_price_usd': btc_price_usd,
+            'currency': currency,
             'network_hashrate_ehs': network_hashrate_ehs,
+            'kwh_price': kwh_price,
             'kwh_price_usd': kwh_price,
-            'device_cost_usd': 1500,
+            'price_updated_at': (
+                _settings.network_data_updated_at.isoformat()
+                if _settings.network_data_updated_at
+                else None
+            ),
         },
     }
 

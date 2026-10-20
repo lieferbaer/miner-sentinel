@@ -91,7 +91,7 @@ class TestAvalonNormalize:
             'Found Blocks': 0,
             'Best Share': 12345.6,
         }
-        stats = {'MM ID0': 'OTemp[62],MPO[80],Fan1[1500],Freq[464.89],PVT_V0[300]'}
+        stats = {'MM ID0': 'OTemp[62],MPO[80],PS[0 0 0 0 0 0 80],Fan1[1500],Freq[464.89],PVT_V0[300]'}
         version = {'MODEL': 'Nano3s', 'CGMiner': '4.11', 'MAC': 'aa', 'DNA': 'x', 'HWTYPE': 'hw'}
         pools = {'URL': 'stratum+tcp://pool', 'User': 'worker'}
         snap = self.collector.normalize_responses(
@@ -104,9 +104,12 @@ class TestAvalonNormalize:
         assert snap.hardware.power_watts == pytest.approx(80.0)
         assert snap.system.model_reported == 'Nano3s'
 
-    def test_power_prefers_mpo(self):
+    def test_power_uses_measured_values_only(self):
+        # measured input power (PS[6] / WALLPOWER) only; MPO is a configured limit, not a measurement
         stats = {'MM ID0': 'MPO[100],PS[1 2 3 4 5 6 999]'}
-        assert self.collector._parse_power_from_stats(stats) == pytest.approx(100.0)
+        assert self.collector._parse_power_from_stats(stats) == pytest.approx(999.0)
+        assert self.collector._parse_power_from_stats({'MM ID0': 'MPO[100]'}) == pytest.approx(0.0)
+        assert self.collector._parse_power_from_stats({'MM ID0': 'WALLPOWER[3500],PS[1 2 3 4 5 6 999]'}) == pytest.approx(3500.0)
 
 
 class TestCKPoolNormalize:

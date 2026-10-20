@@ -6,6 +6,10 @@ from django.contrib.auth import authenticate, login, logout
 from django.db.models import Avg, Count, Max, Min, Q, Sum
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
+import json
+import re
+import socket
+
 from rest_framework import status, viewsets
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -13,6 +17,8 @@ from rest_framework.response import Response
 
 from .models import (
     AlertEvent,
+    CalibrationPoint,
+    CalibrationRun,
     CollectorSettings,
     Device,
     DeviceHardwareStats,
@@ -41,6 +47,55 @@ from .time_window import parse_time_window
 logger = logging.getLogger(__name__)
 
 
+
+A15_LEVEL_LABELS = {4: 'Power Mode 04', 3: 'Power Mode 03', 2: 'Power Mode 02', 1: 'Power Mode 01', 0: 'Power Mode 00'}
+
+
+def _a15_conf(ip):
+    """Pool/mode/power-level settings from the A15 web interface (readable without login)."""
+    import urllib.request
+    raw = urllib.request.urlopen('http://%s/updatecgconf.cgi' % ip, timeout=5).read().decode('utf-8', 'replace')
+    match = re.search(r'CGConfCallback\((\{.*?\})\);', raw, re.S)
+    return json.loads(match.group(1)) if match else None
+
+
+def _a15_set_level(ip, level):
+    """Power Mode + power level via the web interface form (same POST as its Save button)."""
+    import time
+    import urllib.parse
+    import urllib.request
+    conf = _a15_conf(ip)
+    if conf is None:
+        return False
+    if conf.get('mode') == 2 and conf.get('power_level') == level:
+        return True
+    fields = {k: conf.get(k, '') for k in ('pool1', 'worker1', 'passwd1', 'pool2', 'worker2', 'passwd2',
+                                           'pool3', 'worker3', 'passwd3')}
+    fields['mode'] = 2
+    fields['power_level'] = '%02d' % level
+    req = urllib.request.Request('http://%s/cgconf.cgi' % ip, data=urllib.parse.urlencode(fields).encode(),
+                                 method='POST')
+    urllib.request.urlopen(req, timeout=10).read()
+    for _ in range(10):
+        time.sleep(2)
+        conf = _a15_conf(ip)
+        if conf and conf.get('mode') == 2 and conf.get('power_level') == level:
+            return True
+    return False
+
+
+def _cgminer_command(ip_address, port, command, timeout=10):
+    """Send a raw cgminer API command to a miner and return its reply text."""
+    with socket.create_connection((ip_address, port or 4028), timeout) as sock:
+        sock.sendall(command.encode())
+        chunks = []
+        while True:
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    return b''.join(chunks).decode('utf-8', 'ignore').replace('\x00', '').strip()
+
 class DeviceViewSet(viewsets.ModelViewSet):
     """Unified device registry CRUD (sole device store after Release C)."""
     queryset = Device.objects.all().order_by('make', 'name')
@@ -60,6 +115,566 @@ class DeviceViewSet(viewsets.ModelViewSet):
         if self.action in ['create', 'update', 'partial_update']:
             return DeviceWriteSerializer
         return DeviceSerializer
+
+
+    @action(detail=True, methods=['post'], url_path='set-pool')
+    def set_pool(self, request, pk=None):
+        """Write the mining pool configuration to an Avalon device (cgminer setpool)."""
+        device = self.get_object()
+        if device.protocol != Device.PROTOCOL_CGMINER_TCP:
+            return Response(
+                {'error': 'Only cgminer TCP devices (Avalon) support remote pool configuration.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        pool_url = (request.data.get('pool_url') or '').strip()
+        worker = (request.data.get('worker') or '').strip()
+        if not pool_url or not worker:
+            return Response(
+                {'error': 'pool_url and worker are required.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        worker_password = (request.data.get('worker_password') or 'x').strip()
+        miner_user = (request.data.get('miner_user') or 'root').strip()
+        miner_password = (request.data.get('miner_password') or 'root').strip()
+        reboot = request.data.get('reboot', True)
+
+        for value in (pool_url, worker, worker_password, miner_user, miner_password):
+            if ',' in value or '|' in value:
+                return Response(
+                    {'error': 'Values must not contain "," or "|" - the miner API uses them as separators.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        command = 'ascset|0,setpool,{},{},{},{},{}'.format(
+            miner_user, miner_password, pool_url, worker, worker_password
+        )
+        try:
+            reply = _cgminer_command(device.ip_address, device.port, command)
+        except OSError as exc:
+            return Response(
+                {'error': 'Device unreachable: {}'.format(exc)},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        rebooted = False
+        reboot_error = None
+        if reboot:
+            try:
+                _cgminer_command(device.ip_address, device.port, 'ascset|0,reboot,0')
+                rebooted = True
+            except OSError as exc:
+                reboot_error = str(exc)
+
+        return Response({
+            'status': 'ok',
+            'device_reply': reply,
+            'rebooted': rebooted,
+            'reboot_error': reboot_error,
+            'note': 'Avalon applies pool settings after a reboot.',
+        })
+
+    @action(detail=True, methods=['get'], url_path='pools')
+    def pools(self, request, pk=None):
+        """Read the pools currently configured on the device."""
+        device = self.get_object()
+        if device.protocol != Device.PROTOCOL_CGMINER_TCP:
+            return Response({'pools': []})
+        try:
+            raw = _cgminer_command(device.ip_address, device.port, json.dumps({'command': 'pools'}))
+            payload = json.loads(raw)
+        except (OSError, ValueError) as exc:
+            return Response(
+                {'error': 'Could not read pools: {}'.format(exc)},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+        pools = [
+            {
+                'index': entry.get('POOL'),
+                'url': entry.get('URL'),
+                'user': entry.get('User'),
+                'status': entry.get('Status'),
+                'priority': entry.get('Priority'),
+                'accepted': entry.get('Accepted'),
+                'rejected': entry.get('Rejected'),
+                'stratum_active': entry.get('Stratum Active'),
+            }
+            for entry in payload.get('POOLS', [])
+        ]
+        return Response({'pools': pools})
+
+    @action(detail=False, methods=['get'], url_path='system-latest')
+    def system_latest(self, request):
+        """Latest live system values of all active devices (small payload for the overview)."""
+        keys = ('work_mode', 'work_level', 'power_target_watts', 'temp_target', 'fan_speed_percent',
+                'chip_temp_boards', 'system_status')
+        out = {}
+        for device in Device.objects.filter(is_active=True):
+            row = (DeviceSystemInfo.objects.filter(device=device).order_by('-recorded_at')
+                   .values('details').first())
+            values = (row or {}).get('details') or {}
+            out[device.device_id] = dict({k: values.get(k) for k in keys}, id=device.id, name=device.name)
+        return Response(out)
+
+    # ---- Takt-Tabellen (A15): measurement runs, executed by data-service/calibration.py ----
+    CAL_MODES = [('2/L4', 'Power Mode 04'), ('2/L3', 'Power Mode 03'), ('2/L2', 'Power Mode 02'),
+                 ('2/L1', 'Power Mode 01'), ('2/L0', 'Power Mode 00'),
+                 ('1/-', 'High Performance')]
+    CAL_ACTIVE = ('running', 'paused', 'cancelling', 'finishing')
+
+    @staticmethod
+    def _cal_point(p):
+        data = p.data or {}
+        fields = dict(data.get('fields') or {})
+        for key, value in (data.get('summary') or {}).items():
+            fields.setdefault('summary.' + key, value)
+        return {'id': p.id, 'run': p.run_id, 'kind': p.kind, 'mode_key': p.mode_key, 'mode_label': p.mode_label,
+                'seq': p.seq, 'set_mhz': p.set_mhz, 'set_points': p.set_points, 'miner_mhz': p.miner_mhz,
+                'miner_points': p.miner_points, 'hashrate_ths': p.hashrate_ths, 'power_w': p.power_w,
+                'j_th': p.j_th, 'dh_pct': p.dh_pct, 'chip_temp_c': p.chip_temp_c, 'recorded_at': p.recorded_at,
+                'fields': fields}
+
+    def _cal_run(self, run):
+        labels = dict(self.CAL_MODES)
+        st = run.state or {}
+        set_points = st.get('set_points') or []
+        return {
+            'id': run.id, 'kind': run.kind, 'status': run.status, 'pause_reason': run.pause_reason,
+            'active': run.status in self.CAL_ACTIVE,
+            'modes': [{'key': k, 'label': labels.get(k, k)} for k in run.modes or []],
+            'mode_index': run.mode_index, 'step_index': run.step_index, 'message': run.message,
+            'phase': st.get('phase'), 'stable': bool(st.get('stable')), 'count': st.get('count', 0),
+            'steps_total': st.get('steps_total'),
+            'set_mhz': round(sum(set_points) / len(set_points), 1) if set_points else None,
+            'notes': st.get('notes') or {}, 'seen_at': st.get('seen_at'), 'last_error': st.get('last_error'),
+            'changed_at': st.get('changed_at'), 'server_now': timezone.now(),
+            'created_at': run.created_at, 'finished_at': run.finished_at,
+        }
+
+    @action(detail=True, methods=['get', 'post'], url_path='calibration')
+    def calibration(self, request, pk=None):
+        """GET ?mode=<key>: runs and measured points. POST {action: start_max|start_step|pause|resume|cancel}."""
+        device = self.get_object()
+        if self._throttle_family(device) != 'a15' or device.protocol != Device.PROTOCOL_CGMINER_TCP:
+            return Response({'error': 'Takt-Tabellen gibt es nur für den A15.'}, status=status.HTTP_400_BAD_REQUEST)
+        if request.method == 'POST':
+            return self._calibration_command(device, request.data)
+        keys = [k for k, _ in self.CAL_MODES]
+        mode = request.query_params.get('mode')
+        mode = mode if mode in keys else keys[0]
+        run = CalibrationRun.objects.filter(device=device).order_by('-created_at').first()
+
+        # max values: per mode the points of the latest run that measured it
+        max_points, max_notes, seen = [], {}, {}
+        for p in CalibrationPoint.objects.filter(device=device, kind='max').order_by('-recorded_at'):
+            seen.setdefault(p.mode_key, p.run_id)
+            if seen[p.mode_key] == p.run_id:
+                max_points.append(p)
+        max_points.sort(key=lambda p: (keys.index(p.mode_key) if p.mode_key in keys else 99, p.seq))
+        for r in CalibrationRun.objects.filter(device=device, kind='max').order_by('created_at'):
+            max_notes.update((r.state or {}).get('notes') or {})
+
+        last = CalibrationPoint.objects.filter(device=device, kind='step', mode_key=mode).order_by('-recorded_at').first()
+        step_points = list(CalibrationPoint.objects.filter(run_id=last.run_id, kind='step', mode_key=mode)
+                           .order_by('seq')) if last else []
+        step_run = CalibrationRun.objects.filter(pk=last.run_id).first() if last else None
+        return Response({
+            'device': {'id': device.id, 'name': device.name},
+            'modes': [{'key': k, 'label': lbl, 'stock_mhz': (((device.connection_config or {}).get('throttle') or {})
+                       .get('profiles') or {}).get(k, {}).get('avg_mhz')} for k, lbl in self.CAL_MODES],
+            'run': self._cal_run(run) if run else None,
+            'max': [self._cal_point(p) for p in max_points],
+            'max_notes': max_notes,
+            'step_mode': mode,
+            'step': [self._cal_point(p) for p in step_points],
+            'step_run': {'id': step_run.id, 'created_at': step_run.created_at, 'status': step_run.status}
+            if step_run else None,
+        })
+
+    def _calibration_command(self, device, data):
+        action_name = data.get('action')
+        keys = [k for k, _ in self.CAL_MODES]
+        run = CalibrationRun.objects.filter(device=device, status__in=self.CAL_ACTIVE).order_by('-created_at').first()
+        now = timezone.now()
+        if action_name in ('start_max', 'start_step'):
+            if run:
+                return Response({'error': 'Es läuft bereits eine Messung.'}, status=status.HTTP_409_CONFLICT)
+            if action_name == 'start_max':
+                modes = [k for k in keys if k in (data.get('modes') or [])]
+                if not modes:
+                    return Response({'error': 'Bitte mindestens einen Modus wählen.'},
+                                    status=status.HTTP_400_BAD_REQUEST)
+            else:
+                if data.get('mode') not in keys:
+                    return Response({'error': 'Unbekannter Modus.'}, status=status.HTTP_400_BAD_REQUEST)
+                modes = [data.get('mode')]
+            failed = self._cal_lift_throttle(device)
+            if failed:
+                return failed
+            run = CalibrationRun.objects.create(device=device, kind=action_name[6:], modes=modes, status='running',
+                                                state={}, message='Gestartet.', created_at=now, updated_at=now)
+        elif action_name == 'pause' and run and run.status == 'running':
+            run.status, run.pause_reason, run.message = 'paused', 'user', 'Pausiert.'
+        elif action_name == 'resume' and run and run.status == 'paused':
+            st = dict(run.state or {})
+            st['resume'] = True
+            run.status, run.pause_reason, run.state = 'running', '', st
+            run.message = 'Wird fortgesetzt: letzter gespeicherter Punkt wird neu gemessen.'
+        elif action_name == 'cancel' and run and run.status != 'cancelling':
+            run.status, run.message = 'cancelling', 'Wird abgebrochen …'
+        else:
+            return Response({'error': 'Diese Aktion ist gerade nicht möglich.'}, status=status.HTTP_400_BAD_REQUEST)
+        run.updated_at = now
+        run.save()
+        return Response(self._cal_run(run))
+
+    def _cal_lift_throttle(self, device):
+        """A running throttle is lifted before a measurement starts (the run lets the firmware set the clocks)."""
+        st = json.loads(json.dumps((device.connection_config or {}).get('throttle') or {}))
+        active = st.get('active')
+        if not active:
+            return None
+        # no clocks are set here: the measurement switches the mode via the web interface, so the
+        # firmware applies its own clocks
+        st['active'] = None
+        st['last_event'] = {'type': 'calibration', 'detail': 'für die Takt-Messung aufgehoben',
+                            'at': timezone.now().isoformat(), 'target_ths': active.get('target_ths')}
+        st['stable_since'] = None
+        self._throttle_save(device, st)
+        return None
+
+    @action(detail=True, methods=['post'], url_path='restart')
+    def restart(self, request, pk=None):
+        """POST: reboot an Avalon miner (offered when it reports "Over Hot")."""
+        device = self.get_object()
+        if device.protocol != Device.PROTOCOL_CGMINER_TCP:
+            return Response({'error': 'Neustart ist nur für Avalon-Miner möglich.'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            reply = _cgminer_command(device.ip_address, device.port, 'ascset|0,reboot,0', timeout=8)
+        except OSError as exc:
+            return Response({'error': 'Miner nicht erreichbar: {}'.format(exc)}, status=status.HTTP_502_BAD_GATEWAY)
+        return Response({'status': 'ok', 'device_reply': reply[:300]})
+
+    # ---- Throttle: scale the Avalon PLL frequencies to a target hashrate ----
+    # The data-service (throttle_controller.py) measures full power per work mode,
+    # detects when a throttle was lifted on the miner and regulates towards the target.
+    # One profile per work mode (key = mode_key, e.g. "1/0" or "2/L4" for the A15).
+    THROTTLE_MIN_SHARE = 0.2   # lowest allowed target: 20 % of the measured full power
+    THROTTLE_FLOOR = 0.15      # never set a PLL below 15 % of its stock clock
+    THROTTLE_FAMILY_MODES = {
+        'nano': {0: 'Low', 1: 'Medium', 2: 'High'},
+        'q': {0: 'Eco', 1: 'Standard', 2: 'Super'},
+    }
+    THROTTLE_A15_MODES = {1: 'High Performance'}   # WORKMODE 2 = Power Mode with levels 00-04
+
+    def _throttle_live(self, device):
+        live = self._throttle_live_raw(device)
+        family = self._throttle_family(device)
+        wm = live['workmode']
+        if family == 'a15' and wm == 2:
+            try:
+                conf = _a15_conf(device.ip_address)
+            except (OSError, ValueError):
+                conf = None
+            if not conf or conf.get('mode') != 2:
+                raise OSError('A15-Webinterface antwortet nicht (Stufe nicht lesbar)')
+            level = conf['power_level']
+            live['mode_key'] = '2/L%d' % level
+            live['workmode'] = level
+            live['mode_label'] = A15_LEVEL_LABELS.get(level, 'Level %02d' % level)
+        elif family == 'a15' and wm is not None:
+            live['mode_key'] = '%d/-' % wm
+            live['workmode'] = None
+            live['mode_label'] = self.THROTTLE_A15_MODES.get(wm, 'Mode %d' % wm)
+        elif wm is not None:
+            names = self.THROTTLE_FAMILY_MODES.get(family) or {}
+            live['mode_label'] = names.get(wm, 'Mode %d' % wm)
+        return live
+
+    def _throttle_live_raw(self, device):
+        help_reply = _cgminer_command(device.ip_address, device.port,
+                                      json.dumps({'command': 'ascset', 'parameter': '0,help'}), timeout=6)
+        est = _cgminer_command(device.ip_address, device.port, json.dumps({'command': 'estats'}), timeout=8)
+        summ = _cgminer_command(device.ip_address, device.port, json.dumps({'command': 'summary'}), timeout=6)
+        boards = {}
+        for name, values in re.findall(r'\b(SF\d+)\[([0-9 ]+)\]', est):
+            if name not in boards and values.split():
+                boards[name] = [int(v) for v in values.split()]
+
+        def num(key):
+            match = re.search(r'\b' + key + r'\[([0-9.]+)', est)
+            return float(match.group(1)) if match else None
+
+        try:
+            summary = json.loads(summ).get('SUMMARY', [{}])[0]
+        except ValueError:
+            summary = {}
+        wm, wl = num('WORKMODE'), num('WORKLEVEL')
+        key = ('-' if wm is None else str(int(wm))) + '/' + ('-' if wl is None else str(int(wl)))
+        points = boards[sorted(boards)[0]] if boards else None
+        return {
+            'workmode': int(wm) if wm is not None else None,
+            'supported': 'frequency' in help_reply and bool(points),
+            'points': points, 'mode_key': key, 'mode_label': 'unbekannt',
+            'ghsspd': num('GHSspd'), 'mhs5': summary.get('MHS 5m'),
+        }
+
+    @staticmethod
+    def _throttle_seen(device):
+        """What the throttle controller last read from the miner (it polls every 15 s)."""
+        st = (device.connection_config or {}).get('throttle') or {}
+        seen = st.get('last_seen') or {}
+        if not seen.get('points'):
+            return None
+        return {
+            'points': seen['points'], 'mode_key': seen.get('mode_key'),
+            'mode_label': seen.get('mode_label') or 'unbekannt', 'workmode': seen.get('option'),
+            'ghsspd': seen['ghsspd_ths'] * 1000.0 if seen.get('ghsspd_ths') else None,
+            'supported': bool(st.get('freq_ok')), 'seen_at': seen.get('at'),
+        }
+
+    @staticmethod
+    def _throttle_clock_for(prof, target):
+        """Average clock for `target` TH/s from the measured points of this mode (full power and
+        throttles reached earlier, prof['cal']); same rule as the controller's next_clock:
+        straight line between the nearest points below and above the target, otherwise through
+        the two closest points, with a single point proportional."""
+        pts = [(float(prof['avg_mhz']), prof['measured_max_ths'])] + [tuple(p) for p in prof.get('cal') or []]
+        pts = sorted({round(x, 1): y for x, y in pts if x > 0 and y > 0}.items())
+        below = [p for p in pts if p[1] < target]
+        above = [p for p in pts if p[1] > target]
+        if below and above:
+            (x1, y1), (x2, y2) = max(below, key=lambda p: p[1]), min(above, key=lambda p: p[1])
+        else:
+            near = sorted(pts, key=lambda p: abs(p[1] - target))[:2]
+            if len(near) < 2:
+                return near[0][0] * target / near[0][1]
+            (x1, y1), (x2, y2) = near
+        if (x2 - x1) * (y2 - y1) <= 0 or y1 == y2:
+            x0, y0 = min(pts, key=lambda p: abs(p[1] - target))
+            return x0 * target / y0
+        return x1 + (target - y1) * (x2 - x1) / (y2 - y1)
+
+    @staticmethod
+    def _throttle_family(device):
+        text = ' '.join(str(getattr(device, k, '') or '') for k in ('name', 'model', 'device_id')).lower()
+        if 'nano' in text:
+            return 'nano'
+        if 'a15' in text or '15-' in text:
+            return 'a15'
+        if re.search(r'(^|\W)q(\W|$)', text) or 'avalonq' in text:
+            return 'q'
+        return None
+
+    THROTTLE_MODE_OPTIONS = {
+        'nano': [{'value': 0, 'label': 'Low'}, {'value': 1, 'label': 'Medium'}, {'value': 2, 'label': 'High'}],
+        'q': [{'value': 0, 'label': 'Eco'}, {'value': 1, 'label': 'Standard'}, {'value': 2, 'label': 'Super'}],
+        'a15': [{'value': lv, 'label': A15_LEVEL_LABELS[lv]} for lv in (4, 3, 2, 1, 0)],
+    }
+
+    @action(detail=True, methods=['post'], url_path='workmode')
+    def workmode(self, request, pk=None):
+        """POST {mode}: switch the work mode (Nano 3S, Avalon Q) or the power level (A15)."""
+        device = self.get_object()
+        family = self._throttle_family(device)
+        options = self.THROTTLE_MODE_OPTIONS.get(family)
+        if device.protocol != Device.PROTOCOL_CGMINER_TCP or not options:
+            return Response({'error': 'Für dieses Gerät nur im Webinterface des Miners möglich.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        try:
+            mode = int(request.data.get('mode'))
+        except (TypeError, ValueError):
+            mode = -1
+        if mode not in [o['value'] for o in options]:
+            return Response({'error': 'Unbekannter Modus.'}, status=status.HTTP_400_BAD_REQUEST)
+        if CalibrationRun.objects.filter(device=device, status__in=self.CAL_ACTIVE).exists():
+            return Response({'error': 'Takt-Messung läuft – Moduswechsel ist gesperrt.'}, status=status.HTTP_409_CONFLICT)
+        if family == 'a15':
+            try:
+                ok = _a15_set_level(device.ip_address, mode)
+            except (OSError, ValueError) as exc:
+                return Response({'error': 'A15 nicht erreichbar: {}'.format(exc)}, status=status.HTTP_502_BAD_GATEWAY)
+            if not ok:
+                return Response({'error': 'Der A15 hat die Stufe nicht übernommen.'}, status=status.HTTP_502_BAD_GATEWAY)
+            reply = 'power_level %02d' % mode
+        else:
+            reply = self._workmode_cgminer(device, mode)
+            if isinstance(reply, Response):
+                return reply
+        config = dict(device.connection_config or {})
+        st = dict(config.get('throttle') or {})
+        st['last_event'] = None
+        st['stable_since'] = None
+        st['rev'] = int(st.get('rev', 0) or 0) + 1
+        self._throttle_keep_measured(device, st)
+        config['throttle'] = st
+        device.connection_config = config
+        device.save(update_fields=['connection_config'])
+        label = [o['label'] for o in options if o['value'] == mode][0]
+        return Response({'status': 'ok', 'mode': mode, 'label': label, 'device_reply': reply[:300]})
+
+    def _workmode_cgminer(self, device, mode):
+        command = json.dumps({'command': 'ascset', 'parameter': '0,workmode,set,%d' % mode})
+        try:
+            reply = _cgminer_command(device.ip_address, device.port, command, timeout=8)
+        except OSError as exc:
+            return Response({'error': 'Miner nicht erreichbar: {}'.format(exc)}, status=status.HTTP_502_BAD_GATEWAY)
+        if '"STATUS":"E"' in reply.replace(' ', ''):
+            return Response({'error': 'Der Miner hat den Modus abgelehnt.', 'device_reply': reply[:300]},
+                            status=status.HTTP_502_BAD_GATEWAY)
+        return reply
+
+    @staticmethod
+    def _throttle_resolve(profiles, live, active):
+        """(profile key, profile) for the current state: the active throttle's profile, else the
+        profile of the work mode the miner reports."""
+        pkey = active.get('profile') if active else live['mode_key']
+        return pkey, profiles.get(pkey) or {}
+
+    def _throttle_payload(self, device, live):
+        st = (device.connection_config or {}).get('throttle') or {}
+        profiles = st.get('profiles') or {}
+        active = st.get('active')
+        points = live['points']
+        cur_avg = sum(points) / len(points)
+        pkey, prof = self._throttle_resolve(profiles, live, active)
+        max_ths = prof.get('measured_max_ths')
+        from django.utils.dateparse import parse_datetime
+        seen_at = parse_datetime(live['seen_at']) if live.get('seen_at') else None
+        return {
+            'supported': True,
+            'calibration_active': CalibrationRun.objects.filter(device=device, status__in=self.CAL_ACTIVE).exists(),
+            'seen_at': live.get('seen_at'),
+            'stale': bool(seen_at and (timezone.now() - seen_at).total_seconds() > 60),
+            'mode_label': live['mode_label'] if not active else (prof.get('mode_label') or live['mode_label']),
+            'current_avg_mhz': round(cur_avg, 1),
+            'stock_avg_mhz': prof.get('avg_mhz'),
+            'max_ths': max_ths,
+            'max_source': 'measured' if max_ths else None,
+            'min_ths': round(max_ths * self.THROTTLE_MIN_SHARE, 2) if max_ths else None,
+            'hashrate_ths': round(live['ghsspd'] / 1000.0, 2) if live['ghsspd'] else None,
+            'throttled': bool(active),
+            'active': {
+                'target_ths': active.get('target_ths'),
+                'status': active.get('status'),
+                'measured_ths': active.get('measured_ths'),
+                'estimate_ths': active.get('estimate_ths'),
+                'reached_at': active.get('reached_at'),
+                'set_at': active.get('set_at'),
+                'last_change_at': active.get('last_change_at'),
+                'steps': active.get('steps', 0),
+            } if active else None,
+            'last_event': st.get('last_event'),
+            'profile_ready': bool(prof),
+            'current_profile': pkey,
+            'modes': [
+                {'key': key, 'label': p.get('mode_label') or key, 'avg_mhz': p.get('avg_mhz'),
+                 'max_ths': p.get('measured_max_ths'), 'power_w': p.get('measured_power_w'),
+                 'efficiency_j_th': p.get('efficiency_j_th'), 'measured_at': p.get('measured_at')}
+                for key, p in profiles.items()
+            ],
+            'mode_options': self.THROTTLE_MODE_OPTIONS.get(self._throttle_family(device)),
+            'current_workmode': live.get('workmode'),
+            'family': self._throttle_family(device),
+        }
+
+    @staticmethod
+    def _throttle_keep_measured(device, st):
+        """Never drop measured/learned profiles the controller wrote meanwhile."""
+        fresh = Device.objects.filter(pk=device.pk).values_list('connection_config', flat=True).first() or {}
+        fresh_profiles = (fresh.get('throttle') or {}).get('profiles') or {}
+        mine = st.setdefault('profiles', {})
+        for key, prof in fresh_profiles.items():
+            have = mine.get(key)
+            if have is None or (prof.get('measured_at') or '') > (have.get('measured_at') or ''):
+                mine[key] = prof
+
+    def _throttle_save(self, device, st):
+        config = dict(device.connection_config or {})
+        st['rev'] = int(st.get('rev', 0) or 0) + 1
+        self._throttle_keep_measured(device, st)
+        config['throttle'] = st
+        device.connection_config = config
+        device.save(update_fields=['connection_config'])
+
+    @action(detail=True, methods=['get', 'post'], url_path='throttle')
+    def throttle(self, request, pk=None):
+        """GET: throttle state. POST {target_ths} or {reset: true}."""
+        device = self.get_object()
+        if device.protocol != Device.PROTOCOL_CGMINER_TCP:
+            return Response({'supported': False})
+        if request.method == 'GET':
+            # state as read by the throttle controller; no miner access when only displaying
+            seen = self._throttle_seen(device)
+            if not seen or not seen['supported']:
+                return Response({'supported': False})
+            return Response(self._throttle_payload(device, seen))
+        if CalibrationRun.objects.filter(device=device, status__in=self.CAL_ACTIVE).exists():
+            return Response({'error': 'Takt-Messung läuft – Drosseln ist gesperrt.'}, status=status.HTTP_409_CONFLICT)
+        try:
+            live = self._throttle_live(device)
+        except OSError as exc:
+            return Response({'error': 'Miner nicht erreichbar: {}'.format(exc)}, status=status.HTTP_502_BAD_GATEWAY)
+        if not live['supported']:
+            return Response({'supported': False})
+
+        st = json.loads(json.dumps((device.connection_config or {}).get('throttle') or {}))
+        profiles = st.get('profiles') or {}
+        active = st.get('active')
+        pkey, prof = self._throttle_resolve(profiles, live, active)
+        if not prof.get('points'):
+            return Response({'error': 'Dieser Modus ist noch nicht erfasst – bitte in einer Minute erneut versuchen.'},
+                            status=status.HTTP_409_CONFLICT)
+        stock = prof['points']
+        now = timezone.now().isoformat()
+
+        if request.data.get('reset'):
+            target_points = stock
+            st['active'] = None
+            st['last_event'] = {'type': 'reset', 'detail': 'Drosselung aufgehoben', 'at': now,
+                                'target_ths': active.get('target_ths') if active else None}
+        else:
+            max_ths = prof.get('measured_max_ths')
+            if not max_ths:
+                return Response({'error': 'Dieser Modus ist noch nicht gemessen. Drosseln ist möglich, sobald das '
+                                          'Gerät 15 Minuten ungedrosselt in diesem Modus gelaufen ist.'},
+                                status=status.HTTP_409_CONFLICT)
+            min_ths = max_ths * self.THROTTLE_MIN_SHARE
+            try:
+                target = float(request.data.get('target_ths'))
+            except (TypeError, ValueError):
+                return Response({'error': 'Bitte eine Zahl in TH/s angeben.'}, status=status.HTTP_400_BAD_REQUEST)
+            if target < min_ths or target > max_ths:
+                return Response({'error': 'Erlaubt sind {:.1f}–{:.1f} TH/s.'.format(min_ths, max_ths)},
+                                status=status.HTTP_400_BAD_REQUEST)
+            want_avg = self._throttle_clock_for(prof, target)
+            factor = want_avg / (sum(stock) / len(stock))
+            target_points = [min(max(int(round(p * factor)), int(p * self.THROTTLE_FLOOR)), p) for p in stock]
+            st['active'] = {'target_ths': round(target, 2), 'profile': pkey, 'applied_points': target_points,
+                            'set_at': now, 'last_change_at': now, 'status': 'adjusting', 'steps': 0}
+            st['last_event'] = None
+
+        command = json.dumps({'command': 'ascset',
+                              'parameter': '0,frequency,{}-0-0'.format(':'.join(str(v) for v in target_points))})
+        try:
+            reply = _cgminer_command(device.ip_address, device.port, command, timeout=8)
+        except OSError as exc:
+            return Response({'error': 'Miner nicht erreichbar: {}'.format(exc)}, status=status.HTTP_502_BAD_GATEWAY)
+        if 'set OK' not in reply:
+            return Response({'error': 'Der Miner hat den Wert abgelehnt.', 'device_reply': reply},
+                            status=status.HTTP_502_BAD_GATEWAY)
+        if st.get('active'):
+            # the firmware ramps the clock over several seconds; the controller adopts
+            # the settled values once this window has passed
+            st['active']['applied_points'] = target_points
+            st['active']['pending_until'] = (timezone.now() + timedelta(seconds=60)).isoformat()
+        last_seen = dict(st.get('last_seen') or {})
+        last_seen.update({'mode_key': live['mode_key'], 'mode_label': live['mode_label'],
+                          'points': live['points'], 'throttled': bool(st.get('active'))})
+        st['last_seen'] = last_seen
+        st['stable_since'] = None          # a measurement must not include the throttled period
+        self._throttle_save(device, st)
+        return Response(self._throttle_payload(device, live))
 
     @action(detail=True, methods=['get'], url_path='details')
     def details(self, request, pk=None):
@@ -421,6 +1036,291 @@ def collector_settings_view(request):
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
+
+@api_view(['GET'])
+def device_analytics(request):
+    """Per-device analytics for a time window.
+
+    Granularity adapts to the window: raw samples up to one hour, hourly means
+    up to seven days, daily means beyond that - so a 30 day view stays fast
+    even with a 10 second collection interval.
+    """
+    from django.db.models import Avg, Max, Min, Count
+    from django.db.models.functions import TruncDay, TruncHour
+
+    window = parse_time_window(request.query_params)
+    time_filter = window.as_filter()
+    hours = window.hours or 24
+
+    if hours <= 1:
+        granularity = 'raw'
+        trunc = None
+    elif hours <= 24 * 7:
+        granularity = 'hour'
+        trunc = TruncHour
+    else:
+        granularity = 'day'
+        trunc = TruncDay
+
+    settings_obj = CollectorSettings.get_settings()
+    energy_rate = float(settings_obj.energy_rate or 0)
+    currency = settings_obj.energy_currency or 'EUR'
+    btc_price = float(settings_obj.cached_btc_price or 0)
+
+    devices = list(Device.objects.all().order_by('name'))
+    payload_devices = []
+    comparison = []
+
+    for device in devices:
+        mining_qs = DeviceMiningStats.objects.filter(device=device, **time_filter)
+        hardware_qs = DeviceHardwareStats.objects.filter(device=device, **time_filter)
+
+        if granularity == 'raw':
+            mining_rows = list(
+                mining_qs.order_by('recorded_at').values('recorded_at', 'hashrate_ghs')
+            )
+            hardware_rows = list(
+                hardware_qs.order_by('recorded_at').values(
+                    'recorded_at', 'temperature_c', 'temperature_chip_c', 'power_watts'
+                )
+            )
+            series = []
+            hardware_by_time = {row['recorded_at']: row for row in hardware_rows}
+            for row in mining_rows:
+                hardware = hardware_by_time.get(row['recorded_at'], {})
+                series.append({
+                    't': row['recorded_at'].isoformat(),
+                    'hashrate_ghs': row['hashrate_ghs'],
+                    'temperature_c': hardware.get('temperature_c'),
+                    'temperature_chip_c': hardware.get('temperature_chip_c'),
+                    'power_watts': hardware.get('power_watts'),
+                })
+            if not series:
+                for row in hardware_rows:
+                    series.append({
+                        't': row['recorded_at'].isoformat(),
+                        'hashrate_ghs': None,
+                        'temperature_c': row['temperature_c'],
+                        'temperature_chip_c': row['temperature_chip_c'],
+                        'power_watts': row['power_watts'],
+                    })
+        else:
+            mining_buckets = (
+                mining_qs.annotate(bucket=trunc('recorded_at'))
+                .values('bucket')
+                .annotate(hashrate_ghs=Avg('hashrate_ghs'), samples=Count('id'))
+                .order_by('bucket')
+            )
+            hardware_buckets = (
+                hardware_qs.annotate(bucket=trunc('recorded_at'))
+                .values('bucket')
+                .annotate(
+                    temperature_c=Avg('temperature_c'),
+                    temperature_chip_c=Avg('temperature_chip_c'),
+                    power_watts=Avg('power_watts'),
+                )
+                .order_by('bucket')
+            )
+            hardware_by_bucket = {row['bucket']: row for row in hardware_buckets}
+            series = []
+            for row in mining_buckets:
+                hardware = hardware_by_bucket.pop(row['bucket'], {})
+                series.append({
+                    't': row['bucket'].isoformat(),
+                    'hashrate_ghs': row['hashrate_ghs'],
+                    'temperature_c': hardware.get('temperature_c'),
+                    'temperature_chip_c': hardware.get('temperature_chip_c'),
+                    'power_watts': hardware.get('power_watts'),
+                })
+            for bucket, hardware in sorted(hardware_by_bucket.items()):
+                series.append({
+                    't': bucket.isoformat(),
+                    'hashrate_ghs': None,
+                    'temperature_c': hardware.get('temperature_c'),
+                    'temperature_chip_c': hardware.get('temperature_chip_c'),
+                    'power_watts': hardware.get('power_watts'),
+                })
+            series.sort(key=lambda item: item['t'])
+
+        mining_agg = mining_qs.aggregate(
+            avg_hashrate=Avg('hashrate_ghs'),
+            max_hashrate=Max('hashrate_ghs'),
+            min_hashrate=Min('hashrate_ghs'),
+            best_difficulty=Max('best_difficulty'),
+            first_accepted=Min('shares_accepted'),
+            last_accepted=Max('shares_accepted'),
+            first_rejected=Min('shares_rejected'),
+            last_rejected=Max('shares_rejected'),
+            samples=Count('id'),
+        )
+        hardware_agg = hardware_qs.aggregate(
+            avg_temp=Avg('temperature_c'),
+            max_temp=Max('temperature_c'),
+            avg_chip=Avg('temperature_chip_c'),
+            max_chip=Max('temperature_chip_c'),
+            avg_power=Avg('power_watts'),
+            max_power=Max('power_watts'),
+            avg_efficiency=Avg('efficiency_j_per_th'),
+            samples=Count('id'),
+        )
+
+        avg_power = hardware_agg['avg_power'] or 0
+        energy_kwh = (avg_power / 1000.0) * hours
+        energy_cost = energy_kwh * energy_rate
+        accepted_delta = max(
+            0, (mining_agg['last_accepted'] or 0) - (mining_agg['first_accepted'] or 0)
+        )
+        rejected_delta = max(
+            0, (mining_agg['last_rejected'] or 0) - (mining_agg['first_rejected'] or 0)
+        )
+        shares_total = accepted_delta + rejected_delta
+
+        expected_samples = None
+        if granularity == 'raw':
+            expected_samples = None
+        availability = None
+        if mining_agg['samples']:
+            first = mining_qs.order_by('recorded_at').values_list('recorded_at', flat=True).first()
+            last = mining_qs.order_by('-recorded_at').values_list('recorded_at', flat=True).first()
+            if first and last and last > first:
+                covered = (last - first).total_seconds()
+                availability = min(100.0, (covered / (hours * 3600.0)) * 100.0)
+
+        summary = {
+            'avg_hashrate_ghs': mining_agg['avg_hashrate'],
+            'max_hashrate_ghs': mining_agg['max_hashrate'],
+            'min_hashrate_ghs': mining_agg['min_hashrate'],
+            'best_difficulty': mining_agg['best_difficulty'],
+            'shares_accepted': accepted_delta,
+            'shares_rejected': rejected_delta,
+            'rejection_rate': round((rejected_delta / shares_total) * 100, 2) if shares_total else 0,
+            'avg_temperature_c': hardware_agg['avg_temp'],
+            'max_temperature_c': hardware_agg['max_temp'],
+            'avg_chip_temperature_c': hardware_agg['avg_chip'],
+            'max_chip_temperature_c': hardware_agg['max_chip'],
+            'avg_power_watts': avg_power,
+            'max_power_watts': hardware_agg['max_power'],
+            'avg_efficiency_j_per_th': hardware_agg['avg_efficiency'],
+            'energy_kwh': round(energy_kwh, 3),
+            'energy_cost': round(energy_cost, 2),
+            'availability_percent': round(availability, 1) if availability is not None else None,
+            'samples': mining_agg['samples'],
+            'expected_samples': expected_samples,
+        }
+
+        config = device.connection_config or {}
+        pool_config = config.get('pool_stats') or {}
+        worker_name = (pool_config.get('worker') or '').strip()
+        pool_view = None
+        if pool_config.get('address'):
+            latest_pool = (
+                PoolStats.objects.filter(
+                    pool_type=pool_config.get('type'), pool_address=pool_config.get('address')
+                )
+                .order_by('-recorded_at')
+                .first()
+            )
+            if latest_pool:
+                details = latest_pool.details or {}
+                worker_rows = details.get('workers') or []
+                match = None
+                for entry in worker_rows:
+                    name = str(entry.get('name') or '')
+                    if worker_name and name.lower() == worker_name.lower():
+                        match = entry
+                        break
+                if match is None and len(worker_rows) == 1 and not worker_name:
+                    match = worker_rows[0]
+                pool_view = {
+                    'pool_type': latest_pool.pool_type,
+                    'account': latest_pool.pool_address,
+                    'recorded_at': latest_pool.recorded_at.isoformat(),
+                    'worker': match.get('name') if match else worker_name or None,
+                    'worker_hashrate_ghs': match.get('hash_rate_ghs') if match else None,
+                    'worker_status': match.get('status') if match else None,
+                    'last_share_at': match.get('last_share_at') if match else None,
+                    'matched': bool(match),
+                    'available_workers': [str(entry.get('name')) for entry in worker_rows],
+                }
+
+        payload_devices.append({
+            'device': DeviceSerializer(device).data,
+            'summary': summary,
+            'pool': pool_view,
+            'series': series,
+        })
+        comparison.append({
+            'device_id': device.device_id,
+            'device_name': device.name,
+            'make': device.make,
+            'model': device.model,
+            'avg_hashrate_ghs': summary['avg_hashrate_ghs'],
+            'avg_power_watts': summary['avg_power_watts'],
+            'avg_efficiency_j_per_th': summary['avg_efficiency_j_per_th'],
+            'max_chip_temperature_c': summary['max_chip_temperature_c'],
+            'energy_kwh': summary['energy_kwh'],
+            'energy_cost': summary['energy_cost'],
+            'rejection_rate': summary['rejection_rate'],
+            'availability_percent': summary['availability_percent'],
+            'best_difficulty': summary['best_difficulty'],
+        })
+
+    accounts = []
+    seen_accounts = set()
+    for device in devices:
+        pool_config = (device.connection_config or {}).get('pool_stats') or {}
+        address = pool_config.get('address')
+        pool_type = pool_config.get('type')
+        if not address or (pool_type, address) in seen_accounts:
+            continue
+        seen_accounts.add((pool_type, address))
+        latest_pool = (
+            PoolStats.objects.filter(pool_type=pool_type, pool_address=address)
+            .order_by('-recorded_at')
+            .first()
+        )
+        if not latest_pool:
+            continue
+        details = latest_pool.details or {}
+        balance = details.get('balance') or {}
+        accounts.append({
+            'pool_type': latest_pool.pool_type,
+            'account': latest_pool.pool_address,
+            'recorded_at': latest_pool.recorded_at.isoformat(),
+            'hashrate_ghs': latest_pool.hashrate_1m_ghs,
+            'hashrate_1h_ghs': latest_pool.hashrate_1h_ghs,
+            'hashrate_1d_ghs': latest_pool.hashrate_1d_ghs,
+            'workers': latest_pool.workers,
+            'balance_btc': balance.get('balance'),
+            'paid_btc': balance.get('paid'),
+            'total_income_btc': balance.get('total_income'),
+            'yesterday_income_btc': balance.get('yesterday_income'),
+            'estimated_today_income_btc': balance.get('estimated_today_income'),
+            'immature_balance_btc': balance.get('immature_balance'),
+        })
+
+    return Response({
+        'window': {
+            'start': window.start.isoformat(),
+            'end': window.end.isoformat(),
+            'hours': hours,
+            'granularity': granularity,
+        },
+        'money': {
+            'currency': currency,
+            'btc_price': btc_price,
+            'energy_rate': energy_rate,
+            'price_updated_at': (
+                settings_obj.network_data_updated_at.isoformat()
+                if settings_obj.network_data_updated_at
+                else None
+            ),
+        },
+        'accounts': accounts,
+        'devices': payload_devices,
+        'comparison': comparison,
+    })
+
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def refresh_network_data(request):
@@ -441,15 +1341,17 @@ def refresh_network_data(request):
         # Fetch BTC price from CoinGecko (free, no API key required)
         try:
             price_response = requests.get(
-                'https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd',
+                'https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd,eur',
                 timeout=10
             )
             if price_response.ok:
                 price_data = price_response.json()
-                btc_price = price_data.get('bitcoin', {}).get('usd')
+                prices = price_data.get('bitcoin', {})
+                currency = (settings.energy_currency or 'EUR').lower()
+                btc_price = prices.get(currency) or prices.get('eur') or prices.get('usd')
                 if btc_price:
                     settings.cached_btc_price = btc_price
-                    logger.info(f"Updated BTC price: ${btc_price}")
+                    logger.info(f"Updated BTC price: {btc_price} {settings.energy_currency}")
         except Exception as e:
             errors.append(f"Failed to fetch BTC price: {str(e)}")
             logger.warning(f"Failed to fetch BTC price: {e}")
@@ -894,7 +1796,13 @@ def device_capabilities(request, make, device_id):
         'offline': not online,
         'capabilities': caps,
         'confirm_actions': sorted(CONTROL_CONFIRM_ACTIONS),
+        'calibration_active': _calibration_active(device),
     })
+
+
+def _calibration_active(device):
+    """A Takt-Tabellen run is active on this device: the generic controls are locked meanwhile."""
+    return CalibrationRun.objects.filter(device=device, status__in=DeviceViewSet.CAL_ACTIVE).exists()
 
 
 @api_view(['POST'])
@@ -929,6 +1837,11 @@ def device_control(request, make, device_id):
     if not is_device_online_server(device):
         return Response(
             {'error': 'Device appears offline — controls are disabled'},
+            status=status.HTTP_409_CONFLICT,
+        )
+    if _calibration_active(device):
+        return Response(
+            {'error': 'Takt-Messung läuft – die Steuerung ist bis zum Ende der Messung gesperrt.'},
             status=status.HTTP_409_CONFLICT,
         )
 

@@ -2,14 +2,12 @@ version: '3.8'
 
 services:
   postgres:
-    image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
+    image: docker.io/library/postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
     container_name: minersentinel-postgres
     restart: unless-stopped
     env_file: ".env"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
     networks:
       - minersentinel-network
     healthcheck:
@@ -31,8 +29,6 @@ services:
       DJANGO_SUPERUSER_EMAIL: "${DEFAULT_EMAIL:-satoshi@example.com}"
     volumes:
       - ./backend:/app
-    ports:
-      - "8000:8000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -64,20 +60,17 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
-      target: development
-    container_name: minersentinel-frontend
+      target: production
+    container_name: minersentinel-web
     restart: unless-stopped
     env_file: ".env"
-    volumes:
-      - ./frontend:/app
-      - /app/node_modules
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3080:80"
     depends_on:
       - backend
     networks:
       - minersentinel-network
-    command: npm run dev -- --host 0.0.0.0
+
 
 networks:
   minersentinel-network:
