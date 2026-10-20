@@ -9,9 +9,27 @@ import { Fan, Loader2, RefreshCw } from 'lucide-react'
 import { useCallback, useEffect, useState } from 'react'
 
 const ACTIONS = {
-  set: 'Stufe setzen',
-  on: 'An (atType 2)',
-  off: 'Aus (atType 1)',
+  set: 'Stufe',
+  on: 'An',
+  off: 'Aus',
+}
+
+// selected fan port per controller, kept when leaving the page
+function storedPort(devId) {
+  try {
+    const value = Number(localStorage.getItem('fans.port.' + devId))
+    return value >= 1 && value <= 4 ? value : null
+  } catch {
+    return null
+  }
+}
+
+function storePort(devId, port) {
+  try {
+    localStorage.setItem('fans.port.' + devId, String(port))
+  } catch {
+    // no browser storage: the port is only kept while the page is open
+  }
 }
 
 function fmt(value, digits = 1, unit = '') {
@@ -30,11 +48,19 @@ function errText(err, fallback) {
 
 function Controller({ dev, backups, onReload }) {
   const fanPorts = dev.ports.filter((p) => p.port >= 1 && p.port <= 4)
-  const [port, setPort] = useState(() => {
+  const [port, setPortState] = useState(() => {
+    const stored = storedPort(dev.dev_id)
+    if (stored) return stored
     const active = fanPorts.find((p) => p.speak > 0) || fanPorts[0]
     return active ? active.port : 1
   })
-  const [speed, setSpeed] = useState(5)
+  const setPort = (value) => {
+    setPortState(value)
+    storePort(dev.dev_id, value)
+  }
+  // the highlighted level is the one the controller reports for the selected port
+  const current = dev.ports.find((p) => p.port === port)?.speak
+  const [pending, setPending] = useState(null)
   const [busy, setBusy] = useState(null)
   const [msg, setMsg] = useState(null)
   const [results, setResults] = useState([])
@@ -74,8 +100,9 @@ function Controller({ dev, backups, onReload }) {
     }
   }
 
-  const test = async (action) => {
+  const test = async (action, speed = 0) => {
     setBusy(action)
+    setPending(action === 'set' ? speed : null)
     setMsg(null)
     const started = new Date().toISOString()
     try {
@@ -86,15 +113,26 @@ function Controller({ dev, backups, onReload }) {
       setResults((prev) => [{ action, at: started, error: errText(err, 'Befehl fehlgeschlagen.') }, ...prev])
     } finally {
       setBusy(null)
+      setPending(null)
     }
   }
+  const locked = !!busy || own.length === 0
 
   return (
     <Card>
       <CardHeader className="pb-2">
-        <CardTitle className="flex items-center gap-2 text-base font-semibold">
+        <CardTitle className="flex flex-wrap items-center gap-2 text-base font-semibold">
           <Fan className="h-4 w-4 text-muted-foreground" />
-          {dev.name || 'Controller'} · devType {dev.dev_type ?? '—'}
+          {dev.name || 'Controller'}
+          <span className="ml-auto flex gap-2">
+            {['on', 'off'].map((key) => (
+              <Button key={key} size="sm" variant="outline" className="h-8 px-4" disabled={locked}
+                onClick={() => test(key)}>
+                {busy === key && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
+                {ACTIONS[key]}
+              </Button>
+            ))}
+          </span>
         </CardTitle>
         <CardDescription className="text-xs">
           {dev.online ? 'online' : 'offline'} · Temperatur {fmt(dev.temperature_c, 1, ' °C')} · Luftfeuchte{' '}
@@ -164,39 +202,31 @@ function Controller({ dev, backups, onReload }) {
         </div>
 
         <div className="space-y-2 rounded-md border border-border/80 p-3">
-          <p className="text-sm font-medium">Test</p>
-          <div className="flex flex-wrap items-center gap-3 text-xs">
-            <label className="flex items-center gap-1.5">
-              Lüfter an Port
-              <select className="rounded border border-border bg-background px-2 py-1" value={port}
-                onChange={(e) => setPort(Number(e.target.value))} disabled={!!busy}>
-                {[1, 2, 3, 4].map((p) => (
-                  <option key={p} value={p}>{p}</option>
-                ))}
-              </select>
-            </label>
+          <div className="flex flex-wrap items-center gap-1.5 text-xs">
+            <span className="w-10">Port</span>
+            {[1, 2, 3, 4].map((p) => (
+              <Button key={p} size="sm" className="h-8 w-9 px-0 tabular-nums"
+                variant={port === p ? 'default' : 'outline'} aria-pressed={port === p}
+                disabled={!!busy} onClick={() => setPort(p)}>
+                {p}
+              </Button>
+            ))}
           </div>
           <div className="flex flex-wrap items-center gap-1.5 text-xs">
-            <span className="mr-1">Stufe</span>
+            <span className="w-10">Stufe</span>
             {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((s) => (
               <Button key={s} size="sm" className="h-8 w-9 px-0 tabular-nums"
-                variant={speed === s ? 'default' : 'outline'} aria-pressed={speed === s}
-                disabled={!!busy} onClick={() => setSpeed(s)}>
-                {s}
+                variant={current === s ? 'default' : 'outline'} aria-pressed={current === s}
+                disabled={locked} onClick={() => test('set', s)}>
+                {pending === s ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : s}
               </Button>
             ))}
           </div>
-          <div className="flex flex-wrap gap-2">
-            {Object.entries(ACTIONS).map(([key, label]) => (
-              <Button key={key} size="sm" variant={key === 'set' ? 'default' : 'secondary'}
-                disabled={!!busy || own.length === 0} onClick={() => test(key)}>
-                {busy === key && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
-                {label}
-              </Button>
-            ))}
-          </div>
+          {own.length === 0 && (
+            <p className="text-xs text-muted-foreground">Erst eine Sicherung erstellen, dann sind die Buttons frei.</p>
+          )}
           {busy && busy !== 'backup' && busy !== 'restore' && (
-            <p className="text-xs text-muted-foreground">Befehl gesendet, warte 10 s und lese die Stufe neu …</p>
+            <p className="text-xs text-muted-foreground">Befehl gesendet, warte 3 s und lese die Stufe neu …</p>
           )}
           <p className="text-xs text-muted-foreground">
             Zwischen zwei Schreibbefehlen liegen mindestens 1,5 s. Während der Tests kann die Handy-App abgemeldet werden.

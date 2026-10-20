@@ -8,7 +8,7 @@ from rest_framework.response import Response
 
 from . import acinfinity as ac
 
-READ_BACK_S = 10      # the controller reports a new speed only after > 5 s
+READ_BACK_S = 3       # user choice (was 10); measured: the controller reports a new speed only after > 5 s
 
 
 def _error(exc):
