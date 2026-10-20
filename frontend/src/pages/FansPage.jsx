@@ -175,15 +175,16 @@ function Controller({ dev, backups, onReload }) {
                 ))}
               </select>
             </label>
-            <label className="flex items-center gap-1.5">
-              Stufe
-              <select className="rounded border border-border bg-background px-2 py-1" value={speed}
-                onChange={(e) => setSpeed(Number(e.target.value))} disabled={!!busy}>
-                {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((s) => (
-                  <option key={s} value={s}>{s}</option>
-                ))}
-              </select>
-            </label>
+          </div>
+          <div className="flex flex-wrap items-center gap-1.5 text-xs">
+            <span className="mr-1">Stufe</span>
+            {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((s) => (
+              <Button key={s} size="sm" className="h-8 w-9 px-0 tabular-nums"
+                variant={speed === s ? 'default' : 'outline'} aria-pressed={speed === s}
+                disabled={!!busy} onClick={() => setSpeed(s)}>
+                {s}
+              </Button>
+            ))}
           </div>
           <div className="flex flex-wrap gap-2">
             {Object.entries(ACTIONS).map(([key, label]) => (
