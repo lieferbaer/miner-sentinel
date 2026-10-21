@@ -67,6 +67,39 @@ function useAutomation(initial) {
   return [auto, setAuto]
 }
 
+const MODE_LABEL = { '2/L4': 'Power Mode 04', '2/L3': 'Power Mode 03', '2/L2': 'Power Mode 02',
+  '2/L1': 'Power Mode 01', '2/L0': 'Power Mode 00', '1/-': 'High Performance' }
+
+/** Learned values: clock per fan level at which TMax stayed 10 min within 80-84 °C (current mode first). */
+function LearnedTable({ learned, mode, level }) {
+  const modes = Object.keys(learned || {}).sort((a, b) => (a === mode ? -1 : b === mode ? 1 : a.localeCompare(b)))
+  if (!modes.length) {
+    return <p className="text-muted-foreground">Lernwerte: noch keine (nach 10 min ruhig bei 80–84 °C).</p>
+  }
+  return (
+    <div className="space-y-1 pt-1">
+      {modes.map((m) => (
+        <div key={m}>
+          <p className="font-medium">Lernwerte {MODE_LABEL[m] || m}{m === mode ? ' (aktiv)' : ''}</p>
+          <table className="text-xs">
+            <tbody>
+              {Object.entries(learned[m])
+                .sort((a, b) => Number(a[0]) - Number(b[0]))
+                .map(([lv, v]) => (
+                  <tr key={lv} className={m === mode && Number(lv) === level ? 'font-semibold' : ''}>
+                    <td className="pr-3">Stufe {lv}</td>
+                    <td className="pr-3 tabular-nums">{fmt(v.mhz, 0, ' MHz')}</td>
+                    <td className="text-muted-foreground">{when(v.at)}</td>
+                  </tr>
+                ))}
+            </tbody>
+          </table>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 function AutomationPanel({ auto, here, port, level, locked, onCommand, busy }) {
   if (!auto) return null
   const st = auto.state || {}
@@ -113,6 +146,7 @@ function AutomationPanel({ auto, here, port, level, locked, onCommand, busy }) {
         {st.phase === 'messung' && st.cal_fan ? ' · Messung: Stufe ' + st.cal_fan : ''}
         {st.boost ? ' · Schutz +' + st.boost : ''}
       </p>
+      <LearnedTable learned={auto.learned} mode={st.mode_key} level={auto.level} />
       {st.ac_error && <p className="text-amber-600">AC Infinity: {st.ac_error}</p>}
       {st.last_error && <p className="text-destructive">Fehler: {st.last_error}</p>}
       {auto.log?.length > 0 && (

@@ -44,8 +44,8 @@ MAX_WAIT = 300             # max run: each measurement waits at least this long 
                            # or after the previous measurement
 RESEND_S = 20              # a mode switch not confirmed after this long is sent again (the A15 often drops
                            # the connection of the switch command without applying it)
-CACHE_MAX_AGE = 15        # s: readings of the collector (every 10 s) are used up to this age, except
-                           # while the clocks of a point settle or a point is measured (always read fresh)
+CACHE_MAX_AGE = 15        # s: readings of the central reader (live_reader.py, every 5 s; this runs right after it)
+WEB_MAX_AGE = 35           # s: A15 web settings, read every 30 s centrally (own mode switches clear them at once)
 A15_LEVEL_LABELS = {4: 'Power Mode 04', 3: 'Power Mode 03', 2: 'Power Mode 02', 1: 'Power Mode 01', 0: 'Power Mode 00'}
 A15_MODE_LABELS = {1: 'High Performance'}
 
@@ -184,7 +184,7 @@ def read_miner(ip, port, fresh=False):
         summary = {}
     fields = _fields(estats)
     points = [int(v) for v in str(fields.get('SF0') or '').split()] if isinstance(fields.get('SF0'), str) else []
-    conf = miner_cache.fetch(ip, 'web', CACHE_MAX_AGE, lambda: _retry('A15-Einstellungsseite lesen', a15_conf, ip))
+    conf = miner_cache.fetch(ip, 'web', WEB_MAX_AGE, lambda: _retry('A15-Einstellungsseite lesen', a15_conf, ip))
     wm = _num(fields.get('WORKMODE'))
     key = None
     if wm is not None:
@@ -272,8 +272,8 @@ def step_run(conn, run):
     st = run['state'] or {}
     now = _now()
     ip, port = run['ip_address'], run['port']
-    # clocks settling / measuring: values as fresh as before; otherwise the collector's readings suffice
-    m = read_miner(ip, port, fresh=st.get('phase') in ('set_clock', 'measure'))
+    # the central reading taken just before this round (as fresh as an own request)
+    m = read_miner(ip, port)
     if not m['points']:
         return run
     st['seen_at'] = _iso(now)

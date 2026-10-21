@@ -176,3 +176,37 @@ def test_protection_uses_latest_reading(miner):
     miner.tmax = 89.0                                # one hot reading is enough for the protection
     st = fa.step(row(st), now, ac)
     assert st['t_now'] == 89.0 and st['boost'] == 1 and ac.writes[-1] == 6
+
+
+def test_learns_clock_after_10_quiet_minutes(miner):
+    ac = FakeAC(level=3)
+    miner.tmax = 82.0
+    miner.points = [234, 234, 234]
+    st, _ = run({}, miner, ac, 11 * 60, level=3)
+    assert st['learned']['2/L4']['3']['mhz'] == 234.0
+    assert miner.sets == []
+
+
+def test_lowering_uses_learned_clock(miner):
+    ac = FakeAC(level=5)
+    miner.tmax = 82.0
+    learned = {'2/L4': {'3': {'mhz': 234.0, 'at': 'x'}}}
+    st, now = run({'learned': learned}, miner, ac, 60, level=5)
+    st['learned'] = learned
+    st = fa.step(row(st, level=3), now, ac)
+    assert miner.sets == [234.0] and ac.writes == []           # clock straight to the learned value
+    st, now = run(st, miner, ac, fa.WAIT_S + 10, level=3, start=now + timedelta(seconds=5))
+    assert ac.writes == [3]                                     # fan follows after 3 min
+
+
+def test_raising_uses_learned_clock_after_fan(miner):
+    ac = FakeAC(level=3)
+    miner.tmax = 82.0
+    miner.points = [234, 234, 234]
+    learned = {'2/L4': {'5': {'mhz': 300.0, 'at': 'x'}}}
+    st, now = run({'learned': learned}, miner, ac, 60, level=3)
+    st['learned'] = learned
+    st = fa.step(row(st, level=5), now, ac)
+    assert ac.writes == [5] and miner.sets == []               # fan at once
+    st, now = run(st, miner, ac, fa.RAISE_DELAY_S + 10, level=5, start=now + timedelta(seconds=5))
+    assert miner.sets == [300.0]                               # learned clock 60 s later

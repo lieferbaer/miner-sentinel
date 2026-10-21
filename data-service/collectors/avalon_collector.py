@@ -33,6 +33,8 @@ from retrying import retry
 logger = logging.getLogger(__name__)
 
 SLOW_MAX_AGE = 600      # s: 'version' and 'pools' (firmware, MAC, serial, pool URL/user) only every 10 min
+LIVE_MAX_AGE = 8        # s: estats/summary of the central reader (live_reader.py, every 5 s) are used up to this age
+WEB_MAX_AGE = 35        # s: A15 web interface settings (power level), read every 30 s by the central reader
 
 
 class AvalonCollector:
@@ -159,22 +161,7 @@ class AvalonCollector:
                 parsed = json.loads(response_str)
                 if command in ('estats', 'summary') and response_str:
                     miner_cache.put(ip, command, response_str)
-                # Return the actual data part based on command
-                if isinstance(parsed, dict):
-                    if command.upper() in parsed and parsed[command.upper()]:
-                        return parsed[command.upper()][0] if isinstance(parsed[command.upper()], list) else parsed[command.upper()]
-                    elif command.lower() == 'version' and 'VERSION' in parsed and parsed['VERSION']:
-                        return parsed['VERSION'][0]
-                    elif command.lower() == 'summary' and 'SUMMARY' in parsed and parsed['SUMMARY']:
-                        return parsed['SUMMARY'][0]
-                    elif command.lower() == 'estats' and 'STATS' in parsed and parsed['STATS']:
-                        return parsed['STATS'][0]
-                    elif command.lower() == 'pools' and 'POOLS' in parsed and parsed['POOLS']:
-                        return parsed['POOLS'][0]  # Return first pool
-                    else:
-                        # Return full response for debugging
-                        return parsed
-                return parsed
+                return self._data_part(command, parsed)
             except json.JSONDecodeError:
                 logger.error(f"Failed to parse JSON response from {ip}: {response_str[:500]}")
                 return {"raw_response": response_str}
@@ -185,6 +172,35 @@ class AvalonCollector:
         finally:
             if sock:
                 sock.close()
+
+    def _live_request(self, ip, command, port):
+        """estats/summary: the central reader's reading if fresh (no request), else ask the miner."""
+        raw = miner_cache.get(ip, command, LIVE_MAX_AGE)
+        if raw:
+            try:
+                return self._data_part(command, json.loads(raw))
+            except ValueError:
+                pass
+        return self._socket_request(ip, command, port=port)
+
+    @staticmethod
+    def _data_part(command, parsed):
+        """The data part of a parsed cgminer reply."""
+        if isinstance(parsed, dict):
+            if command.upper() in parsed and parsed[command.upper()]:
+                return parsed[command.upper()][0] if isinstance(parsed[command.upper()], list) else parsed[command.upper()]
+            elif command.lower() == 'version' and 'VERSION' in parsed and parsed['VERSION']:
+                return parsed['VERSION'][0]
+            elif command.lower() == 'summary' and 'SUMMARY' in parsed and parsed['SUMMARY']:
+                return parsed['SUMMARY'][0]
+            elif command.lower() == 'estats' and 'STATS' in parsed and parsed['STATS']:
+                return parsed['STATS'][0]
+            elif command.lower() == 'pools' and 'POOLS' in parsed and parsed['POOLS']:
+                return parsed['POOLS'][0]  # Return first pool
+            else:
+                # Return full response for debugging
+                return parsed
+        return parsed
 
     def _parse_cgminer_response(self, response_str):
         """Parse cgminer API response format."""
@@ -559,15 +575,16 @@ class AvalonCollector:
             return level
         if self._int_field(stats_info, 'WORKMODE') != 2:
             return None          # A15 levels exist only in Power Mode (WORKMODE 2)
-        try:
+        def read_web():
             import urllib.request
             with miner_cache.lock(device_ip):
                 raw = urllib.request.urlopen('http://%s/updatecgconf.cgi' % device_ip, timeout=4).read()
-                match = re.search(r'CGConfCallback\((\{.*?\})\);', raw.decode('utf-8', 'replace'), re.S)
-                conf = json.loads(match.group(1)) if match else {}
-                if conf:
-                    # shared with the throttle controller and the Takt-Tabellen
-                    miner_cache.put(device_ip, 'web', conf)
+            match = re.search(r'CGConfCallback\((\{.*?\})\);', raw.decode('utf-8', 'replace'), re.S)
+            return json.loads(match.group(1)) if match else None
+
+        try:
+            # shared with the central reader, the throttle controller and the Takt-Tabellen
+            conf = miner_cache.fetch(device_ip, 'web', WEB_MAX_AGE, read_web) or {}
         except (OSError, ValueError):
             return None
         return conf.get('power_level') if conf.get('mode') == 2 else None
@@ -802,8 +819,8 @@ class AvalonCollector:
         try:
             version_info = miner_cache.fetch(device_ip, 'version_info', SLOW_MAX_AGE,
                                              lambda: self._socket_request(device_ip, 'version', port=api_port))
-            summary_info = self._socket_request(device_ip, 'summary', port=api_port)
-            stats_info = self._socket_request(device_ip, 'estats', port=api_port)
+            summary_info = self._live_request(device_ip, 'summary', api_port)
+            stats_info = self._live_request(device_ip, 'estats', api_port)
             pools_info = miner_cache.fetch(device_ip, 'pools_info', SLOW_MAX_AGE,
                                            lambda: self._socket_request(device_ip, 'pools', port=api_port))
 

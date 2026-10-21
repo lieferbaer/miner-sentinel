@@ -27,7 +27,7 @@ from collectors.publicpool_collector import collect_publicpool_data
 import miner_cache
 from throttle_controller import run_throttle_controller
 from calibration import run_calibration
-from fan_automation import RUN_S as FAN_AUTOMATION_S, run_fan_automation
+from live_reader import READ_S as LIVE_READ_S, run_live_cycle
 from decouple import config
 from flask import Flask, jsonify, request
 from notifications.emitter import emit_alert, resolve_open_alerts
@@ -589,29 +589,13 @@ def reschedule_jobs():
         next_run_time=datetime.now(),
     )
 
+    # central reading of the Avalon miners every 5 s; right after it the Temperatur-Automatik
+    # (every reading) and the throttle controller + Takt-Tabellen (every 15 s) run on these values
     scheduler.add_job(
-        func=lambda: run_throttle_controller(DATABASE_URL),
-        trigger=IntervalTrigger(seconds=15),
-        id='throttle_controller',
-        name='Throttle controller (Avalon)',
-        replace_existing=True,
-        max_instances=1,
-        coalesce=True,
-    )
-    scheduler.add_job(
-        func=lambda: run_fan_automation(DATABASE_URL),
-        trigger=IntervalTrigger(seconds=FAN_AUTOMATION_S),
-        id='fan_automation',
-        name='Temperatur-Automatik (A15)',
-        replace_existing=True,
-        max_instances=1,
-        coalesce=True,
-    )
-    scheduler.add_job(
-        func=lambda: run_calibration(DATABASE_URL),
-        trigger=IntervalTrigger(seconds=15),
-        id='calibration',
-        name='Takt-Tabellen (A15)',
+        func=lambda: run_live_cycle(DATABASE_URL, run_throttle_controller, run_calibration),
+        trigger=IntervalTrigger(seconds=LIVE_READ_S),
+        id='live_cycle',
+        name='Zentrale Abfrage Avalon',
         replace_existing=True,
         max_instances=1,
         coalesce=True,

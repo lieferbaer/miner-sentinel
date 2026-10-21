@@ -46,7 +46,8 @@ def automation_payload():
         'port': auto.ac_port, 'level': auto.level,
         'state': {k: st.get(k) for k in ('t', 'phase', 'base', 'boost', 'fan_set', 'fan_read', 'fan_read_at',
                                          'clock_set', 'clock_now', 'stock_mhz', 'changed_at', 'cal', 'cal_fan', 'ac_error',
-                                         'last_error', 'seen_at', 'throttled')},
+                                         'last_error', 'seen_at', 'throttled', 'mode_key', 'raise_to')},
+        'learned': st.get('learned') or {},
         'log': (st.get('log') or [])[-15:][::-1],
     }
 
