@@ -9,10 +9,9 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import api from '@/lib/api'
+import { useLive } from '@/lib/LiveContext'
 import { Gauge, Loader2 } from 'lucide-react'
-import { useCallback, useEffect, useState } from 'react'
-
-const REFRESH_MS = 30000
+import { useEffect, useState } from 'react'
 const EVENT_VISIBLE_MS = 30 * 60 * 1000
 
 function fmt(value, digits = 1) {
@@ -100,29 +99,15 @@ function manualPointText(active) {
   return 'Messpunkt wird nach 15 min unverändertem Takt gespeichert (ca. ' + clock(at) + ').'
 }
 
-/** Shared throttle state for one device (status card + control card). */
+/** Shared throttle state for one device (status card + control card), from the live poll of the UI. */
 export function useThrottle(deviceId, enabled) {
-  const [state, setState] = useState(null)
-  const [loadError, setLoadError] = useState(null)
-
-  const load = useCallback(async () => {
-    try {
-      const { data } = await api.get(`/api/devices/${deviceId}/throttle/`)
-      setState(data)
-      setLoadError(null)
-    } catch (error) {
-      setLoadError(error?.response?.data?.error || 'Miner nicht erreichbar')
-    }
-  }, [deviceId])
-
-  useEffect(() => {
-    if (!enabled) return undefined
-    load()
-    const timer = setInterval(load, REFRESH_MS)
-    return () => clearInterval(timer)
-  }, [enabled, load])
-
-  return { state, setState, loadError, reload: load }
+  const live = useLive()
+  const fromLive = enabled ? live.data?.throttle?.[deviceId] || null : null
+  const [state, setState] = useState(fromLive)
+  // every live answer replaces a value set locally after a command
+  useEffect(() => setState(fromLive), [fromLive])
+  const loadError = live.error ? 'Status nicht aktualisiert' : null
+  return { state, setState, loadError, reload: live.refresh }
 }
 
 /** Hero card: throttled or not, relative to the current mode. */

@@ -4,10 +4,9 @@
  */
 import { Button } from '@/components/ui/button'
 import api from '@/lib/api'
+import { useLive } from '@/lib/LiveContext'
 import { AlertTriangle } from 'lucide-react'
-import { useCallback, useEffect, useState } from 'react'
-
-const REFRESH_MS = 15000
+import { useState } from 'react'
 
 function OverHotDevice({ device }) {
   const [confirm, setConfirm] = useState(false)
@@ -55,25 +54,10 @@ function OverHotDevice({ device }) {
 }
 
 export default function OverHotBanner() {
-  const [devices, setDevices] = useState([])
-
-  const load = useCallback(async () => {
-    try {
-      const { data } = await api.get('/api/devices/system-latest/')
-      setDevices(
-        Object.values(data || {}).filter((d) => d && d.id && /over\s*hot/i.test(String(d.system_status || ''))),
-      )
-    } catch {
-      /* keep the last state; the next poll retries */
-    }
-  }, [])
-
-  useEffect(() => {
-    load()
-    const timer = setInterval(load, REFRESH_MS)
-    return () => clearInterval(timer)
-  }, [load])
-
+  const { data } = useLive()
+  const devices = Object.values(data?.system || {}).filter(
+    (d) => d && d.id && /over\s*hot/i.test(String(d.system_status || '')),
+  )
   if (!devices.length) return null
   return (
     <div className="mb-4 space-y-2">

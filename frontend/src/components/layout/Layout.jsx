@@ -4,6 +4,7 @@ import { useTheme } from '@/components/theme-provider'
 import { Button } from '@/components/ui/button'
 import { toast } from '@/components/ui/toaster'
 import { useAuth } from '@/lib/AuthContext'
+import { LiveProvider } from '@/lib/LiveContext'
 import {
   BTC_DONATE_ADDRESS,
   GITHUB_ISSUES_URL,
@@ -381,6 +382,7 @@ export default function Layout({ children }) {
   )
 
   return (
+    <LiveProvider>
     <div className="min-h-screen bg-background safe-top safe-bottom">
       {/* Desktop sidebar */}
       <aside
@@ -477,5 +479,6 @@ export default function Layout({ children }) {
         </main>
       </div>
     </div>
+    </LiveProvider>
   )
 }

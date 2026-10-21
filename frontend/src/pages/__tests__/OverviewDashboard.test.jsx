@@ -1,6 +1,7 @@
 import { ThemeProvider } from '@/components/theme-provider'
 import api from '@/lib/api'
 import { AuthProvider } from '@/lib/AuthContext'
+import { LiveProvider } from '@/lib/LiveContext'
 import { TimeRangeProvider } from '@/lib/TimeRangeContext'
 import { render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
@@ -38,6 +39,22 @@ function mockApi({ devicesFail = false, devices = mockDevices } = {}) {
     if (url.includes('/api/auth/user/')) {
       return Promise.resolve({ data: { authenticated: true, user: { id: 1, username: 'test' } } })
     }
+    if (url === '/api/live/') {
+      // the shared live poll of the UI (LiveContext)
+      return devicesFail
+        ? Promise.reject(new Error('Network error'))
+        : Promise.resolve({
+            data: {
+              devices,
+              mining: [{ device_id_str: 'A15', hashrate_ghs: 200000 }],
+              hardware: [{ device_id_str: 'A15', power_watts: 3500, temperature_chip_c: 81 }],
+              system: { A15: { id: 3, name: 'Avalon A15', work_mode: 1, chip_temp_boards: [80, 81, 79] } },
+              throttle: {},
+              automation: null,
+              calibration: { device_id: null, run: null },
+            },
+          })
+    }
     if (url.includes('/api/devices/system-latest/')) {
       return Promise.resolve({
         data: { A15: { id: 3, name: 'Avalon A15', work_mode: 1, chip_temp_boards: [80, 81, 79] } },
@@ -69,7 +86,9 @@ function renderOverview() {
       <ThemeProvider defaultTheme="dark" storageKey="test-theme">
         <AuthProvider>
           <TimeRangeProvider>
-            <OverviewDashboard />
+            <LiveProvider>
+              <OverviewDashboard />
+            </LiveProvider>
           </TimeRangeProvider>
         </AuthProvider>
       </ThemeProvider>

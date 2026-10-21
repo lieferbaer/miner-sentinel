@@ -21,6 +21,7 @@ import StatusIndicator from '@/components/status/StatusIndicator'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import FleetAlertsBar from '@/components/dashboard/FleetAlertsBar'
 import api from '@/lib/api'
+import { useLive } from '@/lib/LiveContext'
 import { useTimeRange } from '@/lib/TimeRangeContext'
 import { formatRangeWindow, getChartTimeAxisConfig, toAnalyticsParams } from '@/lib/timeRange'
 import {
@@ -51,7 +52,6 @@ const STALE_AFTER_MS = 10 * 60 * 1000
 const TEMP_WARNING_C = 85
 const CHIP_WARNING_C = 100
 const CHIP_DANGER_C = 110
-const LIVE_REFRESH_MS = 10000
 const SERIES_REFRESH_MS = 60000
 const FAMILY_MODE_LABELS = { nano: ['Low', 'Medium', 'High'], q: ['Eco', 'Standard', 'Super'] }
 function deviceFamily(device) {
@@ -501,48 +501,34 @@ export default function OverviewDashboard() {
   const [error, setError] = useState(null)
   const [updatedAt, setUpdatedAt] = useState(null)
 
-  const fetchLive = useCallback(async () => {
-    try {
-      setError(null)
-      const [devicesResponse, miningResponse, hardwareResponse] = await Promise.all([
-        api.get('/api/devices/'),
-        api.get('/api/mining/latest/'),
-        api.get('/api/hardware/latest/'),
-      ])
-
-      const deviceList = Array.isArray(devicesResponse.data)
-        ? devicesResponse.data
-        : devicesResponse.data?.results || []
-      setDevices(deviceList)
-
-      const byDevice = (rows) => {
-        const map = {}
-        ;(Array.isArray(rows) ? rows : []).forEach((row) => {
-          const key = row.device_id_str || row.device_id
-          if (key) map[key] = row
-        })
-        return map
+  // live values: the shared poll of the whole UI (LiveContext, every 5 s) - same values on every page
+  const live = useLive()
+  useEffect(() => {
+    const d = live.data
+    if (!d) {
+      if (live.error) {
+        setError(live.error)
+        setLoading(false)
       }
-      setMining(byDevice(miningResponse.data))
-      setHardware(byDevice(hardwareResponse.data))
-
-      let systemByDevice = {}
-      try {
-        systemByDevice = (await api.get('/api/devices/system-latest/')).data || {}
-      } catch {
-        systemByDevice = {}
-      }
-      setSystem(Object.fromEntries(deviceList.map((d) => [d.device_id, systemByDevice[d.device_id] || null])))
-      setUpdatedAt(new Date())
-      return deviceList
-    } catch (err) {
-      console.error('Error loading live values:', err)
-      setError(err)
-      return []
-    } finally {
-      setLoading(false)
+      return
     }
-  }, [])
+    const deviceList = Array.isArray(d.devices) ? d.devices : []
+    const byDevice = (rows) => {
+      const map = {}
+      ;(Array.isArray(rows) ? rows : []).forEach((row) => {
+        const key = row.device_id_str || row.device_id
+        if (key) map[key] = row
+      })
+      return map
+    }
+    setError(null)
+    setDevices(deviceList)
+    setMining(byDevice(d.mining))
+    setHardware(byDevice(d.hardware))
+    setSystem(Object.fromEntries(deviceList.map((dev) => [dev.device_id, (d.system || {})[dev.device_id] || null])))
+    setUpdatedAt(live.loadedAt ? new Date(live.loadedAt) : new Date())
+    setLoading(false)
+  }, [live.data, live.error, live.loadedAt])
 
   const fetchSeries = useCallback(
     async (deviceList) => {
@@ -583,21 +569,15 @@ export default function OverviewDashboard() {
     [devices, range.key, range.from?.getTime?.(), range.to?.getTime?.(), range.hours, range.days],
   )
 
+  // charts: own requests (large, change slowly); reloaded when the device list or the range changes
+  const deviceKey = devices.map((d) => d.device_id).join(',')
   useEffect(() => {
-    setLoading(true)
-    let live
-    let seriesTimer
-    fetchLive().then((deviceList) => {
-      fetchSeries(deviceList)
-      live = setInterval(fetchLive, LIVE_REFRESH_MS)
-      seriesTimer = setInterval(() => fetchSeries(), SERIES_REFRESH_MS)
-    })
-    return () => {
-      if (live) clearInterval(live)
-      if (seriesTimer) clearInterval(seriesTimer)
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- restart both loops when the range changes
-  }, [range.key, range.from?.getTime?.(), range.to?.getTime?.(), range.hours, range.days])
+    if (!deviceKey) return undefined
+    fetchSeries(devices)
+    const seriesTimer = setInterval(() => fetchSeries(), SERIES_REFRESH_MS)
+    return () => clearInterval(seriesTimer)
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- restart when the devices or the range change
+  }, [deviceKey, range.key, range.from?.getTime?.(), range.to?.getTime?.(), range.hours, range.days])
 
   if (loading && devices.length === 0) {
     return <DashboardSkeleton />
@@ -610,7 +590,7 @@ export default function OverviewDashboard() {
         description="Could not load device data. Check that the API is running and try again."
         onRetry={() => {
           setLoading(true)
-          fetchLive().then((deviceList) => fetchSeries(deviceList))
+          live.refresh()
         }}
         className="h-96"
       />

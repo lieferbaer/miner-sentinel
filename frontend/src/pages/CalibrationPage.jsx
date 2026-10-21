@@ -7,10 +7,11 @@
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import api from '@/lib/api'
+import { useLive } from '@/lib/LiveContext'
 import { Loader2, SlidersHorizontal, Table } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 
-const REFRESH_MS = 15000
+const REFRESH_MS = 60000          // tables; the run status comes from the live poll (5 s)
 const COLS_KEY = 'ms-calibration-columns'
 
 const STATUS_TEXT = {
@@ -373,19 +374,33 @@ export default function CalibrationPage() {
     }
   }
 
+  // run status from the live poll of the UI (every 5 s); the tables reload when the run makes progress
+  const live = useLive()
+  const liveCal = live.data?.calibration
+  const liveRun = device && liveCal && liveCal.device_id === device.id ? liveCal.run : undefined
+  const progress = liveRun ? [liveRun.id, liveRun.status, liveRun.mode_index, liveRun.step_index, liveRun.count].join('/') : ''
+  useEffect(() => {
+    if (progress) load()
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only on progress of the run
+  }, [progress])
+  const shown = useMemo(
+    () => (data && liveRun !== undefined ? { ...data, run: liveRun, _loadedAt: live.loadedAt } : data),
+    [data, liveRun, live.loadedAt],
+  )
+
   const allPoints = useMemo(() => [...(data?.max || []), ...(data?.step || []), ...(data?.manual || [])], [data])
   const timing = useMemo(() => {
-    const r = data?.run
+    const r = shown?.run
     if (!r || !r.active) return null
-    const skew = r.server_now ? Date.parse(r.server_now) - data._loadedAt : 0
+    const skew = r.server_now ? Date.parse(r.server_now) - shown._loadedAt : 0
     const runPoints = r.kind === 'step' && data.step_run && data.step_run.id === r.id ? data.step : []
     const stock = (data.modes.find((m) => m.key === (r.modes[0] || {}).key) || {}).stock_mhz
-    const rem = remainingSeconds(r, data._loadedAt + skew, learnedPerPoint(runPoints), stock)
-    const at = (sec) => (sec === null ? null : data._loadedAt + sec * 1000)
+    const rem = remainingSeconds(r, shown._loadedAt + skew, learnedPerPoint(runPoints), stock)
+    const at = (sec) => (sec === null ? null : shown._loadedAt + sec * 1000)
     return { remaining: rem.total, eta: at(rem.total), modeRemaining: rem.mode, modeEta: at(rem.mode) }
-  }, [data])
+  }, [data, shown])
   const cols = useColumns(allPoints)
-  const run = data?.run
+  const run = shown?.run
   const active = run?.active
   const notes = data?.max_notes || {}
 

@@ -1,7 +1,7 @@
 from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 
-from . import fan_views, views
+from . import fan_views, live_views, views
 
 router = DefaultRouter()
 
@@ -61,6 +61,7 @@ urlpatterns = [
     path('fans/test/', fan_views.fans_test, name='fans-test'),
     path('fans/session/', fan_views.fans_session, name='fans-session'),
     path('fans/automation/', fan_views.fans_automation, name='fans-automation'),
+    path('live/', live_views.live, name='live'),
     # Authentication endpoints
     path('auth/csrf/', views.csrf_token_view, name='csrf-token'),
     path('auth/login/', views.login_view, name='login'),

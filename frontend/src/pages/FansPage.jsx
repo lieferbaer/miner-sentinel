@@ -5,6 +5,7 @@
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import api from '@/lib/api'
+import { useLive } from '@/lib/LiveContext'
 import { Fan, Loader2, RefreshCw } from 'lucide-react'
 import { useCallback, useEffect, useState } from 'react'
 
@@ -53,17 +54,12 @@ const PHASE = {
   aus: 'aus',
 }
 
-/** Temperatur-Automatik (A15): status and on/off; refreshed every 10 s without AC Infinity calls. */
+/** Temperatur-Automatik (A15): status from the live poll of the UI (every 5 s, same values as the overview). */
 function useAutomation(initial) {
-  const [auto, setAuto] = useState(initial)
-  useEffect(() => setAuto(initial), [initial])
-  useEffect(() => {
-    if (!auto?.enabled) return undefined
-    const timer = setInterval(() => {
-      api.get('/api/fans/automation/').then(({ data }) => setAuto(data)).catch(() => {})
-    }, 10000)
-    return () => clearInterval(timer)
-  }, [auto?.enabled])
+  const live = useLive()
+  const current = live.data?.automation || initial
+  const [auto, setAuto] = useState(current)
+  useEffect(() => setAuto(current), [current])
   return [auto, setAuto]
 }
 
