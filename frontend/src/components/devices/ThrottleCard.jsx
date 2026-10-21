@@ -58,17 +58,28 @@ function isA15(state) {
   return state.family === 'a15'
 }
 
+/** A15: clock text - the miner's value (mean of its 4 clock steps), the set one and the stock clock. */
+function a15ClockText(state) {
+  return (
+    'Takt-Stufen (Mittel) laut Miner: ' + fmt(state.current_avg_mhz, 0) + ' MHz · gesetzt: ' +
+    (state.set_mhz != null ? fmt(state.set_mhz, 0) + ' MHz (' + state.set_by + ')' : '—') +
+    ' · Standard: ' + fmt(state.stock_avg_mhz, 0) + ' MHz'
+  )
+}
+
 /** What the badge / hero card say: relative to the current mode, based on the real clock. */
 function throttleView(state) {
   const active = state.active
-  if (active && isA15(state) && active.clock_mhz != null) {
-    const pct = state.max_mhz ? Math.round((active.clock_mhz / state.max_mhz) * 100) : null
+  if (isA15(state)) {
+    // the miner's value instead of "ungedrosselt"; set value and stock clock beside it
+    const set = state.set_mhz != null
     return {
-      tone: 'warn',
-      badge: 'gedrosselt · ' + fmt(active.clock_mhz, 0) + ' von ' + fmt(state.max_mhz, 0) + ' MHz' +
-        (pct ? ' (' + pct + ' %)' : '') + ' · ' + state.mode_label,
-      value: fmt(active.clock_mhz, 0) + ' MHz',
-      sub: (pct ? pct + ' % von ' : '') + fmt(state.max_mhz, 0) + ' MHz · ' + state.mode_label,
+      tone: set ? 'warn' : 'ok',
+      badge: fmt(state.current_avg_mhz, 0) + ' MHz laut Miner' +
+        (set ? ' · gesetzt ' + fmt(state.set_mhz, 0) + ' MHz (' + state.set_by + ')' : ''),
+      value: fmt(state.current_avg_mhz, 0) + ' MHz',
+      sub: 'laut Miner · gesetzt ' + (set ? fmt(state.set_mhz, 0) + ' MHz (' + state.set_by + ')' : '—') +
+        ' · Standard ' + fmt(state.stock_avg_mhz, 0) + ' MHz',
     }
   }
   if (active) {
@@ -275,8 +286,7 @@ export default function ThrottleCard({ deviceId, throttle, ip }) {
         <CardDescription className="text-xs">
           {a15 ? (
             <>
-              Modus {state.mode_label} · Takt {fmt(state.current_avg_mhz, 0)} von {fmt(state.stock_avg_mhz, 0)} MHz ·
-              Hashrate {fmt(state.hashrate_ths)} TH/s
+              Modus {state.mode_label} · {a15ClockText(state)} · Hashrate {fmt(state.hashrate_ths)} TH/s
             </>
           ) : (
             <>

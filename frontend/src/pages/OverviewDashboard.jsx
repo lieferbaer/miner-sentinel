@@ -22,6 +22,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import FleetAlertsBar from '@/components/dashboard/FleetAlertsBar'
 import api from '@/lib/api'
 import { useLive } from '@/lib/LiveContext'
+import InfoTip from '@/components/ui/info-tip'
 import { useTimeRange } from '@/lib/TimeRangeContext'
 import { formatRangeWindow, getChartTimeAxisConfig, toAnalyticsParams } from '@/lib/timeRange'
 import {
@@ -53,6 +54,10 @@ const TEMP_WARNING_C = 85
 const CHIP_WARNING_C = 100
 const CHIP_DANGER_C = 110
 const SERIES_REFRESH_MS = 60000
+const EFFECTIVE_CLOCK_INFO =
+  'Effektiver Takt: der Durchschnittstakt, den der Miner selbst meldet (Freq, aktualisiert etwa alle 130 s). ' +
+  'Er hängt davon ab, wie viele Chips auf welcher der 4 Takt-Stufen laufen. Drosselung und Lüfter-Automatik ' +
+  'setzen die 4 Takt-Stufen und zeigen deren Mittel – deshalb weichen die Zahlen voneinander ab.'
 const FAMILY_MODE_LABELS = { nano: ['Low', 'Medium', 'High'], q: ['Eco', 'Standard', 'Super'] }
 function deviceFamily(device) {
   const text = [device.device_id, device.device_name, device.model].filter(Boolean).join(' ').toLowerCase()
@@ -249,7 +254,12 @@ function DeviceSection({
           icon={Gauge}
           label="Efficiency"
           value={formatNumber(hardware?.efficiency_j_per_th || 0, 1) + ' J/TH'}
-          subtitle={formatNumber(hardware?.frequency_mhz || 0, 0) + ' MHz'}
+          subtitle={
+            <span className="inline-flex items-center gap-1">
+              effektiver Takt {formatNumber(hardware?.frequency_mhz || 0, 0)} MHz
+              {device.make === 'avalon' && <InfoTip text={EFFECTIVE_CLOCK_INFO} />}
+            </span>
+          }
         />
         {throttleEnabled && <ThrottleStatusCard throttle={throttle} />}
       </div>

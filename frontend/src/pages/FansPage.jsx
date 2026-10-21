@@ -134,8 +134,8 @@ function AutomationPanel({ auto, here, port, level, locked, onCommand, busy }) {
         {' '}· Regelwert (30 s): {fmt(st.t, 1, ' °C')} · Ziel 80–84 °C
       </p>
       <p>
-        Takt: {fmt(st.clock_now, 0, ' MHz')} von {fmt(st.stock_mhz, 0, ' MHz')} (Standardtakt)
-        {st.clock_set ? ' · zuletzt gesetzt ' + fmt(st.clock_set, 0, ' MHz') : ''}
+        Takt-Stufen (Mittel) laut Miner: {fmt(st.clock_now, 0, ' MHz')} · gesetzt:{' '}
+        {st.clock_set ? fmt(st.clock_set, 0, ' MHz') : '—'} · Standard: {fmt(st.stock_mhz, 0, ' MHz')}
       </p>
       <p>
         Lüfter: gewählt Stufe {auto.level} · läuft auf Stufe {st.fan_read ?? '—'}

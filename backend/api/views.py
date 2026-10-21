@@ -564,9 +564,19 @@ class DeviceViewSet(viewsets.ModelViewSet):
         from django.utils.dateparse import parse_datetime
         seen_at = parse_datetime(live['seen_at']) if live.get('seen_at') else None
         stock_avg = prof.get('avg_mhz')
+        # the clock MinerSentinel set last (manual throttle or Temperatur-Automatik); the miner reports its own
+        auto = FanAutomation.objects.filter(device=device, enabled=True).first()
+        if active and active.get('clock_mhz') is not None:
+            set_mhz, set_by = active['clock_mhz'], 'Drosselung'
+        elif auto and (auto.state or {}).get('clock_set'):
+            set_mhz, set_by = auto.state['clock_set'], 'Automatik'
+        else:
+            set_mhz, set_by = None, None
         return {
             'supported': True,
-            'automation_active': FanAutomation.objects.filter(device=device, enabled=True).exists(),
+            'set_mhz': set_mhz,
+            'set_by': set_by,
+            'automation_active': bool(auto),
             'calibration_paused': CalibrationRun.objects.filter(device=device, status='paused').exists(),
             'min_mhz': round(stock_avg * self.THROTTLE_FLOOR) if stock_avg else None,
             'max_mhz': round(stock_avg) if stock_avg else None,
