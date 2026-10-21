@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button'
 import { toast } from '@/components/ui/toaster'
 import { useAuth } from '@/lib/AuthContext'
 import { LiveProvider } from '@/lib/LiveContext'
+import { LB_VERSION } from '@/lbVersion'
 import {
   BTC_DONATE_ADDRESS,
   GITHUB_ISSUES_URL,
@@ -218,6 +219,7 @@ export default function Layout({ children }) {
           <span className="truncate text-[13px] font-semibold tracking-tight text-foreground">
             MinerSentinel
           </span>
+          <span className="shrink-0 text-[11px] font-medium tabular-nums text-muted-foreground">v{LB_VERSION}</span>
         </Link>
         <Button
           variant="ghost"

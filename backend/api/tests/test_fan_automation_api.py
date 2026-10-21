@@ -52,6 +52,9 @@ def test_enable_needs_backup(client, a15):
 def test_level_and_disable(client, a15, backup):
     client.post('/api/fans/automation/', {'action': 'enable', 'dev_id': 'dev1', 'port': 1, 'level': 6}, format='json')
     assert client.post('/api/fans/automation/', {'action': 'level', 'level': 3}, format='json').data['level'] == 3
+    first = FanAutomation.objects.get(device=a15).level_at
+    client.post('/api/fans/automation/', {'action': 'level', 'level': 3}, format='json')
+    assert first and FanAutomation.objects.get(device=a15).level_at > first     # same level again: new click
     assert client.post('/api/fans/automation/', {'action': 'level', 'level': 11}, format='json').status_code == 400
     assert client.post('/api/fans/automation/', {'action': 'disable'}, format='json').data['enabled'] is False
 

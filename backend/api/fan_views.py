@@ -127,14 +127,15 @@ def fans_automation(request):
                 return Response({'error': 'Bitte zuerst eine Sicherung erstellen.'}, status=status.HTTP_409_CONFLICT)
             _lift_throttle(dev)
             auto.enabled, auto.ac_dev_id, auto.ac_port, auto.level = True, dev_id, port, level
+            auto.level_at = timezone.now()
         elif action == 'level' and auto.enabled:
-            auto.level = level
+            auto.level, auto.level_at = level, timezone.now()     # the data-service applies the learned clock
         elif action == 'disable':
             auto.enabled = False
         else:
             return Response({'error': 'Diese Aktion ist gerade nicht möglich.'}, status=status.HTTP_400_BAD_REQUEST)
         auto.updated_at = timezone.now()
-        auto.save(update_fields=['enabled', 'ac_dev_id', 'ac_port', 'level', 'updated_at'])
+        auto.save(update_fields=['enabled', 'ac_dev_id', 'ac_port', 'level', 'level_at', 'updated_at'])
     return Response(automation_payload())
 
 

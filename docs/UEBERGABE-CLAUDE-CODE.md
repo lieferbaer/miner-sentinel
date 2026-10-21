@@ -114,6 +114,8 @@ solange die Seite offen ist. Steuerung läuft immer auf dem Server, unabhängig 
 
 ### 5.1 Arbeitsablauf
 1. Auf dem iMac in `vps-stand` ändern, Tests (5.3), Nutzer sagt „committen“ → Claude committet und pusht (`git push origin vps-stand`).
+   **Vor jedem Push die eigene Versionsnummer `frontend/src/lbVersion.js` um 1 erhöhen** (letzte Stelle; Anzeige „v1.0.x“ neben
+   „MinerSentinel“ oben links). Start 1.0.0 am 21.10.
 2. Nutzer sagt „VPS auf Stand bringen“ (oft zusammen mit „committen“).
 3. VPS: `git ls-remote origin vps-stand` (iMac) prüfen, dann auf dem VPS
    `cd /opt/minersentinel && git status --short && git fetch -q fork vps-stand && git checkout -q -f vps-stand && git reset -q --hard fork/vps-stand`
@@ -267,6 +269,7 @@ hebt eine manuelle Drosselung auf). Der Data-Service ist der einzige, der dann L
 | Situation | Verhalten |
 |---|---|
 | Normal | Lüfter **fest auf der gewählten Stufe (nie darunter)**; Takt hält **TMax 80–84 °C** (Median 30 s): > 84 → −10 MHz je 1,5 °C (max. 30), < 80 → +10 MHz (max. Standardtakt); nach jedem Schritt **3 min warten**. |
+| Klick auf eine Stufe | **Takt sofort auf den Ausgangspunkt/Lernwert dieser Stufe, in beide Richtungen**, auch beim erneuten Klick auf dieselbe Stufe (`fan_automation.level_at`, Migration 0022). Lüfter: höher sofort, tiefer nach 3 min. |
 | Stufe senken | Mit Lernwert: Takt sofort auf den Lernwert, Lüfter nach 3 min. Ohne: Takt senken bis TMax ≤ 80, 3 min warten, dann Lüfter. |
 | Stufe erhöhen | Lüfter sofort; mit Lernwert Takt **60 s später** auf den Lernwert. |
 | Schutz | Aktueller Wert: **> 84 °C** Lüfter **+1**, **≥ 88 °C** Lüfter **+2** und −30 MHz (höchstens alle 60 s), **≥ 90 °C** Lüfter **+3**; zurück auf die gewählte Stufe erst bei **≤ 80 °C** (Nutzer 21.10.; vorher +1 erst ab 88, zurück bei 84 → Pendeln). Max. Stufe 10. Im Lüfter-Regelmodus (Messung/manueller Takt) wirkt eine höhere Schutzstufe **sofort**, bleibt es heiß, nach 60 s erneut. |
@@ -306,7 +309,8 @@ Original + „Activity“ + „Takt-Tabellen“ + „Lüfter“; Dockerfiles/Com
 
 ## 9. Datenbank und Migrationen
 
-- Eigene Tabellen: `calibration_runs`, `calibration_points` (0020), **`fan_automation`** (**0021**, handgeschrieben, hängt an 0020).
+- Eigene Tabellen: `calibration_runs`, `calibration_points` (0020), **`fan_automation`** (**0021**, handgeschrieben, hängt an 0020;
+  **0022** `level_at`).
 - `calibration_points.kind`: `max`, `step`, **`manual`**; `data` enthält u. a. `fields`, `summary`, `web`, `estats_raw`,
   **`fan_level`**, **`power_spread_pct`**.
 - `makemigrations --check` meldet eine ausstehende Migration des **Originals** (Index-Umbenennungen) – nicht ungefragt erzeugen.

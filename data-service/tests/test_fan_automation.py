@@ -374,3 +374,23 @@ def test_drifting_firmware_protection_settles(miner):
         now += timedelta(seconds=5)
     assert ac.writes.count(3) <= 2, (ac.writes, [round(x) for x in miner.sets], st['log'][-6:])
     assert ac.level == 2 and st['boost'] == 0, (ac.writes, [round(x) for x in miner.sets], st['log'][-6:])
+
+
+def test_click_on_level_sets_learned_clock_at_once(miner):
+    ac = FakeAC(level=1)
+    miner.tmax = 82.0
+    miner.points = [150, 150, 150]
+    learned = {'2/L4': {'2': {'mhz': 196.0, 'at': 'x'}}}
+    st, now = run({}, miner, ac, 30, level=1)
+    st['learned'] = learned
+    r = row(st, level=2)
+    r['level_at'] = '2026-10-21T12:00:30+00:00'
+    st = fa.step(r, now, ac)
+    assert miner.sets == [196.0] and ac.writes == [2]          # higher level: clock and fan at once
+    st = fa.step(dict(r, state=st), now + timedelta(seconds=5), ac)
+    assert miner.sets == [196.0]                               # the same click only once
+    miner.points = [207, 207, 207]                             # the firmware drifted
+    st['clock_set'], st['clock_own'] = 215.0, True             # the automation had gone up meanwhile
+    r2 = dict(r, state=st, level_at='2026-10-21T12:10:00+00:00')
+    st = fa.step(r2, now + timedelta(seconds=10), ac)
+    assert miner.sets[-1] == 196.0                             # clicking the same level again: back to 196

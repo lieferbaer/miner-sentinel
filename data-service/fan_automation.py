@@ -300,11 +300,27 @@ def step(row, now, ac):
             st['changed_at'] = _iso(now)
             _note(st, now, text % new)
 
+        # a click on a level (also the same level again): its learned clock is set at once, in both
+        # directions (user decision 21.10.); a lower fan level still follows after WAIT_S
+        clicked = False
+        level_at = row.get('level_at')
+        if level_at is not None and str(level_at) != st.get('level_seen'):
+            st['level_seen'] = str(level_at)
+            if can_clock:
+                ref = (st.get('clock_set') or stock_avg) if st.get('clock_own') else cur
+                target, why = _start_clock(learned, mode, chosen, ref)
+                if target is not None:
+                    clicked = True
+                    for key in ('raise_to', 'raise_why', 'exit_learned'):
+                        st.pop(key, None)
+                    if abs(target - ref) >= 0.5:
+                        set_clock(target, why + ': Takt %.0f MHz (Stufe gewählt).')
+
         if chosen > st['base']:
             st['base'] = chosen                         # higher level: the fan at once ...
             for key in ('lower_since', 'lower_learned'):
                 st.pop(key, None)
-            target, why = _start_clock(learned, mode, chosen, cur) if can_clock else (None, None)
+            target, why = _start_clock(learned, mode, chosen, cur) if can_clock and not clicked else (None, None)
             if target and target > cur + 0.5:
                 st['raise_to'], st['raise_from'] = target, _iso(now)   # ... the start clock RAISE_DELAY_S later
                 st['raise_why'] = why
@@ -314,7 +330,9 @@ def step(row, now, ac):
         if lowering and not st.get('lower_since'):
             st['lower_since'] = _iso(now)
             st.pop('raise_to', None)
-            target, why = _start_clock(learned, mode, chosen, cur) if can_clock else (None, None)
+            if clicked:
+                st['lower_learned'] = True              # clock already at the start clock: the fan after WAIT_S
+            target, why = _start_clock(learned, mode, chosen, cur) if can_clock and not clicked else (None, None)
             if target and target < cur - 0.5:
                 # start clock of the lower level: clock straight to it, the fan follows after WAIT_S
                 set_clock(target, why + ': Takt %.0f MHz, Lüfter folgt nach 3 min.')
@@ -411,7 +429,7 @@ def run_fan_automation(database_url, ac=None):
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
-                "SELECT f.id, f.enabled, f.ac_dev_id, f.ac_port, f.level, f.state, d.ip_address, d.port, "
+                "SELECT f.id, f.enabled, f.ac_dev_id, f.ac_port, f.level, f.level_at, f.state, d.ip_address, d.port, "
                 "d.connection_config, EXISTS (SELECT 1 FROM calibration_runs r WHERE r.device_id = d.id "
                 "AND r.status IN ('running', 'cancelling', 'finishing')) AS cal_active "
                 "FROM fan_automation f JOIN devices d ON d.id = f.device_id "
