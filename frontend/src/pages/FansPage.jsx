@@ -103,6 +103,8 @@ function AutomationCards({ auto, st }) {
   // the clock set last (Drosselung, Takt-Messung or Automatik) - the same value as the throttle card
   const live = useLive()
   const throttle = live.data?.throttle?.[auto.device?.id] || {}
+  const sys = Object.values(live.data?.system || {}).find((d) => d && d.id === auto.device?.id) || {}
+  const errorText = sys.error_rate_pct != null ? ' · Fehlerrate ' + fmt(sys.error_rate_pct, 2, ' %') : ''
   const setText = throttle.set_mhz != null ? fmt(throttle.set_mhz, 0, ' MHz') + ' (' + throttle.set_by + ')' : '—'
   const tmax = auto.now?.tmax
   const boards = (auto.now?.boards || []).filter((b) => b != null)
@@ -129,7 +131,7 @@ function AutomationCards({ auto, st }) {
           fmt(st.t, 1, ' °C') + ' · Ziel 80–84 °C'} />
       <MetricCard variant="hero" layout="icon-left" icon={Gauge} label="Takt laut Miner"
         value={fmt(st.clock_now, 0, ' MHz')}
-        subtitle={'gesetzt ' + setText + ' · Standard ' + fmt(st.stock_mhz, 0, ' MHz')} />
+        subtitle={'gesetzt ' + setText + ' · Standard ' + fmt(st.stock_mhz, 0, ' MHz') + errorText} />
       <MetricCard variant="hero" layout="icon-left" icon={Fan} label="Lüfter läuft auf"
         tone={st.boost ? 'warning' : 'default'} value={running == null ? '—' : 'Stufe ' + running} subtitle={fanSub} />
       <MetricCard variant="hero" layout="icon-left" icon={Activity} label="Status"

@@ -589,6 +589,15 @@ class AvalonCollector:
             return None
         return conf.get('power_level') if conf.get('mode') == 2 else None
 
+    def _float_field(self, stats_info, key):
+        '''Number at the start of KEY[...] (e.g. DH[1.234%] -> 1.234), or None.'''
+        try:
+            value = self._bracket_field(self._mm_string(stats_info), key)
+            match = re.match(r'\s*(-?[0-9.]+)', value or '')
+            return round(float(match.group(1)), 2) if match else None
+        except (ValueError, TypeError):
+            return None
+
     def _int_list_field(self, stats_info, key):
         '''Integer values of KEY[a b c] (e.g. MTmax: hottest chip per hash board), or None.'''
         try:
@@ -773,6 +782,7 @@ class AvalonCollector:
             'fan_speed_percent': self._percent_field(stats_info, 'FanR'),
             'chip_temp_boards': self._int_list_field(stats_info, 'MTmax'),
             'system_status': (self._bracket_field(self._mm_string(stats_info), 'SYSTEMSTATU') or '').strip() or None,
+            'error_rate_pct': self._float_field(stats_info, 'DH'),     # DH = current error rate in % (e.g. "1.23%")
         }
 
         return NormalizedDeviceSnapshot(

@@ -158,3 +158,11 @@ def test_calibration_fresh_estats_only(monkeypatch):
     miner_cache.put(IP, 'web', dict(CONF))
     calibration.read_miner(IP, 4028, fresh='estats')
     assert calls == ['estats']                   # Temperatur-Automatik every 5 s: one request
+
+
+def test_collector_error_rate_from_dh():
+    from collectors.avalon_collector import AvalonCollector
+    col = AvalonCollector.__new__(AvalonCollector)
+    stats = {'MM ID0': 'Ver[15-xx] WORKMODE[2] DH[1.234%] SYSTEMSTATU[Work: In Work]'}
+    assert col._float_field(stats, 'DH') == 1.23
+    assert col._float_field({'MM ID0': 'Ver[15-xx]'}, 'DH') is None

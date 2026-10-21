@@ -201,7 +201,10 @@ function DeviceSection({
           icon={Hash}
           label="Hashrate"
           value={formatHashrate(mining?.hashrate_ghs || 0)}
-          subtitle={formatNumber(mining?.hashrate_ghs || 0, 2) + ' GH/s'}
+          subtitle={
+            formatNumber(mining?.hashrate_ghs || 0, 2) + ' GH/s' +
+            (system?.error_rate_pct != null ? ' · Fehlerrate ' + formatNumber(system.error_rate_pct, 2) + ' %' : '')
+          }
         />
         <MetricCard
           variant="hero"

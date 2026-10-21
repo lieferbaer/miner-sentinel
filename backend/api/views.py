@@ -208,7 +208,7 @@ class DeviceViewSet(viewsets.ModelViewSet):
     def system_latest(self, request):
         """Latest live system values of all active devices (small payload for the overview)."""
         keys = ('work_mode', 'work_level', 'power_target_watts', 'temp_target', 'fan_speed_percent',
-                'chip_temp_boards', 'system_status')
+                'chip_temp_boards', 'system_status', 'error_rate_pct')
         out = {}
         for device in Device.objects.filter(is_active=True):
             row = (DeviceSystemInfo.objects.filter(device=device).order_by('-recorded_at')

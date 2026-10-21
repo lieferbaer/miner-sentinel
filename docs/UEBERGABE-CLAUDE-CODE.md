@@ -192,13 +192,15 @@ solange die Seite offen ist. Steuerung läuft immer auf dem Server, unabhängig 
 - Nimmt `estats`/`summary` **aus der zentralen Abfrage** (`_live_request`, bis 8 s alt), fragt nur im Ausnahmefall selbst.
   `version`/`pools` alle 10 min, A15-Webinterface aus dem Zwischenspeicher (bis 35 s).
 - Hashrate nur `GHSspd`, Leistung nur `WALLPOWER`/`PS[6]` (keine Schätzwerte). `details`: `work_mode`, `work_level`,
-  `chip_temp_boards` (MTmax), `system_status`. Speichert alle 10 s.
+  `chip_temp_boards` (MTmax), `system_status`, `error_rate_pct` (DH). Speichert alle 10 s.
 
 ### 7.2 Übersicht (`pages/OverviewDashboard.jsx`)
 - Einzelansicht je MinerGerät; **Live-Werte aus `/api/live/` (5 s)**, Diagramme eigene Abfragen (1 min).
 - A15: Kachel „Working mode“, „Chip temperature“ mit allen drei MTmax groß („98 / 90 / 82 °C“).
 - Efficiency: „effektiver Takt X MHz“ + ⓘ (Erklärung nach 1 s Mouse-over / Antippen, `components/ui/info-tip.jsx`).
 - Fan speed (A15): „rpm / S2“ – S = **zurückgelesene** AC-Lüfterstufe (nicht die gesetzte), nur bei eingeschalteter Automatik.
+- Hashrate-Karte: „… GH/s · Fehlerrate x %“ (aktuelle `DH` des Miners, `details.error_rate_pct`, alle 10 s); auch auf der
+  Lüfter-Seite in der Karte „Takt laut Miner“.
 - Darüber Problem-/Highlight-Leiste des Originals (`FleetAlertsBar`), darunter je Avalon die Drosselungs-Karte.
 
 ### 7.3 Drosselung (`throttle_controller.py`, Backend `DeviceViewSet.throttle`, `components/devices/ThrottleCard.jsx`)
