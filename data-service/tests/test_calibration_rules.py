@@ -50,3 +50,51 @@ def test_resume_max_run_switches_away_and_back(monkeypatch):
     run = calibration.step_run(Conn(), run)
     assert sent == [(2, 3)]                                   # bounce 04 -> 03 (and back afterwards)
     assert run['state']['phase'] == 'wait_mode' and run['state']['count'] == 0
+
+
+class _Conn:
+    def cursor(self):
+        class Cur:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def execute(self, *a):
+                pass
+
+            def fetchone(self):
+                return None
+        return Cur()
+
+
+def _measure_round(monkeypatch, step_index, dh):
+    monkeypatch.setattr(calibration, 'read_miner', lambda ip, port, fresh=False: {
+        'points': [150, 150, 150], 'mode_key': '2/L4', 'status': 'Work: In Work', 'conf': {}, 'elapsed': 100,
+        'ghsspd': 78000.0, 'power': 1800.0, 'dh': dh, 'tmax': 78.0, 'fields': {}, 'summary': {}, 'estats': ''})
+    monkeypatch.setattr(calibration, '_power_stable', lambda st, power, now: True)
+    saved = []
+    monkeypatch.setattr(calibration, '_save_point', lambda *a, **k: saved.append(a[5]))
+    run = {'id': 7, 'kind': 'step', 'status': 'running', 'modes': ['2/L4'], 'mode_index': 0,
+           'step_index': step_index, 'ip_address': '10.0.0.15', 'port': 4028, 'message': '', 'pause_reason': '',
+           'finished_at': None,
+           'state': {'orig_mode': '2/L4', 'phase': 'measure', 'applied': ['2/L4'], 'last_speed': 77000.0,
+                     'changed_at': '2026-10-01T10:00:00+00:00', 'set_points': [150, 150, 150]}}
+    return calibration.step_run(_Conn(), run), saved
+
+
+def test_series_ends_at_10_percent_errors_from_point_10(monkeypatch):
+    run, saved = _measure_round(monkeypatch, 9, 10.4)          # 10th point, 10.4 % errors
+    assert saved == [9] and run['state']['phase'] == 'restore'        # point saved, then the end
+    assert 'Fehlerrate 10.4' in run['message']
+
+
+def test_high_errors_before_point_10_continue(monkeypatch):
+    run, saved = _measure_round(monkeypatch, 0, 18.9)          # first point at the stock clock
+    assert saved and run['state']['phase'] == 'set_clock'
+
+
+def test_low_errors_continue(monkeypatch):
+    run, saved = _measure_round(monkeypatch, 15, 5.0)
+    assert run['state']['phase'] == 'set_clock'

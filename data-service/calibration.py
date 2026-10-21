@@ -42,6 +42,8 @@ STABLE_BAND = 0.03         # ... within +-3 % (user decision 21.10.: the fan hol
 CLOCK_STABLE_S = 120       # stock clocks of a mode are taken once they stayed unchanged this long
 MAX_WAIT = 300             # max run: each measurement waits at least this long after the mode switch
                            # or after the previous measurement
+DH_STOP_PCT = 10.0         # Messreihe: a saved point with this error rate (DH) or more ends the series ...
+DH_STOP_FROM = 10          # ... from the 10th point on (user decision 21.10.; at the stock clock DH was 18.9 % once)
 RESEND_S = 20              # a mode switch not confirmed after this long is sent again (the A15 often drops
                            # the connection of the switch command without applying it)
 CACHE_MAX_AGE = 15        # s: readings of the central reader (live_reader.py, every 5 s; this runs right after it)
@@ -368,7 +370,7 @@ def step_run(conn, run):
             notes[target] = {'error': 'ließ sich nicht umschalten (nach %d s weiter %s)'
                                       % (SWITCH_TIMEOUT, mode_label(m['mode_key']) if m['mode_key'] else '?')}
             if run['kind'] == 'step':
-                run['message'] = '%s ließ sich nicht einschalten.' % mode_label(target)
+                run['message'] = st['end_message'] = '%s ließ sich nicht einschalten.' % mode_label(target)
                 st['phase'] = 'restore'
             else:
                 run['mode_index'] += 1
@@ -428,6 +430,12 @@ def step_run(conn, run):
                     run['step_index'] += 1
                     st['saved_steps'] = run['step_index']
                     st['phase'] = 'set_clock'
+                    if run['step_index'] >= DH_STOP_FROM and m['dh'] is not None and m['dh'] >= DH_STOP_PCT:
+                        # too many errors: lower clocks are not worth measuring
+                        st['end_message'] = 'Messreihe beendet: Fehlerrate %.1f %% bei Punkt %d (ab %d %% Schluss).' % (
+                            m['dh'], run['step_index'], DH_STOP_PCT)
+                        run['message'] = st['end_message']
+                        st['phase'] = 'restore'
                 else:
                     count = int(st.get('count', 0))
                     _save_point(conn, run, m, 'max', target, count, m['points'], st.get('pw_spread'))
@@ -474,6 +482,8 @@ def step_run(conn, run):
             run['message'] = 'Abgebrochen.'
         elif run['kind'] == 'max':
             run['message'] = 'Max-Messung abgeschlossen.'
+        else:
+            run['message'] = st.get('end_message') or 'Messreihe abgeschlossen.'
         st['phase'] = 'done'
 
     run['state'] = st

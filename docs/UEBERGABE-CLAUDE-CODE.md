@@ -226,6 +226,7 @@ Start/Pause/Fortsetzen/Abbrechen **nur durch den Nutzer**.
 | Max-Messung: ≥ 5 min nach Moduswechsel/vorheriger Messung; Messreihe: ≥ 145 s nach Taktänderung (`CLEAN_AFTER`). | GHSspd-Fenster. |
 | **Stabilität: Leistung 3 min innerhalb ±3 %** (`STABLE_BAND = 0.03`, Nutzerentscheidung 21.10.). Die **tatsächliche Schwankung** wird je Punkt gespeichert (`data.power_spread_pct`, Spalte „Schwankung“). Ggf. zurück auf ±2 %, wenn die Werte zeigen, dass ±3 % zu viel ist. | Lüfter regelt im Lauf stufig auf 80 °C (7.8). Vorher ±1 %. |
 | Jeder Punkt speichert alle Rohwerte **und die AC-Lüfterstufe** (`data.fan_level`, Spalte „Lüfter (AC)“). | – |
+| **Messreihe endet ab dem 10. Punkt, sobald ein gespeicherter Punkt DH ≥ 10 % hat** (`DH_STOP_PCT`, `DH_STOP_FROM`); der Punkt wird noch gespeichert, dann normales Ende. | Nutzer 21.10.: tiefere Takte lohnen nicht. Lauf 7: Punkt 0 (Standardtakt) hatte 18,9 %, Punkt 22 (150 MHz) 10,4 %. |
 | **Start und Fortsetzen schalten die Temperatur-Automatik ein**; ohne eingerichteten Lüfter kein Start (409). | Lüfter hält im Lauf 80 °C. |
 | **Fortsetzen:** erst Drosselung aufheben (ohne Takt), dann letzten Punkt neu messen; **Max-Messung schaltet dabei kurz weg und zurück**. | In der Pause können Drosselung/Automatik Takte gesetzt haben. |
 | Abbrechen lässt den aktuellen Modus stehen (Messreihe: kurz weg/zurück für Firmware-Takte). Normales Ende: zurück zum Startmodus. | Nutzerentscheidung. |
