@@ -84,7 +84,7 @@ def test_cool_raises_clock_up_to_stock(miner):
     miner.points = [300, 300, 300]
     ac = FakeAC(level=5)
     st, _ = run({}, miner, ac, 15 * 60)
-    assert miner.sets[0] == 310.0 and max(miner.sets) <= 360
+    assert miner.sets[0] == 305.0 and max(miner.sets) <= 360          # 76 degC: +5 MHz (fine from below)
 
 
 def test_protection_88_and_90(miner):
@@ -347,7 +347,7 @@ def test_no_clock_raise_right_after_fan_change():
     st = {'changed_at': old, 'fan_set_at': (T0 - timedelta(seconds=60)).isoformat()}
     assert fa._clock_step(st, T0, 78.0, 78.0, 300.0, 360.0, fa.T_HIGH, False) is None   # fan changed 60 s ago
     st['fan_set_at'] = old
-    assert fa._clock_step(st, T0, 78.0, 78.0, 300.0, 360.0, fa.T_HIGH, False) == 310.0
+    assert fa._clock_step(st, T0, 78.0, 78.0, 300.0, 360.0, fa.T_HIGH, False) == 302.0   # 78 degC: +2 MHz
     st['fan_set_at'] = (T0 - timedelta(seconds=60)).isoformat()
     assert fa._clock_step(st, T0, 86.0, 86.0, 300.0, 360.0, fa.T_HIGH, False) == 280.0  # lowering stays at once
 
@@ -394,3 +394,70 @@ def test_click_on_level_sets_learned_clock_at_once(miner):
     r2 = dict(r, state=st, level_at='2026-10-21T12:10:00+00:00')
     st = fa.step(r2, now + timedelta(seconds=10), ac)
     assert miner.sets[-1] == 196.0                             # clicking the same level again: back to 196
+
+
+def test_raise_steps_fine_from_below():
+    assert [fa._raise_step(t) for t in (79.5, 78.0, 77.0, 75.0, 74.0)] == [2, 2, 5, 5, 10]
+
+
+def test_ceiling_blocks_raising_to_a_clock_that_needed_protection():
+    old = (T0 - timedelta(seconds=1200)).isoformat()
+    st = {'changed_at': old, 'fan_set_at': old,
+          'ceiling': {'2/L4': {'2': {'mhz': 174.0, 'at': (T0 - timedelta(seconds=600)).isoformat()}}}}
+    ceil = fa._ceiling(st, '2/L4', 2, T0)
+    assert ceil == 174.0
+    assert fa._clock_step(st, T0, 74.0, 74.0, 164.0, 360.0, fa.T_HIGH, False, ceil) == 172.0     # below 174
+    assert fa._clock_step(st, T0, 74.0, 74.0, 172.0, 360.0, fa.T_HIGH, False, ceil) is None      # at the ceiling
+    assert fa._ceiling(st, '2/L4', 2, T0 + timedelta(seconds=fa.CEILING_S)) is None              # expires
+
+
+def _power_model_run(start_set, T_start, hours=3.0, seed=1):
+    """Thermal model calibrated on 21.10.: set 164 MHz = 1774 W ~ 80 degC, +226 W jump at set ~174 MHz,
+    0.03 degC/W, fan level ~3 degC, tau 95 s, firmware drift +11 MHz, TMax integer + noise."""
+    import math
+    import random
+    random.seed(seed)
+    ac = FakeAC(level=2)
+    sim = {'set': start_set, 'rep': start_set + 11, 'T': T_start, 'age': 999.0, 'reading': round(T_start)}
+    cuts = []
+
+    def setf(ip, port, points):
+        sim['set'], sim['age'] = sum(points) / len(points), 0.0
+
+    def read(ip, port, fresh=False):
+        return {'fields': {'TMax': str(sim['reading'])}, 'points': [sim['rep']] * 4, 'mode_key': '2/L4',
+                'status': 'Work: In Work', 'elapsed': 1000}
+
+    orig = (calibration.set_frequency, calibration.read_miner, fa._note)
+    calibration.set_frequency, calibration.read_miner = setf, read
+    fa._note = lambda st, now, text: (cuts.append(text) if 'dauerhaft' in text else None, orig[2](st, now, text))
+    try:
+        st, now, last_boost, protections, worst = {}, T0, 0, 0, 0
+        for i in range(int(hours * 3600 / 5)):
+            sim['age'] += 5
+            sim['rep'] = sim['set'] + 11 * (1 - math.exp(-sim['age'] / 120))
+            p = 1774 + 4.0 * (sim['rep'] - 175) + ((226 + 2.5 * (sim['rep'] - 182)) if sim['rep'] >= 182 else 0)
+            T_eq = 80.0 + 0.03 * (p - 1774) - 3 * (ac.level - 2)
+            sim['T'] += (T_eq - sim['T']) * (1 - math.exp(-5 / 95))
+            if i % 2 == 0:
+                sim['reading'] = round(sim['T'] + random.uniform(-0.7, 0.7))
+            st = fa.step(row(st, level=2), now, ac)
+            boost = int(st.get('boost') or 0)
+            protections += 1 if boost and not last_boost else 0
+            last_boost, worst = boost, max(worst, sim['reading'])
+            now += timedelta(seconds=5)
+        return protections, len(cuts), worst, ac.level
+    finally:
+        calibration.set_frequency, calibration.read_miner, fa._note = orig
+
+
+def test_power_jump_no_protection_loop():
+    """21.10. 09:24/09:45: 164 -> 174 MHz added 226 W, protection, back to 164, again and again."""
+    protections, cuts, worst, level = _power_model_run(164, 80.0)
+    assert protections <= 1 and cuts <= 1 and worst < 88 and level == 2
+
+
+def test_protection_cuts_not_too_fast():
+    """21.10. 08:14-08:35: five permanent cuts within 21 min (204 -> 164 MHz)."""
+    protections, cuts, worst, level = _power_model_run(204, 84.0)
+    assert cuts <= 2 and level == 2
