@@ -488,3 +488,36 @@ def test_firmware_override_set_again(miner):
     miner.points = [360, 360, 360]                                           # firmware applied its stock clocks
     st = fa.step(row(st, level=2), now, ac)
     assert miner.sets[-1] == 164.0
+
+
+class PowerAC(FakeAC):
+    def __init__(self, level):
+        super().__init__(level)
+        self.events = []
+
+    def set_fan_power(self, dev_id, port, on, level=None):
+        self.events.append(('an' if on else 'aus', level))
+        if on and level is not None:
+            self.level = level
+
+
+def test_maintenance_fan_off_and_back(miner):
+    import miner_cache
+    ip = '10.0.0.15'
+    ac = PowerAC(level=2)
+    miner.tmax = 82.0
+    miner_cache.put(ip, 'estats', 'x')
+    st, now = run({}, miner, ac, 30, level=2)
+    maint = (now - timedelta(seconds=1)).isoformat()
+    r = dict(row(st, level=2), maintenance_at=maint)
+    st = fa.step(r, now, ac)
+    assert ac.events == [] and st['maint']['since'] == maint          # still on: no fan command yet
+    miner_cache.clear(ip)                                              # switched off: no central reading
+    st = fa.step(dict(r, state=st), now + timedelta(seconds=20), ac)
+    assert ac.events == [('aus', None)] and st['phase'] == 'wartung'
+    st = fa.step(dict(r, state=st), now + timedelta(seconds=25), ac)
+    assert ac.events == [('aus', None)]                                # only once
+    miner_cache.put(ip, 'estats', 'x')                                 # on again
+    st = fa.step(dict(r, state=st), now + timedelta(seconds=600), ac)
+    assert ac.events[-1] == ('an', 2) and st.get('maint_end') and 'maint' not in st
+    miner_cache.clear(ip)

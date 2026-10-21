@@ -53,6 +53,7 @@ const PHASE = {
   senken: { value: 'Lüfter senken', sub: 'erst Takt runter, Lüfter nach 3 min' },
   messung: { value: 'Takt-Messung', sub: 'kein Takt-Eingriff, Lüfter hält 80 °C' },
   manuell: { value: 'Manueller Takt', sub: 'Takt fest, Lüfter hält 80 °C' },
+  wartung: { value: 'Wartung', sub: 'A15 aus · Lüfter aus · endet beim Einschalten' },
   aus: { value: 'Aus', sub: '' },
 }
 
@@ -133,7 +134,10 @@ function AutomationCards({ auto, st }) {
         value={fmt(st.clock_now, 0, ' MHz')}
         subtitle={'gesetzt ' + setText + ' · Standard ' + fmt(st.stock_mhz, 0, ' MHz') + errorText} />
       <MetricCard variant="hero" layout="icon-left" icon={Fan} label="Lüfter läuft auf"
-        tone={st.boost ? 'warning' : 'default'} value={running == null ? '—' : 'Stufe ' + running} subtitle={fanSub} />
+        tone={st.boost ? 'warning' : 'default'}
+        value={st.phase === 'wartung' ? 'Aus' : running == null ? '—' : 'Stufe ' + running}
+        subtitle={st.phase === 'wartung' ? 'Wartung · danach wieder Stufe ' + (auto.maintenance?.fan_before ?? auto.level)
+          : fanSub} />
       <MetricCard variant="hero" layout="icon-left" icon={Activity} label="Status"
         tone={st.phase === 'normal' ? 'default' : 'warning'} value={phase.value}
         subtitle={phaseSub} />
@@ -169,7 +173,26 @@ function AutomationPanel({ auto, here, port, level, locked, onCommand, busy }) {
         </Button>
       </div>
       {!here && <p className="text-amber-600">Steuert Port {auto.port} dieses Controllers.</p>}
+      {auto.maintenance_at && st.phase !== 'wartung' && (
+        <p className="text-amber-600">
+          Wartung angemeldet: Der Lüfter geht aus, sobald der A15 ausgeschaltet ist. Beim Einschalten geht er wieder
+          auf die Stufe von vorher.
+        </p>
+      )}
       <AutomationCards auto={auto} st={st} />
+      <div className="flex flex-wrap gap-2 pt-1">
+        {auto.maintenance_at ? (
+          <Button size="sm" variant="outline" className="h-8" disabled={busy}
+            onClick={() => onCommand({ action: 'maintenance_end' })}>
+            Wartung beenden
+          </Button>
+        ) : (
+          <Button size="sm" variant="outline" className="h-8" disabled={busy}
+            onClick={() => onCommand({ action: 'maintenance_start' })}>
+            Wartung starten (A15 ausschalten)
+          </Button>
+        )}
+      </div>
       <LearnedTable learned={auto.learned} mode={st.mode_key} level={auto.level} />
       {st.ac_error && <p className="text-amber-600">AC Infinity: {st.ac_error}</p>}
       {st.last_error && <p className="text-destructive">Fehler: {st.last_error}</p>}

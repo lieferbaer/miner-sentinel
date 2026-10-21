@@ -141,3 +141,16 @@ def test_set_clock_is_the_latest_setter(client, a15):
     run.status, run.finished_at = 'done', timezone.now()
     run.save()
     assert view._last_set_clock(a15, None, auto) == (None, None)                 # run ended later: firmware clocks
+
+
+def test_maintenance_start_pauses_run_and_end(client, a15, backup):
+    from api.models import CalibrationRun
+    client.post('/api/fans/automation/', {'action': 'enable', 'dev_id': 'dev1', 'port': 1, 'level': 2}, format='json')
+    run = CalibrationRun.objects.create(device=a15, kind='step', modes=['2/L4'], status='running', state={})
+    res = client.post('/api/fans/automation/', {'action': 'maintenance_start'}, format='json')
+    assert res.status_code == 200 and res.data['maintenance_at']
+    run.refresh_from_db()
+    assert run.status == 'paused' and run.pause_reason == 'wartung'
+    assert client.get('/api/live/').data['automation']['maintenance_at']
+    res = client.post('/api/fans/automation/', {'action': 'maintenance_end'}, format='json')
+    assert res.data['maintenance_at'] is None

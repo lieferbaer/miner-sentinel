@@ -43,6 +43,7 @@ def automation_payload():
     return {
         'now': {'tmax': max(valid) if valid else None, 'boards': boards, 'at': (row or {}).get('recorded_at')},
         'device': {'id': dev.id, 'name': dev.name}, 'enabled': auto.enabled, 'dev_id': auto.ac_dev_id,
+        'maintenance_at': auto.maintenance_at, 'maintenance': st.get('maint') or None,
         'port': auto.ac_port, 'level': auto.level,
         'state': {k: st.get(k) for k in ('t', 'phase', 'base', 'boost', 'fan_set', 'fan_read', 'fan_read_at',
                                          'fan_set_at', 'clock_set', 'clock_now', 'stock_mhz', 'changed_at', 'cal', 'cal_fan', 'ac_error',
@@ -132,10 +133,18 @@ def fans_automation(request):
             auto.level, auto.level_at = level, timezone.now()     # the data-service applies the learned clock
         elif action == 'disable':
             auto.enabled = False
+        elif action == 'maintenance_start' and not auto.maintenance_at:
+            # Wartung: the A15 is switched off by hand; a running Takt-Messung is paused
+            from .models import CalibrationRun
+            auto.maintenance_at = timezone.now()
+            CalibrationRun.objects.filter(device=dev, status='running').update(
+                status='paused', pause_reason='wartung', message='Pausiert (Wartung).', updated_at=timezone.now())
+        elif action == 'maintenance_end':
+            auto.maintenance_at = None
         else:
             return Response({'error': 'Diese Aktion ist gerade nicht möglich.'}, status=status.HTTP_400_BAD_REQUEST)
         auto.updated_at = timezone.now()
-        auto.save(update_fields=['enabled', 'ac_dev_id', 'ac_port', 'level', 'level_at', 'updated_at'])
+        auto.save(update_fields=['enabled', 'ac_dev_id', 'ac_port', 'level', 'level_at', 'maintenance_at', 'updated_at'])
     return Response(automation_payload())
 
 

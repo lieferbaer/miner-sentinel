@@ -26,6 +26,7 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 
 import calibration
+import miner_cache
 
 logger = logging.getLogger(__name__)
 
@@ -201,6 +202,56 @@ def _boost(st, t):
     return boost
 
 
+def _maintenance(row, st, now, ac):
+    """Wartung (A15 switched off by hand): normal regulation while the A15 still answers; once it stopped
+    answering the fan goes off („Aus“, atType 1); when it answers again the fan goes back on at the level it had
+    and the maintenance ends (the reboot is then handled as usual: start clock of the level).
+    Returns the miner reading, or None while the A15 is off."""
+    mt = st.get('maint') or {}
+    if mt.get('since') != str(row['maintenance_at']):
+        mt = {'since': str(row['maintenance_at'])}
+        _note(st, now, 'Wartung angemeldet: Lüfter geht aus, sobald der A15 ausgeschaltet ist.')
+    st['maint'] = mt
+    dev_id, fport = row['ac_dev_id'], row['ac_port']
+    m = None
+    # only the central reading (every 5 s): no own request with timeouts while the A15 is switched off
+    if miner_cache.get(row['ip_address'], 'estats', calibration.CACHE_MAX_AGE):
+        try:
+            m = calibration.read_miner(row['ip_address'], row['port'])
+        except (OSError, RuntimeError, ValueError):
+            m = None
+    if m is None:                                   # switched off
+        if not mt.get('seen_off'):
+            mt['seen_off'] = True
+            mt['fan_before'] = int(st.get('fan_set') or st.get('base') or row['level'])
+            _note(st, now, 'A15 aus (Wartung).')
+        if not mt.get('fan_off'):
+            try:
+                ac.set_fan_power(dev_id, fport, False)
+                mt['fan_off'] = True
+                st['ac_error'] = None
+                _note(st, now, 'Wartung: Lüfter aus.')
+            except ac.ACError as exc:
+                st['ac_error'] = str(exc)
+        st['phase'] = 'wartung'
+        return None
+    if not mt.get('seen_off'):
+        return m                                    # still running (not switched off yet): regulate as usual
+    level = mt.get('fan_before') or int(row['level'])
+    try:
+        ac.set_fan_power(dev_id, fport, True, level)
+    except ac.ACError as exc:
+        st['ac_error'] = str(exc)
+        st['phase'] = 'wartung'
+        return None                                 # fan not back on yet: try again next round
+    st.update({'fan_set': level, 'fan_set_at': _iso(now), 'ac_error': None,
+               'fan_read_at': _iso(now - timedelta(seconds=FAN_READ_S - FAN_CONFIRM_S)),
+               'maint_end': True, 'maint_ended_at': _iso(now)})
+    st.pop('maint', None)
+    _note(st, now, 'A15 wieder an: Wartung beendet, Lüfter wieder an auf Stufe %d.' % level)
+    return m
+
+
 def step(row, now, ac):
     """One round for one automation row; returns the new state."""
     st = dict(row['state'] or {})
@@ -217,7 +268,13 @@ def step(row, now, ac):
         st = {'log': st.get('log') or [], 'learned': st.get('learned') or {}}   # learned values stay
         _note(st, now, 'Automatik ein (Stufe %d).' % row['level'])
 
-    m = calibration.read_miner(ip, port)     # the central reading taken just before (fallback: own request)
+    if row.get('maintenance_at'):
+        m = _maintenance(row, st, now, ac)
+        if m is None:
+            return st                               # A15 off for maintenance: fan off, nothing to regulate
+    else:
+        st.pop('maint', None)
+        m = calibration.read_miner(ip, port)     # the central reading taken just before (fallback: own request)
     st['seen_at'] = _iso(now)
     rebooted = st.get('elapsed') is not None and m['elapsed'] is not None and m['elapsed'] < st['elapsed']
     if st.get('mode_key') not in (None, m['mode_key']) or rebooted:
@@ -461,7 +518,8 @@ def run_fan_automation(database_url, ac=None):
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
-                "SELECT f.id, f.enabled, f.ac_dev_id, f.ac_port, f.level, f.level_at, f.state, d.ip_address, d.port, "
+                "SELECT f.id, f.enabled, f.ac_dev_id, f.ac_port, f.level, f.level_at, f.maintenance_at, f.state, "
+                "d.ip_address, d.port, "
                 "d.connection_config, EXISTS (SELECT 1 FROM calibration_runs r WHERE r.device_id = d.id "
                 "AND r.status IN ('running', 'cancelling', 'finishing')) AS cal_active "
                 "FROM fan_automation f JOIN devices d ON d.id = f.device_id "
@@ -477,6 +535,10 @@ def run_fan_automation(database_url, ac=None):
                 logger.info('Temperatur-Automatik: %s', exc)
             with conn.cursor() as cur:
                 cur.execute("UPDATE fan_automation SET state = %s WHERE id = %s", (json.dumps(state), row['id']))
+                if state.pop('maint_end', False):
+                    # the A15 is back on: end the maintenance (only the one that was announced)
+                    cur.execute("UPDATE fan_automation SET maintenance_at = NULL, state = %s WHERE id = %s "
+                                "AND maintenance_at = %s", (json.dumps(state), row['id'], row['maintenance_at']))
             conn.commit()
     finally:
         conn.close()

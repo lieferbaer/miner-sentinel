@@ -353,6 +353,23 @@ class AvalonCollector:
             cursor.close()
             conn.close()
 
+    def _in_maintenance(self, device_id):
+        """Wartung announced (or ended within the last 15 min): no offline/online messages for this miner."""
+        try:
+            conn = self.get_db_connection()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT f.maintenance_at IS NOT NULL OR COALESCE((f.state->>'maint_ended_at')::timestamptz "
+                        "> NOW() - interval '15 minutes', false) FROM fan_automation f JOIN devices d "
+                        "ON d.id = f.device_id WHERE d.make = %s AND d.device_id = %s", (self.MAKE, device_id))
+                    row = cur.fetchone()
+                    return bool(row) and row[0] is True
+            finally:
+                conn.close()
+        except psycopg2.Error:
+            return False
+
     def update_device_status(self, device_id, device_ip, is_online, error_message=""):
         """Update device online/offline status and send notifications if needed.
 
@@ -380,8 +397,10 @@ class AvalonCollector:
             previously_online = was_device_online(prev_error, last_seen)
             self.writer.update_device_status(self.MAKE, device_id, is_online, error_message)
 
+            if previously_online != is_online and self._in_maintenance(device_id):
+                logger.info(f"Device {device_id} {'online' if is_online else 'offline'} during maintenance: no message")
             # Transition: online → offline (only once per outage)
-            if previously_online and not is_online:
+            elif previously_online and not is_online:
                 last_seen_str = last_seen.strftime("%Y-%m-%d %H:%M:%S") if last_seen else "Unknown"
                 logger.warning(f"Device {device_id} went offline. Last seen: {last_seen_str}")
                 self._notify(

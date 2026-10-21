@@ -756,6 +756,7 @@ class FanAutomation(models.Model):
     ac_port = models.IntegerField(default=1)
     level = models.IntegerField(default=5)          # chosen fan level: the fan runs at it, never below
     level_at = models.DateTimeField(blank=True, null=True)   # last click on a level (also the same level again)
+    maintenance_at = models.DateTimeField(blank=True, null=True)   # Wartung announced (A15 is switched off by hand)
     state = models.JSONField(default=dict, blank=True)
     updated_at = models.DateTimeField(default=timezone.now)
 

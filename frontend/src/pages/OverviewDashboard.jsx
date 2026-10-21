@@ -140,6 +140,9 @@ function DeviceSection({
   // AC Infinity fan of the Temperatur-Automatik: the level the controller reports (read back), not the set one
   const liveAuto = useLive().data?.automation
   const acFanLevel = liveAuto?.enabled && liveAuto.device?.id === device.id ? liveAuto.state?.fan_read ?? null : null
+  // Wartung announced on the fan page: shown instead of "offline", no error text
+  const maintenanceAt = liveAuto?.device?.id === device.id ? liveAuto.maintenance_at : null
+  const acFanText = maintenanceAt && liveAuto?.state?.phase === 'wartung' ? 'Aus' : acFanLevel != null ? 'S' + acFanLevel : null
   const fanPercent = system?.fan_speed_percent
   const workMode = system?.work_mode
   const workLevel = system?.work_level
@@ -179,7 +182,13 @@ function DeviceSection({
             {device.model || device.device_id} · {device.ip_address}
           </span>
         </div>
-        <StatusIndicator status={status} showLabel size="md" />
+        {maintenanceAt ? (
+          <span className="rounded bg-amber-500/15 px-2 py-0.5 text-sm font-medium text-amber-600">
+            Wartung seit {new Date(maintenanceAt).toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' })}
+          </span>
+        ) : (
+          <StatusIndicator status={status} showLabel size="md" />
+        )}
       </div>
 
       <div className="grid grid-cols-2 gap-3 sm:gap-4 xl:grid-cols-4">
@@ -239,7 +248,7 @@ function DeviceSection({
           layout="icon-left"
           icon={Fan}
           label="Fan speed"
-          value={formatNumber(fanRpm, 0) + ' rpm' + (acFanLevel != null ? ' / S' + acFanLevel : '')}
+          value={formatNumber(fanRpm, 0) + ' rpm' + (acFanText ? ' / ' + acFanText : '')}
           subtitle={
             fanPercent || fanPercent === 0 ? formatNumber(fanPercent, 0) + '% duty' : 'Measured'
           }
@@ -499,7 +508,7 @@ function DeviceSection({
         </Card>
       </div>
 
-      {device.error_message ? (
+      {device.error_message && !maintenanceAt ? (
         <p className="text-sm text-status-critical-fg">{device.error_message}</p>
       ) : null}
     </section>

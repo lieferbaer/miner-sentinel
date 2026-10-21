@@ -336,6 +336,23 @@ def set_fan_level(dev_id, port, level):
     return res
 
 
+def set_fan_power(dev_id, port, on, level=None):
+    """Fan on/off like the buttons „An“/„Aus“ (atType 2/1); switching on can set the level at the same time."""
+    read = port_settings(dev_id, port)
+    settings = read.get('data')
+    if read.get('code') != CODE_OK or not isinstance(settings, dict):
+        raise ACError('Einstellungen von Port %s nicht lesbar (Code %s: %s)' % (port, read.get('code'), read.get('msg')))
+    overlay = {'atType': 2 if on else 1}
+    if on and level is not None:
+        overlay['onSpead'] = int(level)
+    payload = build_payload(settings, overlay)
+    payload.setdefault('devId', dev_id)
+    res = write_settings(payload, HEADERS_OBER37)
+    if res.get('code') != CODE_OK:
+        raise ACError('Lüfter %s nicht geschaltet (Code %s: %s)' % ('an' if on else 'aus', res.get('code'), res.get('msg')))
+    return res
+
+
 def build_payload(settings, overlay):
     """All flat fields of the read settings (without the excluded ones), overlaid with the changes."""
     out = {}
