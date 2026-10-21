@@ -158,15 +158,41 @@ def test_ac_error_keeps_clock_regulation(miner):
     assert miner.sets and 'Cloud' in st['ac_error']
 
 
-def test_manual_throttle_has_priority(miner):
-    miner.tmax = 87.0
+def _throttled_row(st, level=5):
+    r = row(st, level=level)
+    r['connection_config']['throttle']['active'] = {'clock_mhz': 300.0}
+    return r
+
+
+def test_manual_clock_fan_holds_80(miner):
     ac = FakeAC(level=5)
-    st = {}
-    for i in range(12):
-        r = row(st)
-        r['connection_config']['throttle']['active'] = {'clock_mhz': 300.0}
-        st = fa.step(r, T0 + timedelta(seconds=15 * i), ac)
-    assert miner.sets == [] and st['throttled'] is True
+    miner.tmax = 83.0                                 # higher manual clock: warmer
+    st, now = {}, T0
+    for i in range(30):
+        st = fa.step(_throttled_row(st), now, ac)
+        now += timedelta(seconds=5)
+    assert miner.sets == [] and st['throttled'] is True and st['phase'] == 'manuell'
+    assert ac.writes[:2] == [6, 7]                    # fan up (> 81 degC), 60 s apart
+    miner.tmax = 76.0                                 # lower manual clock: the fan may go below the chosen level
+    for i in range(60):
+        st = fa.step(_throttled_row(st), now, ac)
+        now += timedelta(seconds=5)
+    assert ac.writes[-1] < 5
+
+
+def test_lifting_manual_clock_returns_to_chosen_level(miner):
+    ac = FakeAC(level=5)
+    miner.tmax = 83.0
+    st, now = {}, T0
+    for i in range(20):
+        st = fa.step(_throttled_row(st), now, ac)
+        now += timedelta(seconds=5)
+    assert ac.writes[-1] >= 6                         # fan above the chosen level
+    miner.tmax = 79.0
+    for i in range(int((fa.WAIT_S + 60) / 5)):        # throttle lifted: back to level 5 (clock first, fan later)
+        st = fa.step(row(st), now, ac)
+        now += timedelta(seconds=5)
+    assert ac.writes[-1] == 5 and st['phase'] == 'normal'
 
 
 def test_protection_uses_latest_reading(miner):
@@ -237,3 +263,18 @@ def test_fan_read_back_after_10_s_no_double_write(miner):
         st = fa.step(row(st, level=5), ac.now, ac)
     assert ac.writes == [5]                                   # no second write because of a stale read
     assert st['fan_read'] == 5
+
+
+def test_calibration_fan_down_at_78_after_60_s(miner):
+    ac = FakeAC(level=3)
+    miner.tmax = 83.0
+    st, now = run({}, miner, ac, 30, cal=True)
+    assert ac.writes == [4]                                   # > 81 degC: +1 at once
+    miner.tmax = 78.0
+    st, now = run(st, miner, ac, 30, cal=True, start=now)
+    assert ac.writes == [4]                                   # within 60 s: no change
+    st, now = run(st, miner, ac, 40, cal=True, start=now)
+    assert ac.writes == [4, 3]                                # <= 78 degC after 60 s: -1
+    miner.tmax = 80.0
+    st, now = run(st, miner, ac, 300, cal=True, start=now)
+    assert ac.writes == [4, 3]                                # 78-81 degC: no change

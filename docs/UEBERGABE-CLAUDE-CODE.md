@@ -203,11 +203,13 @@ solange die Seite offen ist. Steuerung läuft immer auf dem Server, unabhängig 
   Data-Service beim nächsten frischen GHSspd **einmal** einen Messpunkt `kind='manual'` (Takt-Tabellen › „Manuell“) – nicht bei
   Over Hot oder Moduswechsel. Die frühere TH/s-Regelung gibt es beim A15 nicht mehr.
 - **Nano 3S / Avalon Q: unverändert** (Ziel-Hashrate, Geraden-Methode, Totband ±2 %, max. 20 % Schritt).
-- Sperren: Takt-Lauf läuft → 409. **Lauf pausiert → Drosseln erlaubt** (auch bei Automatik). Automatik an (ohne Pause) → 409.
+- Sperren: nur während ein Takt-Lauf **läuft** (409). **Mit Automatik erlaubt**: der manuelle Takt übersteuert die Automatik
+  (letzte Eingabe gilt), die Automatik regelt dann den **Lüfter** auf ~80 °C (7.8), bis die Drosselung aufgehoben wird.
 - „Drosselung aufheben“: ohne Automatik → Standardtakt wird gesendet; **mit Automatik → kein Takt** (Automatik regelt vom aktuellen
   Takt weiter). Grund: Sprung auf Standardtakt brachte TMax auf 95 °C (Fehler 12).
-- Anzeige A15: groß der **Wert laut Miner** (statt „Ungedrosselt“), darunter „laut Miner · gesetzt X MHz (Drosselung|Automatik) ·
-  Standard Y MHz“; keine Beschreibungszeile und kein Modusname in der Kachel (Nutzerwunsch).
+- Anzeige A15: groß der **Wert laut Miner** (statt „Ungedrosselt“), darunter „laut Miner · gesetzt X MHz (Drosselung|Takt-Messung|
+  Automatik) · Standard Y MHz“ – „gesetzt“ = der **zuletzt** gesetzte Takt (`_last_set_clock`), „—“ = Firmware-Takte; keine
+  Beschreibungszeile und kein Modusname in der Kachel (Nutzerwunsch).
 - Während Takt-Lauf oder Automatik liest der Controller nur (Beobachtungsmodus) – lernt dann keine „Standardtakte“; eine manuelle
   Drosselung in der Pause wird trotzdem überwacht und gemessen.
 - Zustand: `devices.connection_config -> 'throttle'` (mit `rev`; Controller schreibt nur bei unverändertem `rev`, sonst Rollback).
@@ -266,8 +268,8 @@ hebt eine manuelle Drosselung auf). Der Data-Service ist der einzige, der dann L
 | Stufe senken | Mit Lernwert: Takt sofort auf den Lernwert, Lüfter nach 3 min. Ohne: Takt senken bis TMax ≤ 80, 3 min warten, dann Lüfter. |
 | Stufe erhöhen | Lüfter sofort; mit Lernwert Takt **60 s später** auf den Lernwert. |
 | Schutz | **≥ 88 °C** (aktueller Wert): −30 MHz (höchstens alle 60 s) und Lüfter **+1**; **≥ 90 °C**: Lüfter **+2**; zurück bei ≤ 84 °C. Max. Stufe 10. |
-| Takt-Tabellen-Lauf | **Kein Takt-Eingriff**; Lüfter hält **80 °C** (79–81, 1 Stufe je 3 min, Stufen 1–10), Schutz sofort. Danach zurück zur gewählten Stufe nach der Senken-Regel. |
-| Lauf pausiert | Normalbetrieb; ist dann eine manuelle Drosselung gesetzt: kein Takt-Eingriff, nur Lüfterschutz. |
+| Takt-Tabellen-Lauf **oder manueller Takt (Drosselung)** | **Kein Takt-Eingriff**; Lüfter hält **~80 °C**: +1 bei **> 81 °C**, −1 bei **≤ 78 °C**, mindestens **60 s** zwischen zwei Änderungen, Stufen **1–10** (auch unter der gewählten), Schutz sofort. Danach zurück zur gewählten Stufe (höher: Senken-Regel, tiefer: sofort). Status „Takt-Messung“ bzw. „Manueller Takt“. |
+| Lauf pausiert | Normalbetrieb (ohne Drosselung). |
 | Lernwerte | Takt je **Modus + Lüfterstufe**, wenn TMax **10 min ruhig** bei 80–84 °C (kein Schutz, keine Drosselung, kein Wechsel); spätere ruhige Phasen überschreiben. Tabelle auf der Lüfter-Seite. Stand: **Power Mode 04, Stufe 3 → 231 MHz** (21.10. 00:54). |
 | Lüfter-Rückmeldung | Lesen alle 60 s; nach einem Schreibbefehl erst **10 s später** zurücklesen (Controller meldet nach > 5 s); Abweichung erzwingt nur bei bestätigtem Wert ein erneutes Senden. |
 | Fehler | AC-Cloud weg → Lüfter bleibt, Takt regelt weiter. Neustart/Moduswechsel → Regelung beginnt neu. Ausschalten → Standardtakt wieder gesetzt. |

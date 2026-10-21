@@ -52,6 +52,7 @@ const PHASE = {
   normal: { value: 'Normal', sub: 'regelt über den Takt' },
   senken: { value: 'Lüfter senken', sub: 'erst Takt runter, Lüfter nach 3 min' },
   messung: { value: 'Takt-Messung', sub: 'kein Takt-Eingriff, Lüfter hält 80 °C' },
+  manuell: { value: 'Manueller Takt', sub: 'Takt fest, Lüfter hält 80 °C' },
   aus: { value: 'Aus', sub: '' },
 }
 
@@ -99,6 +100,10 @@ function LearnedTable({ learned, mode, level }) {
 
 /** Status of the Temperatur-Automatik as cards like the overview; the small line never repeats the big value. */
 function AutomationCards({ auto, st }) {
+  // the clock set last (Drosselung, Takt-Messung or Automatik) - the same value as the throttle card
+  const live = useLive()
+  const throttle = live.data?.throttle?.[auto.device?.id] || {}
+  const setText = throttle.set_mhz != null ? fmt(throttle.set_mhz, 0, ' MHz') + ' (' + throttle.set_by + ')' : '—'
   const tmax = auto.now?.tmax
   const boards = (auto.now?.boards || []).filter((b) => b != null)
   const others = boards.length > 1 ? [...boards].sort((a, b) => b - a).slice(1) : []
@@ -107,15 +112,15 @@ function AutomationCards({ auto, st }) {
   const running = st.fan_set ?? st.fan_read
   const confirmed = st.fan_read === st.fan_set ||
     (st.fan_read_at && st.fan_set_at && Date.parse(st.fan_read_at) >= Date.parse(st.fan_set_at) + 10000)
-  const measuring = st.phase === 'messung'
+  const measuring = st.phase === 'messung' || st.phase === 'manuell'
   const fanSub = [
-    measuring ? 'Messung regelt · deine Stufe ' + auto.level + ' gilt danach'
+    measuring ? 'Lüfter regelt · deine Stufe ' + auto.level + ' gilt danach'
       : running === auto.level && !st.boost ? '= gewählte Stufe' : 'gewählt Stufe ' + auto.level,
     st.boost && !measuring ? 'Schutz +' + st.boost : null,
     confirmed ? null : 'Rückmeldung folgt',
   ].filter(Boolean).join(' · ')
   const phase = PHASE[st.phase] || { value: '—', sub: '' }
-  const phaseSub = st.throttled && st.phase !== 'messung' ? 'Drosselung gesetzt: kein Takt-Eingriff' : phase.sub
+  const phaseSub = phase.sub
   return (
     <div className="grid grid-cols-2 gap-3 xl:grid-cols-4">
       <MetricCard variant="hero" layout="icon-left" icon={Thermometer} label="Heißester Chip" tone={tempTone}
@@ -124,12 +129,11 @@ function AutomationCards({ auto, st }) {
           fmt(st.t, 1, ' °C') + ' · Ziel 80–84 °C'} />
       <MetricCard variant="hero" layout="icon-left" icon={Gauge} label="Takt laut Miner"
         value={fmt(st.clock_now, 0, ' MHz')}
-        subtitle={'gesetzt ' + (st.clock_set ? fmt(st.clock_set, 0, ' MHz') : '—') + ' · Standard ' +
-          fmt(st.stock_mhz, 0, ' MHz')} />
+        subtitle={'gesetzt ' + setText + ' · Standard ' + fmt(st.stock_mhz, 0, ' MHz')} />
       <MetricCard variant="hero" layout="icon-left" icon={Fan} label="Lüfter läuft auf"
         tone={st.boost ? 'warning' : 'default'} value={running == null ? '—' : 'Stufe ' + running} subtitle={fanSub} />
       <MetricCard variant="hero" layout="icon-left" icon={Activity} label="Status"
-        tone={st.phase === 'normal' && !st.throttled ? 'default' : 'warning'} value={phase.value}
+        tone={st.phase === 'normal' ? 'default' : 'warning'} value={phase.value}
         subtitle={phaseSub} />
     </div>
   )
@@ -383,10 +387,11 @@ function Controller({ dev, backups, automation, onReload }) {
           {own.length === 0 && (
             <p className="text-xs text-muted-foreground">Erst eine Sicherung erstellen, dann sind die Buttons frei.</p>
           )}
-          {autoHere && auto.state?.phase === 'messung' && (
+          {autoHere && ['messung', 'manuell'].includes(auto.state?.phase) && (
             <p className="text-xs text-amber-600">
-              Takt-Messung läuft: die Automatik regelt den Lüfter (jetzt Stufe {auto.state.fan_set ?? '—'}). Markiert
-              ist deine gewählte Stufe {auto.level}, sie gilt nach der Messung.
+              {auto.state.phase === 'messung' ? 'Takt-Messung läuft' : 'Manueller Takt gesetzt'}: die Automatik regelt den
+              Lüfter (jetzt Stufe {auto.state.fan_set ?? '—'}). Markiert ist deine gewählte Stufe {auto.level}, sie gilt
+              danach.
             </p>
           )}
           {busy && busy !== 'backup' && busy !== 'restore' && (

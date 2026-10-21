@@ -564,14 +564,8 @@ class DeviceViewSet(viewsets.ModelViewSet):
         from django.utils.dateparse import parse_datetime
         seen_at = parse_datetime(live['seen_at']) if live.get('seen_at') else None
         stock_avg = prof.get('avg_mhz')
-        # the clock MinerSentinel set last (manual throttle or Temperatur-Automatik); the miner reports its own
         auto = FanAutomation.objects.filter(device=device, enabled=True).first()
-        if active and active.get('clock_mhz') is not None:
-            set_mhz, set_by = active['clock_mhz'], 'Drosselung'
-        elif auto and (auto.state or {}).get('clock_set'):
-            set_mhz, set_by = auto.state['clock_set'], 'Automatik'
-        else:
-            set_mhz, set_by = None, None
+        set_mhz, set_by = self._last_set_clock(device, active, auto)
         return {
             'supported': True,
             'set_mhz': set_mhz,
@@ -617,6 +611,33 @@ class DeviceViewSet(viewsets.ModelViewSet):
             'family': self._throttle_family(device),
         }
 
+    def _last_set_clock(self, device, active, auto):
+        """(MHz, by) of the clock MinerSentinel set last - manual throttle, Takt-Messung or Temperatur-Automatik,
+        whichever was latest; (None, None) if the firmware's own clocks are in effect."""
+        from django.utils.dateparse import parse_datetime
+        candidates = []
+        if active and active.get('clock_mhz') is not None:
+            candidates.append((active.get('last_change_at') or active.get('set_at'), active['clock_mhz'], 'Drosselung'))
+        run = CalibrationRun.objects.filter(device=device).order_by('-created_at').first()
+        rst = (run.state or {}) if run else {}
+        if run and run.status in self.CAL_ACTIVE:
+            if run.kind == 'step' and rst.get('set_points') and rst.get('phase') in ('measure', 'set_clock'):
+                points = rst['set_points']
+                candidates.append((rst.get('changed_at'), round(sum(points) / len(points), 1), 'Takt-Messung'))
+            else:
+                candidates.append((rst.get('changed_at'), None, 'Takt-Messung'))    # mode switch: firmware clocks
+        elif run and run.finished_at:
+            candidates.append((run.finished_at.isoformat(), None, 'Takt-Messung'))  # run ended: firmware clocks
+        ast = (auto.state or {}) if auto else {}
+        if auto and ast.get('changed_at'):
+            # clock_set None: the automation gave the clocks back to the firmware (stock clock)
+            candidates.append((ast['changed_at'], ast.get('clock_set'), 'Automatik'))
+        dated = [(parse_datetime(at), mhz, by) for at, mhz, by in candidates if at and parse_datetime(at)]
+        if not dated:
+            return None, None
+        _, mhz, by = max(dated, key=lambda c: c[0])
+        return (mhz, by) if mhz is not None else (None, None)
+
     @staticmethod
     def _throttle_keep_measured(device, st):
         """Never drop measured/learned profiles the controller wrote meanwhile."""
@@ -648,12 +669,10 @@ class DeviceViewSet(viewsets.ModelViewSet):
             if not seen or not seen['supported']:
                 return Response({'supported': False})
             return Response(self._throttle_payload(device, seen))
+        # a running Takt-Messung blocks; with the Temperatur-Automatik a manual clock is allowed: it overrides
+        # the automation's clock control (the automation then regulates the fan) until it is lifted
         if CalibrationRun.objects.filter(device=device, status__in=self.CAL_RUNNING).exists():
             return Response({'error': 'Takt-Messung läuft – Drosseln ist gesperrt.'}, status=status.HTTP_409_CONFLICT)
-        paused = CalibrationRun.objects.filter(device=device, status='paused').exists()
-        if not paused and FanAutomation.objects.filter(device=device, enabled=True).exists():
-            return Response({'error': 'Die Temperatur-Automatik steuert den Takt (Menü „Lüfter“).'},
-                            status=status.HTTP_409_CONFLICT)
         try:
             live = self._throttle_live(device)
         except OSError as exc:

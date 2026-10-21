@@ -5,6 +5,7 @@ import pytest
 from api import acinfinity as ac
 from api.models import Device, FanAutomation
 from django.contrib.auth.models import User
+from django.utils import timezone
 from rest_framework.test import APIClient
 
 
@@ -55,12 +56,18 @@ def test_level_and_disable(client, a15, backup):
     assert client.post('/api/fans/automation/', {'action': 'disable'}, format='json').data['enabled'] is False
 
 
-def test_manual_buttons_and_clock_locked(client, a15, backup):
+def test_manual_fan_buttons_locked_but_manual_clock_allowed(client, a15, backup):
+    from api.views import DeviceViewSet
     client.post('/api/fans/automation/', {'action': 'enable', 'dev_id': 'dev1', 'port': 1, 'level': 6}, format='json')
     res = client.post('/api/fans/test/', {'dev_id': 'dev1', 'port': 1, 'speed': 4, 'action': 'set'}, format='json')
-    assert res.status_code == 409
-    res = client.post('/api/devices/%d/throttle/' % a15.id, {'clock_mhz': 300}, format='json')
-    assert res.status_code == 409
+    assert res.status_code == 409                    # the automation controls the fan
+    live = {'workmode': 4, 'supported': True, 'points': [360, 360, 360], 'mode_key': '2/L4',
+            'mode_label': 'Power Mode 04', 'ghsspd': 150000.0, 'mhs5': None}
+    with patch.object(DeviceViewSet, '_throttle_live', lambda self, d: live), \
+            patch('api.views._cgminer_command', return_value='set OK'):
+        res = client.post('/api/devices/%d/throttle/' % a15.id, {'clock_mhz': 300}, format='json')
+    assert res.status_code == 200                    # a manual clock overrides the automation's clock control
+    assert res.data['active']['clock_mhz'] == 300.0
 
 
 def test_run_start_needs_fan_and_switches_automation_on(client, a15, backup):
@@ -112,3 +119,22 @@ def test_lift_throttle_with_automation_sends_no_clock(client, a15, backup):
         res = client.post('/api/devices/%d/throttle/' % a15.id, {'reset': True}, format='json')
     assert res.status_code == 200 and not cmd.called           # the automation continues from 300 MHz
     assert Device.objects.get(pk=a15.pk).connection_config['throttle']['active'] is None
+
+
+def test_set_clock_is_the_latest_setter(client, a15):
+    from api.models import CalibrationRun
+    from api.views import DeviceViewSet
+    auto = FanAutomation.objects.create(device=a15, ac_dev_id='dev1', ac_port=1, level=3, enabled=True,
+                                        state={'clock_set': 220.0, 'changed_at': '2026-10-21T00:30:00+00:00'})
+    view = DeviceViewSet()
+    assert view._last_set_clock(a15, None, auto) == (220.0, 'Automatik')
+    CalibrationRun.objects.create(device=a15, kind='step', modes=['2/L4'], status='running', state={
+        'phase': 'measure', 'set_points': [150, 160, 170], 'changed_at': '2026-10-21T01:20:00+00:00'})
+    assert view._last_set_clock(a15, None, auto) == (160.0, 'Takt-Messung')     # the run set later
+    auto.state = {'clock_set': None, 'changed_at': '2026-10-21T01:30:00+00:00'}
+    assert view._last_set_clock(a15, None, auto) == (None, None)                 # back to the firmware's clocks
+    auto.state = {'clock_set': 220.0, 'changed_at': '2026-10-21T00:30:00+00:00'}
+    run = CalibrationRun.objects.get(device=a15)
+    run.status, run.finished_at = 'done', timezone.now()
+    run.save()
+    assert view._last_set_clock(a15, None, auto) == (None, None)                 # run ended later: firmware clocks

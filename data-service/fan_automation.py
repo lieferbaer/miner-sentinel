@@ -7,7 +7,9 @@ keeps the hottest chip (TMax, median of the last 60 s) between T_LOW and T_HIGH:
 A lower fan level is applied only after the clock brought TMax to T_LOW and WAIT_S passed; a higher one
 at once. Protection: TMax >= T_PROTECT1 -> clock -30 MHz and fan +1 level, >= T_PROTECT2 -> fan +2 levels,
 back to the chosen level at TMax <= T_HIGH.
-During a Takt-Tabellen run no clock is set; the fan holds TMax at T_CAL (+-CAL_BAND, 1 level per WAIT_S).
+During a Takt-Tabellen run and while a manual clock (Drosselung) is set no clock is set by the automation;
+the fan holds TMax around 80 degC (levels 1-10): +1 level above T_CAL_UP, -1 level at T_CAL_DOWN or below,
+at least CAL_FAN_GAP_S between two changes. Afterwards back to the chosen level (lower: clock first).
 
 Live only (MINERSENTINEL_ENV != Test). The AC Infinity client is the backend's (backend/api/acinfinity.py,
 mounted read-only), so both use the same stored session. The data-service writes only fan_automation.state.
@@ -30,7 +32,8 @@ logger = logging.getLogger(__name__)
 RUN_S = 5                    # one round per central reading (every 5 s; user decision 21.10.)
 T_LOW, T_HIGH = 80.0, 84.0
 T_PROTECT1, T_PROTECT2 = 88.0, 90.0
-T_CAL, CAL_BAND = 80.0, 1.0
+T_CAL_UP, T_CAL_DOWN = 81.0, 78.0   # Takt-Messung: fan +1 above 81 degC, -1 at <= 78 degC (user decision 21.10.)
+CAL_FAN_GAP_S = 60           # ... at least 60 s between two fan changes (~half of the effect is visible after 60-90 s)
 WAIT_S = 180                 # measured: ~85 % of a temperature change after 3 min
 PROTECT_WAIT_S = 60
 STEP_MHZ = 10
@@ -202,14 +205,18 @@ def step(row, now, ac):
 
     cal = bool(row['cal_active'])
     st['cal'] = cal
+    # a manual clock (Drosselung) overrides the automation's clock control until it is lifted
+    throttled = bool((((row['connection_config'] or {}).get('throttle') or {}).get('active')))
+    st['throttled'] = throttled
     stock = _stock(row, m['mode_key'])
     if stock:
         st['stock_points'] = stock
         st['stock_mhz'] = round(sum(stock) / len(stock), 1)
 
-    if cal:
-        # Takt-Tabellen: no clocks; the fan holds T_CAL
-        st['phase'] = 'messung'
+    if cal or throttled:
+        # Takt-Tabellen or manual clock: no clocks; the fan holds ~80 degC (T_CAL_DOWN..T_CAL_UP), levels 1-10
+        why = 'Takt-Messung' if cal else 'Manueller Takt'
+        st['phase'] = 'messung' if cal else 'manuell'
         fan = int(st.get('cal_fan') or st.get('fan_set') or st['base'])
         since_fan = _age(st.get('cal_fan_at'), now)
         new = fan
@@ -218,31 +225,27 @@ def step(row, now, ac):
                 new = fan + 2
             elif t_fast >= T_PROTECT1 and since_fan >= PROTECT_WAIT_S:
                 new = fan + 1
-            elif t > T_CAL + CAL_BAND and since_fan >= WAIT_S:
+            elif t > T_CAL_UP and since_fan >= CAL_FAN_GAP_S:
                 new = fan + 1
-            elif t < T_CAL - CAL_BAND and since_fan >= WAIT_S:
+            elif t <= T_CAL_DOWN and since_fan >= CAL_FAN_GAP_S:
                 new = fan - 1
         new = min(max(new, FAN_MIN), FAN_MAX)
-        if new != fan or st.get('cal_fan') is None:
+        if new != fan:
             st['cal_fan_at'] = _iso(now)
-            if new != fan:
-                _note(st, now, 'Takt-Messung: TMax %.0f °C → Lüfter Stufe %d.' % (t, new))
+            _note(st, now, '%s: TMax %.0f °C → Lüfter Stufe %d.' % (why, t, new))
         st['cal_fan'] = new
         target_fan = new
     else:
         if st.pop('cal_fan', None) is not None:
             st['base'] = max(int(st.get('fan_set') or st['base']), st['base'])
             st.pop('cal_fan_at', None)
-            _note(st, now, 'Takt-Messung beendet: zurück zur gewählten Stufe %d.' % row['level'])
+            _note(st, now, 'Lüfter-Regelung beendet: zurück zur gewählten Stufe %d.' % row['level'])
         chosen = int(row['level'])
         mode = m['mode_key']
         learned = st.setdefault('learned', {})
-        # a manual clock (allowed while a run is paused) has priority: no clock changes then
-        throttled = bool((((row['connection_config'] or {}).get('throttle') or {}).get('active')))
-        st['throttled'] = throttled
         cur = sum(m['points']) / len(m['points']) if m['points'] else None
         stock_avg = st['stock_mhz'] if stock else None
-        can_clock = bool(stock) and not throttled and cur is not None
+        can_clock = bool(stock) and cur is not None
 
         def set_clock(new, text):
             new = min(max(new, stock_avg * FLOOR_SHARE), stock_avg)
@@ -268,7 +271,7 @@ def step(row, now, ac):
                 set_clock(target, 'Lernwert Stufe %d: Takt %%.0f MHz, Lüfter folgt nach 3 min.' % chosen)
                 st['lower_learned'] = True
         st['phase'] = 'senken' if lowering else 'normal'
-        if lowering and (not stock or throttled) and _age(st.get('lower_since'), now) >= WAIT_S:
+        if lowering and not stock and _age(st.get('lower_since'), now) >= WAIT_S:
             st['base'] = chosen                         # no clock step possible: the fan after WAIT_S
             lowering = False
         if not lowering:
@@ -300,7 +303,7 @@ def step(row, now, ac):
                         lowering = False
                         for key in ('lower_since', 'lower_learned'):
                             st.pop(key, None)
-        quiet = (not lowering and not st.get('raise_to') and not int(st.get('boost') or 0) and not throttled)
+        quiet = not lowering and not st.get('raise_to') and not int(st.get('boost') or 0)
         _learn(st, now, mode, t, cur, quiet)
         target_fan = min(st['base'] + int(st.get('boost') or 0), FAN_MAX)
 
