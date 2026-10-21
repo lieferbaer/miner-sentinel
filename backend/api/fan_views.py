@@ -1,6 +1,7 @@
 """Lüfter (AC Infinity) test page: show controllers/ports, back up settings, test which write variant works."""
 import json
 import time
+from datetime import timedelta
 
 from django.utils import timezone
 from rest_framework import status
@@ -56,6 +57,31 @@ def automation_payload():
 def automation_on(dev_id, port):
     """True if the Temperatur-Automatik controls this fan (manual fan buttons are then locked)."""
     return FanAutomation.objects.filter(enabled=True, ac_dev_id=str(dev_id), ac_port=port).exists()
+
+
+def _keep_clock_as_throttle(dev, auto):
+    """Automatik aus: the clock the automation set stays and becomes a manual throttle (Drosselung card), so
+    switching off never applies the firmware's stock clocks at a low fan level (21.10.: 3.670 W, 111 degC)."""
+    from .views import DeviceViewSet
+    st = auto.state or {}
+    clock = st.get('clock_set')
+    if not st.get('clock_own') or not clock:
+        return                                      # the firmware's own clocks are in effect: nothing to keep
+    tst = json.loads(json.dumps((dev.connection_config or {}).get('throttle') or {}))
+    if tst.get('active'):
+        return
+    mode = st.get('mode_key')
+    stock = ((tst.get('profiles') or {}).get(mode) or {}).get('points') or st.get('stock_points')
+    if not stock:
+        return
+    factor = clock / (sum(stock) / len(stock))
+    points = [min(max(int(round(p * factor)), int(p * DeviceViewSet.THROTTLE_FLOOR)), p) for p in stock]
+    now = timezone.now()
+    tst['active'] = {'clock_mhz': round(float(clock), 1), 'profile': mode, 'applied_points': points,
+                     'set_at': now.isoformat(), 'last_change_at': now.isoformat(), 'status': 'manual', 'steps': 0,
+                     'pending_until': (now + timedelta(seconds=60)).isoformat(), 'from_automation': True}
+    tst['last_event'] = None
+    DeviceViewSet()._throttle_save(dev, tst)
 
 
 def _lift_throttle(dev):
@@ -133,6 +159,7 @@ def fans_automation(request):
             auto.level, auto.level_at = level, timezone.now()     # the data-service applies the learned clock
         elif action == 'disable':
             auto.enabled = False
+            _keep_clock_as_throttle(dev, auto)
         elif action == 'maintenance_start' and not auto.maintenance_at:
             # Wartung: the A15 is switched off by hand; a running Takt-Messung is paused
             from .models import CalibrationRun

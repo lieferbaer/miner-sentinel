@@ -154,3 +154,17 @@ def test_maintenance_start_pauses_run_and_end(client, a15, backup):
     assert client.get('/api/live/').data['automation']['maintenance_at']
     res = client.post('/api/fans/automation/', {'action': 'maintenance_end'}, format='json')
     assert res.data['maintenance_at'] is None
+
+
+def test_disable_keeps_clock_as_manual_throttle(client, a15, backup):
+    a15.connection_config['throttle']['active'] = None
+    a15.save()
+    client.post('/api/fans/automation/', {'action': 'enable', 'dev_id': 'dev1', 'port': 1, 'level': 2}, format='json')
+    auto = FanAutomation.objects.get(device=a15)
+    auto.state = {'clock_set': 164.5, 'clock_own': True, 'mode_key': '2/L4'}
+    auto.save()
+    res = client.post('/api/fans/automation/', {'action': 'disable'}, format='json')
+    assert res.data['enabled'] is False
+    active = Device.objects.get(pk=a15.pk).connection_config['throttle']['active']
+    assert active['clock_mhz'] == 164.5 and active['status'] == 'manual'
+    assert active['applied_points'] == [164, 164, 164]           # stock 360/360/360 scaled to 164.5

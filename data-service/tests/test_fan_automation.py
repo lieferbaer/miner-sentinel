@@ -143,13 +143,16 @@ def test_calibration_run_no_clocks_fan_holds_80(miner):
     assert ac.writes[-1] < 6
 
 
-def test_disable_gives_clocks_back(miner):
+def test_disable_keeps_the_clock(miner):
+    """21.10.: switching the automation off set the stock clocks at fan level 2 -> 3.670 W, 111 degC, Over Hot."""
     miner.tmax = 87.0
     ac = FakeAC(level=5)
     st, now = run({}, miner, ac, 60)
     assert st['clock_set']
+    sets = list(miner.sets)
     st = fa.step(row(st, enabled=False), now, ac)
-    assert miner.sets[-1] == 360.0 and st['off'] is True
+    assert miner.sets == sets and st['off'] is True                 # no clock sent (stays as a throttle)
+    assert 'als Drosselung' in st['log'][-1][1]
 
 
 def test_ac_error_keeps_clock_regulation(miner):

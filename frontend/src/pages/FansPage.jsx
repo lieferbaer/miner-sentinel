@@ -146,6 +146,7 @@ function AutomationCards({ auto, st }) {
 }
 
 function AutomationPanel({ auto, here, port, level, locked, onCommand, busy }) {
+  const [confirmOff, setConfirmOff] = useState(false)
   if (!auto) return null
   const st = auto.state || {}
   if (!auto.enabled) {
@@ -167,10 +168,35 @@ function AutomationPanel({ auto, here, port, level, locked, onCommand, busy }) {
     <div className="space-y-1.5 rounded-md border border-emerald-500/60 bg-emerald-500/5 p-3 text-xs">
       <div className="flex flex-wrap items-center gap-2">
         <p className="text-sm font-medium">Temperatur-Automatik an · {auto.device?.name}</p>
-        <Button size="sm" variant="outline" className="ml-auto h-8" disabled={busy}
-          onClick={() => onCommand({ action: 'disable' })}>
-          Ausschalten
-        </Button>
+        <span className="ml-auto flex flex-wrap gap-2">
+          {auto.maintenance_at ? (
+            <Button size="sm" variant="outline" className="h-8" disabled={busy}
+              onClick={() => onCommand({ action: 'maintenance_end' })}>
+              Wartung beenden
+            </Button>
+          ) : (
+            <Button size="sm" variant="outline" className="h-8" disabled={busy}
+              onClick={() => onCommand({ action: 'maintenance_start' })}>
+              Wartung starten (A15 ausschalten)
+            </Button>
+          )}
+          {confirmOff ? (
+            <>
+              <span className="self-center">Automatik wirklich beenden? Der Takt bleibt als Drosselung stehen.</span>
+              <Button size="sm" variant="destructive" className="h-8" disabled={busy}
+                onClick={() => { setConfirmOff(false); onCommand({ action: 'disable' }) }}>
+                Ja
+              </Button>
+              <Button size="sm" variant="secondary" className="h-8" onClick={() => setConfirmOff(false)}>
+                Nein
+              </Button>
+            </>
+          ) : (
+            <Button size="sm" variant="outline" className="h-8" disabled={busy} onClick={() => setConfirmOff(true)}>
+              Automatik beenden
+            </Button>
+          )}
+        </span>
       </div>
       {!here && <p className="text-amber-600">Steuert Port {auto.port} dieses Controllers.</p>}
       {auto.maintenance_at && st.phase !== 'wartung' && (
@@ -180,19 +206,6 @@ function AutomationPanel({ auto, here, port, level, locked, onCommand, busy }) {
         </p>
       )}
       <AutomationCards auto={auto} st={st} />
-      <div className="flex flex-wrap gap-2 pt-1">
-        {auto.maintenance_at ? (
-          <Button size="sm" variant="outline" className="h-8" disabled={busy}
-            onClick={() => onCommand({ action: 'maintenance_end' })}>
-            Wartung beenden
-          </Button>
-        ) : (
-          <Button size="sm" variant="outline" className="h-8" disabled={busy}
-            onClick={() => onCommand({ action: 'maintenance_start' })}>
-            Wartung starten (A15 ausschalten)
-          </Button>
-        )}
-      </div>
       <LearnedTable learned={auto.learned} mode={st.mode_key} level={auto.level} />
       {st.ac_error && <p className="text-amber-600">AC Infinity: {st.ac_error}</p>}
       {st.last_error && <p className="text-destructive">Fehler: {st.last_error}</p>}

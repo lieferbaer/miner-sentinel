@@ -257,12 +257,12 @@ def step(row, now, ac):
     st = dict(row['state'] or {})
     ip, port = row['ip_address'], row['port']
     if not row['enabled']:
-        if st.get('clock_set') and st.get('stock_points'):
-            calibration.set_frequency(ip, port, st['stock_points'])     # clocks back to the firmware's
-            _note(st, now, 'Automatik aus: Standardtakt wieder gesetzt.')
-        else:
-            _note(st, now, 'Automatik aus.')
-        st.update({'clock_set': None, 'off': True, 'phase': 'aus'})
+        # no clock is sent: the clock stays (the backend keeps it as a manual throttle); before 21.10. the stock
+        # clocks were set here, which overheated the A15 at a low fan level (3.670 W, 111 degC, Over Hot)
+        _note(st, now, 'Automatik aus: Takt bleibt %s.' % (
+            ('auf %.0f MHz (als Drosselung)' % st['clock_set']) if st.get('clock_own') and st.get('clock_set')
+            else 'wie er ist'))
+        st.update({'clock_set': None, 'clock_own': False, 'off': True, 'phase': 'aus'})
         return st
     if st.pop('off', False) or not st.get('seen_at'):
         st = {'log': st.get('log') or [], 'learned': st.get('learned') or {}}   # learned values stay
