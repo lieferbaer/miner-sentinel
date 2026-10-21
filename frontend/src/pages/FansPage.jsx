@@ -125,7 +125,7 @@ function AutomationCards({ auto, st }) {
   const phase = PHASE[st.phase] || { value: '—', sub: '' }
   const phaseSub = phase.sub
   return (
-    <div className="grid grid-cols-2 gap-3 xl:grid-cols-4">
+    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
       <MetricCard variant="hero" layout="icon-left" icon={Thermometer} label="Heißester Chip" tone={tempTone}
         value={fmt(tmax, 0, ' °C')}
         subtitle={(others.length ? 'weitere Boards ' + others.join(' / ') + ' · ' : '') + 'Regelwert ' +
@@ -167,32 +167,37 @@ function AutomationPanel({ auto, here, port, level, locked, onCommand, busy }) {
   return (
     <div className="space-y-1.5 rounded-md border border-emerald-500/60 bg-emerald-500/5 p-3 text-xs">
       <div className="flex flex-wrap items-center gap-2">
-        <p className="text-sm font-medium">Temperatur-Automatik an · {auto.device?.name}</p>
-        <span className="ml-auto flex flex-wrap gap-2">
+        <p className="w-full text-sm font-medium sm:w-auto">Temperatur-Automatik an · {auto.device?.name}</p>
+        {/* phone: buttons share the full width, the question gets its own line */}
+        <span className="flex w-full flex-wrap gap-2 sm:ml-auto sm:w-auto">
           {auto.maintenance_at ? (
-            <Button size="sm" variant="outline" className="h-8" disabled={busy}
+            <Button size="sm" variant="outline" className="h-9 flex-1 sm:h-8 sm:flex-none" disabled={busy}
               onClick={() => onCommand({ action: 'maintenance_end' })}>
               Wartung beenden
             </Button>
           ) : (
-            <Button size="sm" variant="outline" className="h-8" disabled={busy}
+            <Button size="sm" variant="outline" className="h-9 flex-1 sm:h-8 sm:flex-none" disabled={busy}
               onClick={() => onCommand({ action: 'maintenance_start' })}>
-              Wartung starten (A15 ausschalten)
+              Wartung starten (A15 aus)
             </Button>
           )}
           {confirmOff ? (
             <>
-              <span className="self-center">Automatik wirklich beenden? Der Takt bleibt als Drosselung stehen.</span>
-              <Button size="sm" variant="destructive" className="h-8" disabled={busy}
+              <span className="basis-full self-center sm:basis-auto">
+                Automatik wirklich beenden? Der Takt bleibt als Drosselung stehen.
+              </span>
+              <Button size="sm" variant="destructive" className="h-9 flex-1 sm:h-8 sm:flex-none" disabled={busy}
                 onClick={() => { setConfirmOff(false); onCommand({ action: 'disable' }) }}>
                 Ja
               </Button>
-              <Button size="sm" variant="secondary" className="h-8" onClick={() => setConfirmOff(false)}>
+              <Button size="sm" variant="secondary" className="h-9 flex-1 sm:h-8 sm:flex-none"
+                onClick={() => setConfirmOff(false)}>
                 Nein
               </Button>
             </>
           ) : (
-            <Button size="sm" variant="outline" className="h-8" disabled={busy} onClick={() => setConfirmOff(true)}>
+            <Button size="sm" variant="outline" className="h-9 flex-1 sm:h-8 sm:flex-none" disabled={busy}
+              onClick={() => setConfirmOff(true)}>
               Automatik beenden
             </Button>
           )}
