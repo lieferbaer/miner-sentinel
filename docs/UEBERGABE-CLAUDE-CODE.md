@@ -43,7 +43,7 @@ etwas änderst. Wenn etwas unklar ist oder diesem Dokument widerspricht: **frag*
 | Auf dem VPS lb-db.de **nur `/opt/minersentinel` und die eigenen Container** anfassen. Keine anderen Seiten, keine Reverse-Proxy-/Webserver-Konfiguration. | Auf dem Server laufen produktive Seiten von LieferBär. |
 | **Keine Passwörter eingeben**, keine Zugangsdaten anlegen/ändern. **Zugangsdaten-Dateien (`.env`, `acinfinity_data/credentials`) nicht lesen, kopieren oder vergleichen – auch nicht per Hash.** | Sicherheitsregel; Hash-Vergleich wurde am 21.10. ausdrücklich abgelehnt. |
 | Selbst geschriebene Test-/Hilfsskripte auf dem Server nach Gebrauch löschen (nicht in `/opt/minersentinel/backend` liegen lassen). | Ist einmal passiert (`t41.py`). |
-| **Git:** commit nur auf Anweisung („committen“). Der Nutzer pusht selbst über **GitHub Desktop**. Danach „VPS auf Stand bringen“ (Abschnitt 5). | Auf dem iMac ist keine Git-Anmeldung für die CLI hinterlegt. |
+| **Git:** commit nur auf Anweisung („committen“). **Seit 21.10. pusht Claude selbst** (`gh auth login` als lieferbaer, `gh auth setup-git`; Anmeldung hat der Nutzer im Browser bestätigt). Danach „VPS auf Stand bringen“ (Abschnitt 5). | Nutzerwunsch 21.10. (vorher Push über GitHub Desktop). |
 | Nach jeder Änderung am Laufenden: **Logs und Funktion prüfen** und kurz berichten. | Mehrfach hat erst die Kontrolle Fehler gezeigt. |
 
 ---
@@ -113,8 +113,8 @@ solange die Seite offen ist. Steuerung läuft immer auf dem Server, unabhängig 
 ## 5. Deploy, Tests, Rollback
 
 ### 5.1 Arbeitsablauf
-1. Auf dem iMac in `vps-stand` ändern, Tests (5.3), Nutzer sagt „committen“ → Claude committet.
-2. Nutzer pusht über GitHub Desktop, sagt „VPS auf Stand bringen“.
+1. Auf dem iMac in `vps-stand` ändern, Tests (5.3), Nutzer sagt „committen“ → Claude committet und pusht (`git push origin vps-stand`).
+2. Nutzer sagt „VPS auf Stand bringen“ (oft zusammen mit „committen“).
 3. VPS: `git ls-remote origin vps-stand` (iMac) prüfen, dann auf dem VPS
    `cd /opt/minersentinel && git status --short && git fetch -q fork vps-stand && git checkout -q -f vps-stand && git reset -q --hard fork/vps-stand`
    – vorher sicherstellen, dass `git status` nur `?? docker-compose.yml.imac` zeigt.
@@ -272,7 +272,9 @@ hebt eine manuelle Drosselung auf). Der Data-Service ist der einzige, der dann L
 | Schutz | Aktueller Wert: **> 84 °C** Lüfter **+1**, **≥ 88 °C** Lüfter **+2** und −30 MHz (höchstens alle 60 s), **≥ 90 °C** Lüfter **+3**; zurück auf die gewählte Stufe erst bei **≤ 80 °C** (Nutzer 21.10.; vorher +1 erst ab 88, zurück bei 84 → Pendeln). Max. Stufe 10. Im Lüfter-Regelmodus (Messung/manueller Takt) wirkt eine höhere Schutzstufe **sofort**, bleibt es heiß, nach 60 s erneut. |
 | Nach Lauf / manuellem Takt | Sofort auf den **Ausgangspunkt** der gewählten Stufe (tiefer: Takt sofort; höher: Takt 60 s nach dem Lüfter); sonst 10-MHz-Schritte. |
 | Ausgangspunkt einer Stufe | Eigener Lernwert, aber **nie über dem Lernwert einer höheren Stufe und nie unter dem einer niedrigeren** (Nutzer 21.10.: Stufe 2 darf nicht mit mehr Takt starten als Stufe 3). Ohne eigenen Lernwert: höchstens Lernwert der höheren bzw. mindestens der niedrigeren Stufe. Gilt bei Stufenwechsel, nach Lauf/manuellem Takt und nach dem Senken. |
-| Takt anheben | Erst **3 min nach der letzten Takt- UND Lüfteränderung** (21.10.: direkt nach dem Senken des Lüfters wurde +10 MHz gesetzt). Absenken und Schutz bleiben sofort. |
+| Takt anheben | Erst **3 min nach der letzten Takt- UND Lüfteränderung** (21.10.: direkt nach dem Senken des Lüfters wurde +10 MHz gesetzt) und **15 min nach dem letzten Schutz-Eingriff**. Absenken und Schutz bleiben sofort. |
+| Bezug der Schritte | Vom **zuletzt gesetzten** Takt (nicht vom gemeldeten): die Firmware zieht gesetzte Takte in Minuten um ~+11 MHz nach oben; gerechnet vom gemeldeten Wert wurden alle −10-MHz-Schritte aufgefressen (21.10.: 40 Schutz-Eingriffe in 5 h, gesetzte Werte stiegen 218 → 224). |
+| Schutz-Eingriff = Takt zu hoch | Beim Einsetzen des Schutzes: Takt **dauerhaft** um den üblichen Schritt **+10 MHz** senken und den Lernwert der Stufe auf diesen Takt setzen (`source: Schutz`). Ziel: nach 1–2 Eingriffen bleibt der Lüfter auf der gewählten Stufe. |
 | Takt-Tabellen-Lauf **oder manueller Takt (Drosselung)** | **Kein Takt-Eingriff**; Lüfter hält **~80 °C**: +1 bei **> 81 °C**, −1 bei **≤ 78 °C**, mindestens **60 s** zwischen zwei Änderungen, Stufen **1–10** (auch unter der gewählten), Schutz sofort. Danach zurück zur gewählten Stufe (höher: Senken-Regel, tiefer: sofort). Status „Takt-Messung“ bzw. „Manueller Takt“. |
 | Lauf pausiert | Normalbetrieb (ohne Drosselung). |
 | Lernwerte | Takt je **Modus + Lüfterstufe**, wenn TMax **10 min ruhig** bei 80–84 °C (kein Schutz, keine Drosselung, kein Wechsel); spätere ruhige Phasen überschreiben. Gespeichert wird der **von der Automatik gesetzte** Takt (`source: gesetzt`; die Firmware zieht den gemeldeten nach oben), nur wenn sie selbst nichts gesetzt hat der Wert laut Miner (`source: laut Miner`). Tabelle auf der Lüfter-Seite. Stand: **Power Mode 04, Stufe 3 → 231 MHz** (21.10. 00:54, noch laut Miner gespeichert). |

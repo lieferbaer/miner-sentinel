@@ -46,6 +46,7 @@ FAN_CONFIRM_S = 10           # the controller reports a new level only after > 5
 FAN_WRITE_GAP_S = 20
 FAN_MIN, FAN_MAX = 1, 10
 LEARN_S = 600                # learned value: TMax 10 min quietly within 80-84 degC at one fan level and mode
+PROTECT_HOLD_S = 900         # after a protection (fan above the chosen level) the clock is not raised for 15 min
 RAISE_DELAY_S = 60           # higher fan level: the learned clock follows 60 s after the fan
 LOG_KEEP = 40
 
@@ -104,7 +105,8 @@ def _clock_step(st, now, t, t_fast, cur, stock_avg, upper, lowering):
         new = cur - MAX_STEP_MHZ
     elif t > upper and since >= WAIT_S:
         new = cur - min(MAX_STEP_MHZ, STEP_MHZ * math.ceil((t - upper) / C_PER_STEP))
-    elif t < T_LOW and not lowering and since >= WAIT_S and since_fan >= WAIT_S and cur < stock_avg - 0.5:
+    elif (t < T_LOW and not lowering and since >= WAIT_S and since_fan >= WAIT_S and cur < stock_avg - 0.5
+          and _age(st.get('protect_at'), now) >= PROTECT_HOLD_S):
         new = cur + STEP_MHZ
     else:
         return None
@@ -334,7 +336,21 @@ def step(row, now, ac):
             for key in ('lower_since', 'lower_learned'):
                 st.pop(key, None)
         if t is not None:
+            prev_boost = int(st.get('boost') or 0)
             st['boost'] = _boost(st, t_fast)
+            # the firmware drifts a set clock up by ~10 MHz within minutes: regulate from the clock SET last
+            # (steps then add up), not from the reported one (21.10.: -10 MHz steps were eaten by the drift)
+            ref = (st.get('clock_set') or stock_avg) if st.get('clock_own') and stock_avg else cur
+            if can_clock and prev_boost == 0 and st['boost'] > 0:
+                # protection needed: the clock is too high for this fan level -> lower it for good
+                st['protect_at'] = _iso(now)
+                step = min(MAX_STEP_MHZ, STEP_MHZ * math.ceil((t - T_HIGH) / C_PER_STEP)) if t > T_HIGH else 0
+                new = max(ref - step - STEP_MHZ, stock_avg * FLOOR_SHARE)     # the usual step plus 10 MHz
+                set_clock(new, 'Schutz bei TMax %.1f °C: Takt dauerhaft auf %%.0f MHz für Stufe %d.' % (t_fast, st['base']))
+                lv = learned.setdefault(mode, {}).get(str(st['base']))
+                if not lv or lv.get('mhz', 1e9) > new:
+                    learned[mode][str(st['base'])] = {'mhz': round(new, 1), 'at': _iso(now), 'source': 'Schutz'}
+                ref = new
             if can_clock:
                 raise_to = st.get('raise_to')
                 if raise_to and t > T_HIGH:
@@ -347,7 +363,7 @@ def step(row, now, ac):
                                   + ': Takt %.0f MHz.')
                 else:
                     upper = T_LOW if lowering and not st.get('lower_learned') else T_HIGH
-                    new = _clock_step(st, now, t, t_fast, cur, stock_avg, upper, lowering)
+                    new = _clock_step(st, now, t, t_fast, ref, stock_avg, upper, lowering)
                     if new is not None:
                         set_clock(new, 'TMax %.1f °C → Takt %%.0f MHz.' % t)
                 if lowering:

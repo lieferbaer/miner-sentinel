@@ -75,7 +75,7 @@ def test_too_hot_lowers_clock_then_waits(miner):
     miner.tmax = 87.0
     ac = FakeAC(level=5)
     st, _ = run({}, miner, ac, 170)
-    assert miner.sets == [340.0]                 # 3 degC over 84 -> 20 MHz, then 3 min wait
+    assert miner.sets == [330.0]                 # protection: 3 degC over 84 -> 20 MHz + 10 MHz, then 3 min wait
     assert ac.writes == [6]                      # > 84 degC: fan +1 (protection) as well
 
 
@@ -223,11 +223,11 @@ def test_learns_the_set_clock_not_the_drifted_one(miner):
     ac = FakeAC(level=3)
     miner.tmax = 86.0
     st, now = run({}, miner, ac, 20, level=3)
-    assert miner.sets == [340.0]                      # automation set 340 MHz
-    miner.points = [346, 346, 346]                    # the firmware drifts the clock up
+    assert miner.sets == [330.0]                      # automation set 330 MHz (protection: 20 + 10 MHz)
+    miner.points = [336, 336, 336]                    # the firmware drifts the clock up
     miner.tmax = 80.0                                 # <= 80 ends the protection, 80-84 is quiet
     st, _ = run(st, miner, ac, 11 * 60, level=3, start=now)
-    assert st['learned']['2/L4']['3']['mhz'] == 340.0 and st['learned']['2/L4']['3']['source'] == 'gesetzt'
+    assert st['learned']['2/L4']['3']['mhz'] == 330.0 and st['learned']['2/L4']['3']['source'] == 'gesetzt'
 
 
 def test_lowering_uses_learned_clock(miner):
@@ -350,3 +350,27 @@ def test_no_clock_raise_right_after_fan_change():
     assert fa._clock_step(st, T0, 78.0, 78.0, 300.0, 360.0, fa.T_HIGH, False) == 310.0
     st['fan_set_at'] = (T0 - timedelta(seconds=60)).isoformat()
     assert fa._clock_step(st, T0, 86.0, 86.0, 300.0, 360.0, fa.T_HIGH, False) == 280.0  # lowering stays at once
+
+
+def test_drifting_firmware_protection_settles(miner):
+    """21.10.: the firmware drifts a set clock up ~11 MHz; regulating from the reported clock ate every -10 MHz
+    step, so the protection lifted the fan 40 times in 5 h. Now the steps add up and the fan stays at level 2."""
+    ac = FakeAC(level=2)
+    state = {'set': 225.0, 'rep': 225.0}
+
+    def set_frequency(ip, port, points):
+        miner.sets.append(sum(points) / len(points))
+        state['set'] = miner.sets[-1]
+
+    miner.set_frequency = set_frequency
+    calibration.set_frequency = set_frequency
+    st, now = {}, T0
+    for i in range(int(2 * 3600 / 5)):
+        state['rep'] = min(state['set'] + 11, state['rep'] + 0.2) if state['rep'] < state['set'] + 11 \
+            else state['set'] + 11
+        miner.points = [state['rep']] * 3
+        miner.tmax = 82 + (state['rep'] - 210) * 0.15 - 3 * (ac.level - 2)
+        st = fa.step(row(st, level=2), now, ac)
+        now += timedelta(seconds=5)
+    assert ac.writes.count(3) <= 2, (ac.writes, [round(x) for x in miner.sets], st['log'][-6:])
+    assert ac.level == 2 and st['boost'] == 0, (ac.writes, [round(x) for x in miner.sets], st['log'][-6:])
