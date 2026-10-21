@@ -96,13 +96,15 @@ def _points_for(stock, mhz):
 
 
 def _clock_step(st, now, t, t_fast, cur, stock_avg, upper, lowering):
-    """New average clock or None (no change)."""
+    """New average clock or None (no change). The clock is raised only WAIT_S after the last clock AND fan change
+    (a lower fan level cools less only after 1-3 min)."""
     since = _age(st.get('changed_at'), now)
+    since_fan = _age(st.get('fan_set_at'), now)
     if t_fast >= T_PROTECT1 and since >= PROTECT_WAIT_S:
         new = cur - MAX_STEP_MHZ
     elif t > upper and since >= WAIT_S:
         new = cur - min(MAX_STEP_MHZ, STEP_MHZ * math.ceil((t - upper) / C_PER_STEP))
-    elif t < T_LOW and not lowering and since >= WAIT_S and cur < stock_avg - 0.5:
+    elif t < T_LOW and not lowering and since >= WAIT_S and since_fan >= WAIT_S and cur < stock_avg - 0.5:
         new = cur + STEP_MHZ
     else:
         return None
@@ -112,6 +114,27 @@ def _clock_step(st, now, t, t_fast, cur, stock_avg, upper, lowering):
 
 def _learned(learned, mode, level):
     return ((learned.get(mode) or {}).get(str(level)) or {}).get('mhz')
+
+
+def _start_clock(learned, mode, level, cur):
+    """(clock, text) to start from at a fan level, or (None, None) to keep the current clock.
+    Learned value of the level; a lower fan level never starts above any learned value of a higher level,
+    a higher level never below any learned value of a lower level (also when its own value says otherwise)."""
+    vals = {int(k): v.get('mhz') for k, v in (learned.get(mode) or {}).items() if v.get('mhz')}
+    higher = [mhz for lv, mhz in vals.items() if lv > level]
+    lower = [mhz for lv, mhz in vals.items() if lv < level]
+    hi = min(higher) if higher else None
+    lo = max(lower) if lower else None
+    own = vals.get(level)
+    if own is not None:
+        target = min(own, hi) if hi is not None else own
+        target = max(target, lo) if lo is not None else target
+        return target, 'Lernwert Stufe %d' % level
+    if hi is not None and cur > hi + 0.5:
+        return hi, 'Stufe %d: höchstens Lernwert der höheren Stufe' % level
+    if lo is not None and cur < lo - 0.5:
+        return lo, 'Stufe %d: mindestens Lernwert der niedrigeren Stufe' % level
+    return None, None
 
 
 def _learn(st, now, mode, t, cur, quiet, stock_avg=None):
@@ -275,28 +298,31 @@ def step(row, now, ac):
             st['base'] = chosen                         # higher level: the fan at once ...
             for key in ('lower_since', 'lower_learned'):
                 st.pop(key, None)
-            target = _learned(learned, mode, chosen)
-            if target and can_clock and target > cur + 0.5:
-                st['raise_to'], st['raise_from'] = target, _iso(now)   # ... the learned clock RAISE_DELAY_S later
+            target, why = _start_clock(learned, mode, chosen, cur) if can_clock else (None, None)
+            if target and target > cur + 0.5:
+                st['raise_to'], st['raise_from'] = target, _iso(now)   # ... the start clock RAISE_DELAY_S later
+                st['raise_why'] = why
+            elif target and target < cur - 0.5:
+                set_clock(target, why + ': Takt %.0f MHz.')
         lowering = chosen < st['base']
         if lowering and not st.get('lower_since'):
             st['lower_since'] = _iso(now)
             st.pop('raise_to', None)
-            target = _learned(learned, mode, chosen)
-            if target and can_clock and target < cur - 0.5:
-                # learned value: clock straight to it, the fan follows after WAIT_S
-                set_clock(target, 'Lernwert Stufe %d: Takt %%.0f MHz, Lüfter folgt nach 3 min.' % chosen)
+            target, why = _start_clock(learned, mode, chosen, cur) if can_clock else (None, None)
+            if target and target < cur - 0.5:
+                # start clock of the lower level: clock straight to it, the fan follows after WAIT_S
+                set_clock(target, why + ': Takt %.0f MHz, Lüfter folgt nach 3 min.')
                 st['lower_learned'] = True
         st['phase'] = 'senken' if lowering else 'normal'
         # after a run / manual clock: straight to the learned clock of the chosen level (lower: at once,
         # higher: RAISE_DELAY_S after the fan); while lowering the fan this waits until the fan is down
         if st.get('exit_learned') and not lowering:
             st.pop('exit_learned', None)
-            target = _learned(learned, mode, chosen)
-            if target and can_clock and target < cur - 0.5:
-                set_clock(target, 'Lernwert Stufe %d: Takt %%.0f MHz.' % chosen)
-            elif target and can_clock and target > cur + 0.5:
-                st['raise_to'], st['raise_from'] = target, _iso(now)
+            target, why = _start_clock(learned, mode, chosen, cur) if can_clock else (None, None)
+            if target and target < cur - 0.5:
+                set_clock(target, why + ': Takt %.0f MHz.')
+            elif target and target > cur + 0.5:
+                st['raise_to'], st['raise_from'], st['raise_why'] = target, _iso(now), why
         if lowering and not stock and _age(st.get('lower_since'), now) >= WAIT_S:
             st['base'] = chosen                         # no clock step possible: the fan after WAIT_S
             lowering = False
@@ -313,7 +339,8 @@ def step(row, now, ac):
                 if raise_to:
                     if _age(st.get('raise_from'), now) >= RAISE_DELAY_S:
                         st.pop('raise_to', None)
-                        set_clock(raise_to, 'Lernwert Stufe %d: Takt %%.0f MHz.' % st['base'])
+                        set_clock(raise_to, (st.pop('raise_why', None) or 'Lernwert Stufe %d' % st['base'])
+                                  + ': Takt %.0f MHz.')
                 else:
                     upper = T_LOW if lowering and not st.get('lower_learned') else T_HIGH
                     new = _clock_step(st, now, t, t_fast, cur, stock_avg, upper, lowering)
@@ -329,6 +356,7 @@ def step(row, now, ac):
                         lowering = False
                         for key in ('lower_since', 'lower_learned'):
                             st.pop(key, None)
+                        st['exit_learned'] = True       # next round: start clock of the new level if still needed
         quiet = not lowering and not st.get('raise_to') and not int(st.get('boost') or 0)
         _learn(st, now, mode, t, cur, quiet, stock_avg)
         target_fan = min(st['base'] + int(st.get('boost') or 0), FAN_MAX)

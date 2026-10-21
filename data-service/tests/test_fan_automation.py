@@ -310,3 +310,37 @@ def test_calibration_protection_at_90_at_once(miner):
     st = fa.step(row(st, cal=True), now, ac)
     st = fa.step(row(st, cal=True), now + timedelta(seconds=5), ac)
     assert ac.writes and ac.writes[-1] >= 3                   # +2 at once, no 60 s wait
+
+
+def test_start_clock_bounds():
+    learned = {'2/L4': {'3': {'mhz': 231.0}, '5': {'mhz': 300.0}}}
+    assert fa._start_clock(learned, '2/L4', 2, 261.0)[0] == 231.0    # lower level: at most level 3's value
+    assert fa._start_clock(learned, '2/L4', 2, 200.0)[0] is None     # already below: keep
+    assert fa._start_clock(learned, '2/L4', 4, 200.0)[0] == 231.0    # higher level: at least level 3's value
+    assert fa._start_clock(learned, '2/L4', 4, 260.0)[0] is None     # between 3 and 5: keep
+    bad = {'2/L4': {'2': {'mhz': 280.0}, '3': {'mhz': 231.0}}}
+    assert fa._start_clock(bad, '2/L4', 2, 250.0)[0] == 231.0        # own value above level 3's: capped
+
+
+def test_lowering_without_own_value_caps_at_higher_level(miner):
+    ac = FakeAC(level=3)
+    miner.tmax = 82.0
+    miner.points = [261, 261, 261]
+    learned = {'2/L4': {'3': {'mhz': 231.0, 'at': 'x'}}}
+    st, now = run({}, miner, ac, 30, level=3)
+    st['learned'] = learned
+    st = fa.step(row(st, level=2), now, ac)
+    assert miner.sets == [231.0] and ac.writes == []          # clock first, never above level 3's value
+    miner.tmax = 79.0
+    st, now = run(st, miner, ac, fa.WAIT_S + 10, level=2, start=now + timedelta(seconds=5))
+    assert ac.writes == [2]                                    # fan after 3 min
+
+
+def test_no_clock_raise_right_after_fan_change():
+    old = (T0 - timedelta(seconds=600)).isoformat()
+    st = {'changed_at': old, 'fan_set_at': (T0 - timedelta(seconds=60)).isoformat()}
+    assert fa._clock_step(st, T0, 78.0, 78.0, 300.0, 360.0, fa.T_HIGH, False) is None   # fan changed 60 s ago
+    st['fan_set_at'] = old
+    assert fa._clock_step(st, T0, 78.0, 78.0, 300.0, 360.0, fa.T_HIGH, False) == 310.0
+    st['fan_set_at'] = (T0 - timedelta(seconds=60)).isoformat()
+    assert fa._clock_step(st, T0, 86.0, 86.0, 300.0, 360.0, fa.T_HIGH, False) == 280.0  # lowering stays at once
