@@ -58,15 +58,6 @@ function isA15(state) {
   return state.family === 'a15'
 }
 
-/** A15: clock text - the miner's value (mean of its 4 clock steps), the set one and the stock clock. */
-function a15ClockText(state) {
-  return (
-    'Takt-Stufen (Mittel) laut Miner: ' + fmt(state.current_avg_mhz, 0) + ' MHz · gesetzt: ' +
-    (state.set_mhz != null ? fmt(state.set_mhz, 0) + ' MHz (' + state.set_by + ')' : '—') +
-    ' · Standard: ' + fmt(state.stock_avg_mhz, 0) + ' MHz'
-  )
-}
-
 /** What the badge / hero card say: relative to the current mode, based on the real clock. */
 function throttleView(state) {
   const active = state.active
@@ -283,19 +274,13 @@ export default function ThrottleCard({ deviceId, throttle, ip }) {
             {view.badge}
           </span>
         </CardTitle>
-        <CardDescription className="text-xs">
-          {a15 ? (
-            <>
-              Modus {state.mode_label} · {a15ClockText(state)} · Hashrate {fmt(state.hashrate_ths)} TH/s
-            </>
-          ) : (
-            <>
-              Modus {state.mode_label} · max. {maxText(state)} · Takt {fmt(state.current_avg_mhz, 0)} von{' '}
-              {fmt(state.stock_avg_mhz, 0)} MHz
-              {active ? ' · aktuell ≈ ' + fmt(current(active, state)) + ' TH/s · ' + (STATUS_TEXT[active.status] || active.status) : ''}
-            </>
-          )}
-        </CardDescription>
+        {!a15 && (
+          <CardDescription className="text-xs">
+            Modus {state.mode_label} · max. {maxText(state)} · Takt {fmt(state.current_avg_mhz, 0)} von{' '}
+            {fmt(state.stock_avg_mhz, 0)} MHz
+            {active ? ' · aktuell ≈ ' + fmt(current(active, state)) + ' TH/s · ' + (STATUS_TEXT[active.status] || active.status) : ''}
+          </CardDescription>
+        )}
       </CardHeader>
       <CardContent className="space-y-2 pt-0">
         {state.stale && <p className="text-xs text-destructive">{staleText(state)}</p>}
