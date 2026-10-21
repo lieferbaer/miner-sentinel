@@ -76,7 +76,7 @@ def test_too_hot_lowers_clock_then_waits(miner):
     ac = FakeAC(level=5)
     st, _ = run({}, miner, ac, 170)
     assert miner.sets == [340.0]                 # 3 degC over 84 -> 20 MHz, then 3 min wait
-    assert ac.writes == []                       # fan stays at the chosen level
+    assert ac.writes == [6]                      # > 84 degC: fan +1 (protection) as well
 
 
 def test_cool_raises_clock_up_to_stock(miner):
@@ -89,15 +89,21 @@ def test_cool_raises_clock_up_to_stock(miner):
 
 def test_protection_88_and_90(miner):
     ac = FakeAC(level=5)
+    miner.tmax = 86.0
+    st, now = run({}, miner, ac, 30)
+    assert ac.writes[-1] == 6                                    # > 84 degC: +1 level
     miner.tmax = 88.5
-    st, now = run({}, miner, ac, 60)
-    assert ac.writes[-1] == 6 and miner.sets[0] == 330.0       # +1 level, -30 MHz
+    st, now = run(st, miner, ac, 60, start=now)
+    assert ac.writes[-1] == 7 and miner.sets[-1] == miner.sets[-2] - 30   # >= 88: +2 levels, -30 MHz
     miner.tmax = 90.5
     st, now = run(st, miner, ac, 60, start=now)
-    assert ac.writes[-1] == 7                                    # +2 levels
+    assert ac.writes[-1] == 8                                    # >= 90: +3 levels
     miner.tmax = 83.0
     st, now = run(st, miner, ac, 90, start=now)
-    assert ac.writes[-1] == 5                                    # back to the chosen level
+    assert ac.writes[-1] == 8                                    # still above 80: protection stays
+    miner.tmax = 79.0
+    st, now = run(st, miner, ac, 60, start=now)
+    assert ac.writes[-1] == 5                                    # <= 80 degC: back to the chosen level
 
 
 def test_lower_fan_only_after_clock_and_wait(miner):
@@ -201,7 +207,7 @@ def test_protection_uses_latest_reading(miner):
     st, now = run({}, miner, ac, 60)
     miner.tmax = 89.0                                # one hot reading is enough for the protection
     st = fa.step(row(st), now, ac)
-    assert st['t_now'] == 89.0 and st['boost'] == 1 and ac.writes[-1] == 6
+    assert st['t_now'] == 89.0 and st['boost'] == 2 and ac.writes[-1] == 7
 
 
 def test_learns_clock_after_10_quiet_minutes(miner):
@@ -219,7 +225,7 @@ def test_learns_the_set_clock_not_the_drifted_one(miner):
     st, now = run({}, miner, ac, 20, level=3)
     assert miner.sets == [340.0]                      # automation set 340 MHz
     miner.points = [346, 346, 346]                    # the firmware drifts the clock up
-    miner.tmax = 82.0
+    miner.tmax = 80.0                                 # <= 80 ends the protection, 80-84 is quiet
     st, _ = run(st, miner, ac, 11 * 60, level=3, start=now)
     assert st['learned']['2/L4']['3']['mhz'] == 340.0 and st['learned']['2/L4']['3']['source'] == 'gesetzt'
 

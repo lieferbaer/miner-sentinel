@@ -5,8 +5,8 @@ keeps the hottest chip (TMax, median of the last 60 s) between T_LOW and T_HIGH:
   above T_HIGH: clock down 10 MHz per 1.5 degC (max 30 MHz), then wait WAIT_S,
   below T_LOW : clock up 10 MHz (at most to the stock clock of the mode), then wait WAIT_S.
 A lower fan level is applied only after the clock brought TMax to T_LOW and WAIT_S passed; a higher one
-at once. Protection: TMax >= T_PROTECT1 -> clock -30 MHz and fan +1 level, >= T_PROTECT2 -> fan +2 levels,
-back to the chosen level at TMax <= T_HIGH.
+at once. Protection: TMax > T_HIGH -> fan +1 level, >= T_PROTECT1 -> fan +2 and clock -30 MHz, >= T_PROTECT2 ->
+fan +3, back to the chosen level at TMax <= T_LOW.
 During a Takt-Tabellen run and while a manual clock (Drosselung) is set no clock is set by the automation;
 the fan holds TMax around 80 degC (levels 1-10): +1 level above T_CAL_UP, -1 level at T_CAL_DOWN or below,
 at least CAL_FAN_GAP_S between two changes. Afterwards back to the chosen level (lower: clock first).
@@ -166,12 +166,16 @@ def _learn(st, now, mode, t, cur, quiet, stock_avg=None):
 
 
 def _boost(st, t):
+    """Fan protection above the chosen level (user decision 21.10.): > 84 degC +1, >= 88 +2, >= 90 +3 (latest
+    reading); kept until TMax is back at T_LOW (80 degC) or below, so the fan does not swing at the 84 degC line."""
     boost = int(st.get('boost') or 0)
     if t >= T_PROTECT2:
-        return 2
+        return max(boost, 3)
     if t >= T_PROTECT1:
+        return max(boost, 2)
+    if t > T_HIGH:
         return max(boost, 1)
-    if t <= T_HIGH:
+    if t <= T_LOW:
         return 0
     return boost
 

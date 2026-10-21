@@ -196,6 +196,7 @@ solange die Seite offen ist. Steuerung läuft immer auf dem Server, unabhängig 
 - Einzelansicht je MinerGerät; **Live-Werte aus `/api/live/` (5 s)**, Diagramme eigene Abfragen (1 min).
 - A15: Kachel „Working mode“, „Chip temperature“ mit allen drei MTmax groß („98 / 90 / 82 °C“).
 - Efficiency: „effektiver Takt X MHz“ + ⓘ (Erklärung nach 1 s Mouse-over / Antippen, `components/ui/info-tip.jsx`).
+- Fan speed (A15): „rpm / S2“ – S = **zurückgelesene** AC-Lüfterstufe (nicht die gesetzte), nur bei eingeschalteter Automatik.
 - Darüber Problem-/Highlight-Leiste des Originals (`FleetAlertsBar`), darunter je Avalon die Drosselungs-Karte.
 
 ### 7.3 Drosselung (`throttle_controller.py`, Backend `DeviceViewSet.throttle`, `components/devices/ThrottleCard.jsx`)
@@ -268,7 +269,7 @@ hebt eine manuelle Drosselung auf). Der Data-Service ist der einzige, der dann L
 | Normal | Lüfter **fest auf der gewählten Stufe (nie darunter)**; Takt hält **TMax 80–84 °C** (Median 30 s): > 84 → −10 MHz je 1,5 °C (max. 30), < 80 → +10 MHz (max. Standardtakt); nach jedem Schritt **3 min warten**. |
 | Stufe senken | Mit Lernwert: Takt sofort auf den Lernwert, Lüfter nach 3 min. Ohne: Takt senken bis TMax ≤ 80, 3 min warten, dann Lüfter. |
 | Stufe erhöhen | Lüfter sofort; mit Lernwert Takt **60 s später** auf den Lernwert. |
-| Schutz | **≥ 88 °C** (aktueller Wert): −30 MHz (höchstens alle 60 s) und Lüfter **+1**; **≥ 90 °C**: Lüfter **+2**; zurück bei ≤ 84 °C. Max. Stufe 10. Im Lüfter-Regelmodus (Messung/manueller Takt) wirkt eine höhere Schutzstufe **sofort**, bleibt es heiß, nach 60 s erneut. |
+| Schutz | Aktueller Wert: **> 84 °C** Lüfter **+1**, **≥ 88 °C** Lüfter **+2** und −30 MHz (höchstens alle 60 s), **≥ 90 °C** Lüfter **+3**; zurück auf die gewählte Stufe erst bei **≤ 80 °C** (Nutzer 21.10.; vorher +1 erst ab 88, zurück bei 84 → Pendeln). Max. Stufe 10. Im Lüfter-Regelmodus (Messung/manueller Takt) wirkt eine höhere Schutzstufe **sofort**, bleibt es heiß, nach 60 s erneut. |
 | Nach Lauf / manuellem Takt | Sofort auf den **Ausgangspunkt** der gewählten Stufe (tiefer: Takt sofort; höher: Takt 60 s nach dem Lüfter); sonst 10-MHz-Schritte. |
 | Ausgangspunkt einer Stufe | Eigener Lernwert, aber **nie über dem Lernwert einer höheren Stufe und nie unter dem einer niedrigeren** (Nutzer 21.10.: Stufe 2 darf nicht mit mehr Takt starten als Stufe 3). Ohne eigenen Lernwert: höchstens Lernwert der höheren bzw. mindestens der niedrigeren Stufe. Gilt bei Stufenwechsel, nach Lauf/manuellem Takt und nach dem Senken. |
 | Takt anheben | Erst **3 min nach der letzten Takt- UND Lüfteränderung** (21.10.: direkt nach dem Senken des Lüfters wurde +10 MHz gesetzt). Absenken und Schutz bleiben sofort. |

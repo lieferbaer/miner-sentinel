@@ -137,6 +137,9 @@ function DeviceSection({
   const temperature = hardware?.temperature_c || 0
   const chipTemperature = hardware?.temperature_chip_c || 0
   const fanRpm = hardware?.fan_speed_rpm || 0
+  // AC Infinity fan of the Temperatur-Automatik: the level the controller reports (read back), not the set one
+  const liveAuto = useLive().data?.automation
+  const acFanLevel = liveAuto?.enabled && liveAuto.device?.id === device.id ? liveAuto.state?.fan_read ?? null : null
   const fanPercent = system?.fan_speed_percent
   const workMode = system?.work_mode
   const workLevel = system?.work_level
@@ -233,7 +236,7 @@ function DeviceSection({
           layout="icon-left"
           icon={Fan}
           label="Fan speed"
-          value={formatNumber(fanRpm, 0) + ' rpm'}
+          value={formatNumber(fanRpm, 0) + ' rpm' + (acFanLevel != null ? ' / S' + acFanLevel : '')}
           subtitle={
             fanPercent || fanPercent === 0 ? formatNumber(fanPercent, 0) + '% duty' : 'Measured'
           }
