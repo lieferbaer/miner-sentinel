@@ -2,11 +2,12 @@
  * Lüfter (AC Infinity, Testmenü): Controller und Ports anzeigen, Einstellungen sichern/zurückschreiben und
  * testen, welcher Schreibweg die Lüfterstufe am echten Gerät wirklich ändert.
  */
+import MetricCard from '@/components/metrics/MetricCard'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import api from '@/lib/api'
 import { useLive } from '@/lib/LiveContext'
-import { Fan, Loader2, RefreshCw } from 'lucide-react'
+import { Activity, Fan, Gauge, Loader2, RefreshCw, Thermometer } from 'lucide-react'
 import { useCallback, useEffect, useState } from 'react'
 
 const ACTIONS = {
@@ -48,10 +49,10 @@ function errText(err, fallback) {
 }
 
 const PHASE = {
-  normal: 'regelt über den Takt (Lüfter fest auf der gewählten Stufe)',
-  senken: 'Lüfter wird gesenkt: erst Takt runter, bis 80 °C erreicht und 3 min stabil',
-  messung: 'Takt-Messung läuft: kein Takt-Eingriff, der Lüfter hält 80 °C',
-  aus: 'aus',
+  normal: { value: 'Normal', sub: 'regelt über den Takt' },
+  senken: { value: 'Lüfter senken', sub: 'erst Takt runter, Lüfter nach 3 min' },
+  messung: { value: 'Takt-Messung', sub: 'kein Takt-Eingriff, Lüfter hält 80 °C' },
+  aus: { value: 'Aus', sub: '' },
 }
 
 /** Temperatur-Automatik (A15): status from the live poll of the UI (every 5 s, same values as the overview). */
@@ -96,6 +97,39 @@ function LearnedTable({ learned, mode, level }) {
   )
 }
 
+/** Status of the Temperatur-Automatik as cards like the overview; the small line never repeats the big value. */
+function AutomationCards({ auto, st }) {
+  const tmax = auto.now?.tmax
+  const boards = (auto.now?.boards || []).filter((b) => b != null)
+  const others = boards.length > 1 ? [...boards].sort((a, b) => b - a).slice(1) : []
+  const tempTone = tmax == null ? 'default' : tmax >= 88 ? 'danger' : tmax >= 85 ? 'warning' : 'default'
+  const running = st.fan_read
+  const chosen = st.phase === 'messung' && st.cal_fan ? st.cal_fan : auto.level
+  const fanSub = [
+    running === chosen && !st.boost ? '= gewählte Stufe' : 'gewählt Stufe ' + chosen,
+    st.boost ? 'Schutz +' + st.boost : null,
+  ].filter(Boolean).join(' · ')
+  const phase = PHASE[st.phase] || { value: '—', sub: '' }
+  const phaseSub = st.throttled && st.phase !== 'messung' ? 'Drosselung gesetzt: kein Takt-Eingriff' : phase.sub
+  return (
+    <div className="grid grid-cols-2 gap-3 xl:grid-cols-4">
+      <MetricCard variant="hero" layout="icon-left" icon={Thermometer} label="Heißester Chip" tone={tempTone}
+        value={fmt(tmax, 0, ' °C')}
+        subtitle={(others.length ? 'weitere Boards ' + others.join(' / ') + ' · ' : '') + 'Regelwert ' +
+          fmt(st.t, 1, ' °C') + ' · Ziel 80–84 °C'} />
+      <MetricCard variant="hero" layout="icon-left" icon={Gauge} label="Takt laut Miner"
+        value={fmt(st.clock_now, 0, ' MHz')}
+        subtitle={'gesetzt ' + (st.clock_set ? fmt(st.clock_set, 0, ' MHz') : '—') + ' · Standard ' +
+          fmt(st.stock_mhz, 0, ' MHz')} />
+      <MetricCard variant="hero" layout="icon-left" icon={Fan} label="Lüfter läuft auf"
+        tone={st.boost ? 'warning' : 'default'} value={running == null ? '—' : 'Stufe ' + running} subtitle={fanSub} />
+      <MetricCard variant="hero" layout="icon-left" icon={Activity} label="Status"
+        tone={st.phase === 'normal' && !st.throttled ? 'default' : 'warning'} value={phase.value}
+        subtitle={phaseSub} />
+    </div>
+  )
+}
+
 function AutomationPanel({ auto, here, port, level, locked, onCommand, busy }) {
   if (!auto) return null
   const st = auto.state || {}
@@ -124,24 +158,7 @@ function AutomationPanel({ auto, here, port, level, locked, onCommand, busy }) {
         </Button>
       </div>
       {!here && <p className="text-amber-600">Steuert Port {auto.port} dieses Controllers.</p>}
-      <p>Status: {PHASE[st.phase] || '—'}</p>
-      {st.throttled && st.phase !== 'messung' && (
-        <p className="text-amber-600">Drosselung gesetzt (Messung pausiert): kein Takt-Eingriff, nur Schutz über den Lüfter.</p>
-      )}
-      <p>
-        Heißester Chip jetzt: <span className="font-semibold">{fmt(auto.now?.tmax, 0, ' °C')}</span>
-        {auto.now?.boards?.length > 1 ? ' (' + auto.now.boards.map((b) => (b == null ? '—' : b)).join(' / ') + ')' : ''}
-        {' '}· Regelwert (30 s): {fmt(st.t, 1, ' °C')} · Ziel 80–84 °C
-      </p>
-      <p>
-        Takt-Stufen (Mittel) laut Miner: {fmt(st.clock_now, 0, ' MHz')} · gesetzt:{' '}
-        {st.clock_set ? fmt(st.clock_set, 0, ' MHz') : '—'} · Standard: {fmt(st.stock_mhz, 0, ' MHz')}
-      </p>
-      <p>
-        Lüfter: gewählt Stufe {auto.level} · läuft auf Stufe {st.fan_read ?? '—'}
-        {st.phase === 'messung' && st.cal_fan ? ' · Messung: Stufe ' + st.cal_fan : ''}
-        {st.boost ? ' · Schutz +' + st.boost : ''}
-      </p>
+      <AutomationCards auto={auto} st={st} />
       <LearnedTable learned={auto.learned} mode={st.mode_key} level={auto.level} />
       {st.ac_error && <p className="text-amber-600">AC Infinity: {st.ac_error}</p>}
       {st.last_error && <p className="text-destructive">Fehler: {st.last_error}</p>}
