@@ -292,11 +292,6 @@ export default function ThrottleCard({ deviceId, throttle, ip }) {
         {state.calibration_active && !state.calibration_paused && (
           <p className="text-xs text-amber-600">Takt-Messung läuft – Drosseln ist gesperrt (Menü „Takt-Tabellen“).</p>
         )}
-        {state.calibration_paused && (
-          <p className="text-xs text-amber-600">
-            Takt-Messung pausiert – Drosseln ist möglich. Beim Fortsetzen wird die Drosselung aufgehoben.
-          </p>
-        )}
         {state.automation_active && !state.calibration_paused && (
           <p className="text-xs text-amber-600">Die Temperatur-Automatik steuert den Takt (Menü „Lüfter“).</p>
         )}
