@@ -18,7 +18,7 @@ import logging
 import math
 import os
 import statistics
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -39,6 +39,7 @@ MAX_STEP_MHZ = 30
 FLOOR_SHARE = 0.15
 TEMP_WINDOW_S = 60           # readings kept; the band uses the median of the last 30 s, protection the latest
 FAN_READ_S = 60
+FAN_CONFIRM_S = 10           # the controller reports a new level only after > 5 s: read back 10 s after a write
 FAN_WRITE_GAP_S = 20
 FAN_MIN, FAN_MAX = 1, 10
 LEARN_S = 600                # learned value: TMax 10 min quietly within 80-84 degC at one fan level and mode
@@ -304,8 +305,10 @@ def step(row, now, ac):
         target_fan = min(st['base'] + int(st.get('boost') or 0), FAN_MAX)
 
     # --- fan: write the target level (at most every FAN_WRITE_GAP_S) ---
+    # a different read level counts only if it was read at least FAN_CONFIRM_S after the last write
+    read_after_write = _age(st.get('fan_read_at'), now) <= _age(st.get('fan_set_at'), now) - FAN_CONFIRM_S
     differs = target_fan != st.get('fan_set') or (st.get('fan_read') is not None and st['fan_read'] != target_fan
-                                                   and _age(st.get('fan_set_at'), now) >= FAN_READ_S)
+                                                   and read_after_write)
     if differs and _age(st.get('fan_set_at'), now) >= FAN_WRITE_GAP_S:
         try:
             ac.set_fan_level(dev_id, fport, target_fan)
@@ -313,7 +316,8 @@ def step(row, now, ac):
                 _note(st, now, 'Lüfter Stufe %d gesetzt.' % target_fan)
             st['fan_set'] = target_fan
             st['fan_set_at'] = _iso(now)
-            st['fan_read_at'] = None                    # read back in the next round
+            # read back FAN_CONFIRM_S after the write (earlier the controller still reports the old level)
+            st['fan_read_at'] = _iso(now - timedelta(seconds=FAN_READ_S - FAN_CONFIRM_S))
         except ac.ACError as exc:
             st['ac_error'] = str(exc)
     return st

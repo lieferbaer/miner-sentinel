@@ -103,11 +103,16 @@ function AutomationCards({ auto, st }) {
   const boards = (auto.now?.boards || []).filter((b) => b != null)
   const others = boards.length > 1 ? [...boards].sort((a, b) => b - a).slice(1) : []
   const tempTone = tmax == null ? 'default' : tmax >= 88 ? 'danger' : tmax >= 85 ? 'warning' : 'default'
-  const running = st.fan_read
-  const chosen = st.phase === 'messung' && st.cal_fan ? st.cal_fan : auto.level
+  // the level MinerSentinel set last; the controller confirms it only after > 5 s (read back after 10 s)
+  const running = st.fan_set ?? st.fan_read
+  const confirmed = st.fan_read === st.fan_set ||
+    (st.fan_read_at && st.fan_set_at && Date.parse(st.fan_read_at) >= Date.parse(st.fan_set_at) + 10000)
+  const measuring = st.phase === 'messung'
   const fanSub = [
-    running === chosen && !st.boost ? '= gewählte Stufe' : 'gewählt Stufe ' + chosen,
-    st.boost ? 'Schutz +' + st.boost : null,
+    measuring ? 'Messung regelt · deine Stufe ' + auto.level + ' gilt danach'
+      : running === auto.level && !st.boost ? '= gewählte Stufe' : 'gewählt Stufe ' + auto.level,
+    st.boost && !measuring ? 'Schutz +' + st.boost : null,
+    confirmed ? null : 'Rückmeldung folgt',
   ].filter(Boolean).join(' · ')
   const phase = PHASE[st.phase] || { value: '—', sub: '' }
   const phaseSub = st.throttled && st.phase !== 'messung' ? 'Drosselung gesetzt: kein Takt-Eingriff' : phase.sub
@@ -377,6 +382,12 @@ function Controller({ dev, backups, automation, onReload }) {
           </div>
           {own.length === 0 && (
             <p className="text-xs text-muted-foreground">Erst eine Sicherung erstellen, dann sind die Buttons frei.</p>
+          )}
+          {autoHere && auto.state?.phase === 'messung' && (
+            <p className="text-xs text-amber-600">
+              Takt-Messung läuft: die Automatik regelt den Lüfter (jetzt Stufe {auto.state.fan_set ?? '—'}). Markiert
+              ist deine gewählte Stufe {auto.level}, sie gilt nach der Messung.
+            </p>
           )}
           {busy && busy !== 'backup' && busy !== 'restore' && (
             <p className="text-xs text-muted-foreground">Befehl gesendet, warte 5 s und lese die Stufe neu …</p>

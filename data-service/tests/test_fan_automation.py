@@ -210,3 +210,30 @@ def test_raising_uses_learned_clock_after_fan(miner):
     assert ac.writes == [5] and miner.sets == []               # fan at once
     st, now = run(st, miner, ac, fa.RAISE_DELAY_S + 10, level=5, start=now + timedelta(seconds=5))
     assert miner.sets == [300.0]                               # learned clock 60 s later
+
+
+def test_fan_read_back_after_10_s_no_double_write(miner):
+    class LaggingAC(FakeAC):
+        """The controller reports a new level only after > 5 s."""
+        def __init__(self, level):
+            super().__init__(level)
+            self.reported = level
+            self.changed = None
+
+        def set_fan_level(self, dev_id, port, level):
+            super().set_fan_level(dev_id, port, level)
+            self.changed = self.now
+
+        def speed_of(self, dev_id, port):
+            if self.changed is not None and (self.now - self.changed).total_seconds() > 5:
+                self.reported = self.level
+            return self.reported
+
+    ac = LaggingAC(level=3)
+    miner.tmax = 82.0
+    st, now = run({}, miner, ac, 30, level=3)
+    for i in range(30):                                       # level 5 chosen, 150 s of rounds
+        ac.now = now + timedelta(seconds=5 * i)
+        st = fa.step(row(st, level=5), ac.now, ac)
+    assert ac.writes == [5]                                   # no second write because of a stale read
+    assert st['fan_read'] == 5
