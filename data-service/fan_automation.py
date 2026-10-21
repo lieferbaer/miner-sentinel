@@ -46,6 +46,7 @@ FAN_CONFIRM_S = 10           # the controller reports a new level only after > 5
 FAN_WRITE_GAP_S = 20
 FAN_MIN, FAN_MAX = 1, 10
 LEARN_S = 600                # learned value: TMax 10 min quietly within 80-84 degC at one fan level and mode
+OVERRIDE_MHZ = 25            # reported clock this far above the set one: the firmware overrode it (drift is ~+11)
 PROTECT_CUT_GAP_S = 600      # a) the permanent cut of a protection at most every 10 min (a cut needs 3-7 min to act)
 CEILING_S = 4 * 3600         # b) a clock that needed protection is not reached again at this level for 4 h
 PROTECT_HOLD_S = 900         # after a protection (fan above the chosen level) the clock is not raised for 15 min
@@ -220,11 +221,11 @@ def step(row, now, ac):
     st['seen_at'] = _iso(now)
     rebooted = st.get('elapsed') is not None and m['elapsed'] is not None and m['elapsed'] < st['elapsed']
     if st.get('mode_key') not in (None, m['mode_key']) or rebooted:
-        if st.get('clock_set'):
-            _note(st, now, 'Neustart/Moduswechsel: Firmware-Takt, Regelung beginnt neu.')
+        _note(st, now, 'Neustart/Moduswechsel: Firmware-Takt – Ausgangspunkt der Stufe wird sofort gesetzt.')
         st['clock_set'] = None
         st['clock_own'] = False                     # firmware clocks now, not set by the automation
         st['changed_at'] = _iso(now)
+        st['exit_learned'] = True                   # 21.10.: after a reboot the A15 runs its full stock clocks
     st['mode_key'], st['elapsed'] = m['mode_key'], m['elapsed']
     st['clock_now'] = round(sum(m['points']) / len(m['points']), 1) if m['points'] else None   # for the page
 
@@ -358,9 +359,9 @@ def step(row, now, ac):
         st['phase'] = 'senken' if lowering else 'normal'
         # after a run / manual clock: straight to the learned clock of the chosen level (lower: at once,
         # higher: RAISE_DELAY_S after the fan); while lowering the fan this waits until the fan is down
-        if st.get('exit_learned') and not lowering:
-            st.pop('exit_learned', None)
-            target, why = _start_clock(learned, mode, chosen, cur) if can_clock else (None, None)
+        if st.get('exit_learned') and not lowering and can_clock:
+            st.pop('exit_learned', None)            # kept until the miner reports clocks again (e.g. after a boot)
+            target, why = _start_clock(learned, mode, chosen, cur)
             if target and target < cur - 0.5:
                 set_clock(target, why + ': Takt %.0f MHz.')
             elif target and target > cur + 0.5:
@@ -371,6 +372,10 @@ def step(row, now, ac):
         if not lowering:
             for key in ('lower_since', 'lower_learned'):
                 st.pop(key, None)
+        # the firmware overrode a set clock (e.g. its boot sequence applies the stock clocks): set it again
+        if (can_clock and st.get('clock_own') and st.get('clock_set') and cur > st['clock_set'] + OVERRIDE_MHZ
+                and _age(st.get('changed_at'), now) >= 60):
+            set_clock(st['clock_set'], 'Firmware hat den Takt überschrieben (%.0f MHz laut Miner) – erneut %%.0f MHz.' % cur)
         if t is not None:
             prev_boost = int(st.get('boost') or 0)
             st['boost'] = _boost(st, t_fast)

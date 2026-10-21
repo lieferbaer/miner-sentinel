@@ -461,3 +461,30 @@ def test_protection_cuts_not_too_fast():
     """21.10. 08:14-08:35: five permanent cuts within 21 min (204 -> 164 MHz)."""
     protections, cuts, worst, level = _power_model_run(204, 84.0)
     assert cuts <= 2 and level == 2
+
+
+def test_after_reboot_start_clock_at_once(miner):
+    """21.10.: after switching the A15 off and on it ran its full stock clocks at fan level 2 (simulated: 93 degC)."""
+    ac = FakeAC(level=2)
+    miner.tmax = 82.0
+    miner.points = [175, 175, 175]
+    learned = {'2/L4': {'2': {'mhz': 164.0, 'at': 'x', 'source': 'gesetzt'}}}
+    st, now = run({'learned': learned}, miner, ac, 30, level=2)
+    st['learned'] = learned
+    boot = {'fields': {'TMax': '-273'}, 'points': [], 'mode_key': '2/L4', 'status': 'Init', 'elapsed': 5}
+    calibration.read_miner = lambda ip, port, fresh=False: boot              # booting: no clocks yet
+    st = fa.step(row(st, level=2), now, ac)
+    assert st.get('exit_learned') and miner.sets == []                       # kept until clocks are reported
+    boot.update(points=[360, 360, 360], elapsed=40)                          # firmware stock clocks, TMax still -273
+    st = fa.step(row(st, level=2), now + timedelta(seconds=5), ac)
+    assert miner.sets == [164.0]                                             # start clock at once
+
+
+def test_firmware_override_set_again(miner):
+    ac = FakeAC(level=2)
+    miner.tmax = 82.0
+    st, now = run({}, miner, ac, 30, level=2)
+    st.update(clock_set=164.0, clock_own=True, changed_at=(now - timedelta(seconds=120)).isoformat())
+    miner.points = [360, 360, 360]                                           # firmware applied its stock clocks
+    st = fa.step(row(st, level=2), now, ac)
+    assert miner.sets[-1] == 164.0

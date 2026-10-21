@@ -285,7 +285,9 @@ hebt eine manuelle Drosselung auf). Der Data-Service ist der einzige, der dann L
 | Lauf pausiert | Normalbetrieb (ohne Drosselung). |
 | Lernwerte | Takt je **Modus + Lüfterstufe**, wenn TMax **10 min ruhig** bei 80–84 °C (kein Schutz, keine Drosselung, kein Wechsel); spätere ruhige Phasen überschreiben. Gespeichert wird der **von der Automatik gesetzte** Takt (`source: gesetzt`; die Firmware zieht den gemeldeten nach oben), nur wenn sie selbst nichts gesetzt hat der Wert laut Miner (`source: laut Miner`). Tabelle auf der Lüfter-Seite. Stand: **Power Mode 04, Stufe 3 → 231 MHz** (21.10. 00:54, noch laut Miner gespeichert). |
 | Lüfter-Rückmeldung | Lesen alle 60 s; nach einem Schreibbefehl erst **10 s später** zurücklesen (Controller meldet nach > 5 s); Abweichung erzwingt nur bei bestätigtem Wert ein erneutes Senden. |
-| Fehler | AC-Cloud weg → Lüfter bleibt, Takt regelt weiter. Neustart/Moduswechsel → Regelung beginnt neu. Ausschalten → Standardtakt wieder gesetzt. |
+| Fehler | AC-Cloud weg → Lüfter bleibt, Takt regelt weiter. A15 aus (Wartung) → keine Werte, Automatik regelt nicht, Lüfter bleibt auf seiner Stufe. Automatik ausschalten → Standardtakt wieder gesetzt. |
+| Neustart / Moduswechsel | **Sofort der Ausgangspunkt der gewählten Stufe**, sobald der Miner wieder Takte meldet (auch wenn `TMax` noch −273 ist). Vorher (21.10.) blieb der A15 nach dem Einschalten auf den vollen Standardtakten bei Lüfter Stufe 2 (Simulation: 93 °C, 5 min ≥ 88 °C; neu: max 85 °C). |
+| Firmware überschreibt | Meldet der Miner > 25 MHz mehr als gesetzt (normales Nachziehen ~+11), wird der gesetzte Takt erneut gesendet (frühestens 60 s nach der letzten Taktänderung), z. B. wenn die Firmware beim Hochfahren ihre Standardtakte nachträglich setzt. |
 | Anmeldung weg | Live wartet 5 min (Test-Umgebung aktiv), Takt regelt weiter. |
 
 Zustand in `fan_automation.state` (nur der Data-Service schreibt), Einstellungen (`enabled`, `ac_dev_id`, `ac_port`, `level`) schreibt das Backend.
