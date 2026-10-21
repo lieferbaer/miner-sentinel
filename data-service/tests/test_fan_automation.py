@@ -209,8 +209,19 @@ def test_learns_clock_after_10_quiet_minutes(miner):
     miner.tmax = 82.0
     miner.points = [234, 234, 234]
     st, _ = run({}, miner, ac, 11 * 60, level=3)
-    assert st['learned']['2/L4']['3']['mhz'] == 234.0
-    assert miner.sets == []
+    assert st['learned']['2/L4']['3'] == {'mhz': 234.0, 'at': st['learned']['2/L4']['3']['at'], 'source': 'laut Miner'}
+    assert miner.sets == []                           # not set by the automation: the miner's value
+
+
+def test_learns_the_set_clock_not_the_drifted_one(miner):
+    ac = FakeAC(level=3)
+    miner.tmax = 86.0
+    st, now = run({}, miner, ac, 20, level=3)
+    assert miner.sets == [340.0]                      # automation set 340 MHz
+    miner.points = [346, 346, 346]                    # the firmware drifts the clock up
+    miner.tmax = 82.0
+    st, _ = run(st, miner, ac, 11 * 60, level=3, start=now)
+    assert st['learned']['2/L4']['3']['mhz'] == 340.0 and st['learned']['2/L4']['3']['source'] == 'gesetzt'
 
 
 def test_lowering_uses_learned_clock(miner):
@@ -278,3 +289,24 @@ def test_calibration_fan_down_at_78_after_60_s(miner):
     miner.tmax = 80.0
     st, now = run(st, miner, ac, 300, cal=True, start=now)
     assert ac.writes == [4, 3]                                # 78-81 degC: no change
+
+
+def test_after_run_learned_clock_at_once(miner):
+    ac = FakeAC(level=3)
+    miner.tmax = 79.0
+    miner.points = [120, 120, 120]                            # run ended at a low clock
+    learned = {'2/L4': {'3': {'mhz': 231.0, 'at': 'x'}}}
+    st, now = run({}, miner, ac, 30, level=3, cal=True)
+    st['learned'] = learned
+    st, now = run(st, miner, ac, fa.RAISE_DELAY_S + 20, level=3, start=now)   # run over
+    assert miner.sets and miner.sets[0] == 231.0              # learned clock, not 10-MHz steps
+
+
+def test_calibration_protection_at_90_at_once(miner):
+    ac = FakeAC(level=1)
+    miner.tmax = 79.0
+    st, now = run({}, miner, ac, 30, cal=True)
+    miner.tmax = 95.0                                         # firmware stock clocks at a low fan level
+    st = fa.step(row(st, cal=True), now, ac)
+    st = fa.step(row(st, cal=True), now + timedelta(seconds=5), ac)
+    assert ac.writes and ac.writes[-1] >= 3                   # +2 at once, no 60 s wait

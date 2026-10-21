@@ -229,7 +229,7 @@ Start/Pause/Fortsetzen/Abbrechen **nur durch den Nutzer**.
 | **Messreihe endet ab dem 10. Punkt, sobald ein gespeicherter Punkt DH ≥ 10 % hat** (`DH_STOP_PCT`, `DH_STOP_FROM`); der Punkt wird noch gespeichert, dann normales Ende. | Nutzer 21.10.: tiefere Takte lohnen nicht. Lauf 7: Punkt 0 (Standardtakt) hatte 18,9 %, Punkt 22 (150 MHz) 10,4 %. |
 | **Start und Fortsetzen schalten die Temperatur-Automatik ein**; ohne eingerichteten Lüfter kein Start (409). | Lüfter hält im Lauf 80 °C. |
 | **Fortsetzen:** erst Drosselung aufheben (ohne Takt), dann letzten Punkt neu messen; **Max-Messung schaltet dabei kurz weg und zurück**. | In der Pause können Drosselung/Automatik Takte gesetzt haben. |
-| Abbrechen lässt den aktuellen Modus stehen (Messreihe: kurz weg/zurück für Firmware-Takte). Normales Ende: zurück zum Startmodus. | Nutzerentscheidung. |
+| Abbrechen lässt den aktuellen Modus stehen. Normales Ende: zurück zum Startmodus. Messreihe **ohne** Automatik: kurz weg/zurück für Firmware-Takte; **mit Automatik nicht** – Takt bleibt, die Automatik übernimmt sofort (Lernwert). | 21.10.: Weg/zurück holte bei Lüfter Stufe 1–2 die Firmware-Takte → 100 °C. |
 | Umschaltbefehl alle 20 s wiederholen bis Rückmeldung, Abbruch nach 300 s. | Fehler 2. |
 | Over Hot → automatische Pause. | – |
 | Anzeige: Modusname, zwei Countdowns (Modus/gesamt); Status kommt aus `/api/live/`, Tabellen laden bei Fortschritt bzw. jede Minute. | – |
@@ -268,10 +268,11 @@ hebt eine manuelle Drosselung auf). Der Data-Service ist der einzige, der dann L
 | Normal | Lüfter **fest auf der gewählten Stufe (nie darunter)**; Takt hält **TMax 80–84 °C** (Median 30 s): > 84 → −10 MHz je 1,5 °C (max. 30), < 80 → +10 MHz (max. Standardtakt); nach jedem Schritt **3 min warten**. |
 | Stufe senken | Mit Lernwert: Takt sofort auf den Lernwert, Lüfter nach 3 min. Ohne: Takt senken bis TMax ≤ 80, 3 min warten, dann Lüfter. |
 | Stufe erhöhen | Lüfter sofort; mit Lernwert Takt **60 s später** auf den Lernwert. |
-| Schutz | **≥ 88 °C** (aktueller Wert): −30 MHz (höchstens alle 60 s) und Lüfter **+1**; **≥ 90 °C**: Lüfter **+2**; zurück bei ≤ 84 °C. Max. Stufe 10. |
+| Schutz | **≥ 88 °C** (aktueller Wert): −30 MHz (höchstens alle 60 s) und Lüfter **+1**; **≥ 90 °C**: Lüfter **+2**; zurück bei ≤ 84 °C. Max. Stufe 10. Im Lüfter-Regelmodus (Messung/manueller Takt) wirkt eine höhere Schutzstufe **sofort**, bleibt es heiß, nach 60 s erneut. |
+| Nach Lauf / manuellem Takt | Sofort auf den **Lernwert** der gewählten Stufe (tiefer: Takt sofort; höher: Takt 60 s nach dem Lüfter); ohne Lernwert 10-MHz-Schritte. |
 | Takt-Tabellen-Lauf **oder manueller Takt (Drosselung)** | **Kein Takt-Eingriff**; Lüfter hält **~80 °C**: +1 bei **> 81 °C**, −1 bei **≤ 78 °C**, mindestens **60 s** zwischen zwei Änderungen, Stufen **1–10** (auch unter der gewählten), Schutz sofort. Danach zurück zur gewählten Stufe (höher: Senken-Regel, tiefer: sofort). Status „Takt-Messung“ bzw. „Manueller Takt“. |
 | Lauf pausiert | Normalbetrieb (ohne Drosselung). |
-| Lernwerte | Takt je **Modus + Lüfterstufe**, wenn TMax **10 min ruhig** bei 80–84 °C (kein Schutz, keine Drosselung, kein Wechsel); spätere ruhige Phasen überschreiben. Tabelle auf der Lüfter-Seite. Stand: **Power Mode 04, Stufe 3 → 231 MHz** (21.10. 00:54). |
+| Lernwerte | Takt je **Modus + Lüfterstufe**, wenn TMax **10 min ruhig** bei 80–84 °C (kein Schutz, keine Drosselung, kein Wechsel); spätere ruhige Phasen überschreiben. Gespeichert wird der **von der Automatik gesetzte** Takt (`source: gesetzt`; die Firmware zieht den gemeldeten nach oben), nur wenn sie selbst nichts gesetzt hat der Wert laut Miner (`source: laut Miner`). Tabelle auf der Lüfter-Seite. Stand: **Power Mode 04, Stufe 3 → 231 MHz** (21.10. 00:54, noch laut Miner gespeichert). |
 | Lüfter-Rückmeldung | Lesen alle 60 s; nach einem Schreibbefehl erst **10 s später** zurücklesen (Controller meldet nach > 5 s); Abweichung erzwingt nur bei bestätigtem Wert ein erneutes Senden. |
 | Fehler | AC-Cloud weg → Lüfter bleibt, Takt regelt weiter. Neustart/Moduswechsel → Regelung beginnt neu. Ausschalten → Standardtakt wieder gesetzt. |
 | Anmeldung weg | Live wartet 5 min (Test-Umgebung aktiv), Takt regelt weiter. |
@@ -321,6 +322,7 @@ Original + „Activity“ + „Takt-Tabellen“ + „Lüfter“; Dockerfiles/Com
 15. Automatik/Lüfter-Seite hinkten der Übersicht hinterher (60-s-Median, eigene Timer) → zentrale Abfrage + Live-API.
 16. **Frontend-Deploy hinterließ hängenden Web-Container** (virtfs) → Seite ~2 min 503. Nach jedem Deploy `podman ps` prüfen; Lösung Abschnitt 13.
 17. Lokale Entwicklungsserver wurden von der App beendet → bei „lokal nicht erreichbar“ neu starten (Abschnitt 14).
+18. **Abbruch der Messreihe holte Firmware-Takte bei Lüfter Stufe 1–2** (weg/zurück 04→03→04) → 3.355 W, TMax 100 °C. Mit Automatik kein Weg/zurück mehr, Lernwert sofort, Schutz im Regelmodus sofort.
 
 ---
 

@@ -458,7 +458,9 @@ def step_run(conn, run):
         # Abbrechen: the current mode stays as it is. Finished normally: back to the mode of the start.
         # Clocks set by MinerSentinel (Messreihe) go back to the firmware by switching briefly away and back.
         back = m['mode_key'] if run['status'] == 'cancelling' else (st.get('orig_mode') or m['mode_key'])
-        clocks_changed = run['kind'] == 'step' and st.get('set_points') is not None
+        # with the Temperatur-Automatik the clocks stay as they are and the automation takes over at once;
+        # switching away and back would apply the firmware's stock clocks at a low fan level (21.10.: 100 degC)
+        clocks_changed = run['kind'] == 'step' and st.get('set_points') is not None and not run.get('fan_auto')
         st['back_mode'] = back
         if back and m['mode_key'] != back:
             _send_mode(st, ip, m['conf'], back, now, m['elapsed'], 'restore_done')
@@ -500,7 +502,8 @@ def run_calibration(database_url):
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 "SELECT r.id, r.device_id, r.kind, r.status, r.pause_reason, r.modes, r.mode_index, r.step_index, "
-                "r.state, r.message, r.finished_at, d.ip_address, d.port, d.connection_config "
+                "r.state, r.message, r.finished_at, d.ip_address, d.port, d.connection_config, "
+                "EXISTS (SELECT 1 FROM fan_automation f WHERE f.device_id = d.id AND f.enabled) AS fan_auto "
                 "FROM calibration_runs r JOIN devices d ON d.id = r.device_id "
                 "WHERE r.status IN ('running', 'cancelling', 'finishing')")
             runs = cur.fetchall()

@@ -98,3 +98,20 @@ def test_high_errors_before_point_10_continue(monkeypatch):
 def test_low_errors_continue(monkeypatch):
     run, saved = _measure_round(monkeypatch, 15, 5.0)
     assert run['state']['phase'] == 'set_clock'
+
+
+def test_end_with_automation_no_switching(monkeypatch):
+    monkeypatch.setattr(calibration, 'read_miner', lambda ip, port, fresh=False: {
+        'points': [150, 150, 150], 'mode_key': '2/L4', 'status': 'Work: In Work', 'conf': {}, 'elapsed': 100})
+    sent = []
+    monkeypatch.setattr(calibration, 'a15_set_mode', lambda ip, conf, mode, level: sent.append((mode, level)))
+    base = {'id': 7, 'kind': 'step', 'modes': ['2/L4'], 'mode_index': 0, 'step_index': 20,
+            'ip_address': '10.0.0.15', 'port': 4028, 'message': '', 'pause_reason': '', 'finished_at': None}
+    run = dict(base, status='cancelling', fan_auto=True,
+               state={'orig_mode': '2/L4', 'phase': 'measure', 'applied': ['2/L4'], 'set_points': [150, 150, 150]})
+    run = calibration.step_run(_Conn(), run)
+    assert sent == [] and run['status'] == 'cancelled'        # clocks stay, the automation takes over
+    run = dict(base, status='cancelling', fan_auto=False,
+               state={'orig_mode': '2/L4', 'phase': 'measure', 'applied': ['2/L4'], 'set_points': [150, 150, 150]})
+    run = calibration.step_run(_Conn(), run)
+    assert sent == [(2, 3)]                                   # without automation: switch away and back as before

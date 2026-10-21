@@ -114,8 +114,11 @@ def _learned(learned, mode, level):
     return ((learned.get(mode) or {}).get(str(level)) or {}).get('mhz')
 
 
-def _learn(st, now, mode, t, cur, quiet):
-    """Remember the clock at which TMax stayed LEARN_S within T_LOW..T_HIGH at this fan level and mode."""
+def _learn(st, now, mode, t, cur, quiet, stock_avg=None):
+    """Remember the clock at which TMax stayed LEARN_S within T_LOW..T_HIGH at this fan level and mode.
+    Stored is the clock the automation SET (it is sent again when the value is used; the firmware drifts the
+    reported clock upwards). Only if the clocks were not set by the automation (e.g. right after a run):
+    the clock the miner reports."""
     key = [mode, st.get('base')]
     if not quiet or t is None or cur is None or not T_LOW <= t <= T_HIGH:
         st.pop('band_since', None)
@@ -125,14 +128,18 @@ def _learn(st, now, mode, t, cur, quiet):
         return
     if _age(st['band_since'], now) < LEARN_S:
         return
-    entry = {'mhz': round(cur, 1), 'at': _iso(now)}
+    if st.get('clock_own'):
+        mhz, source = (st.get('clock_set') or stock_avg or cur), 'gesetzt'
+    else:
+        mhz, source = cur, 'laut Miner'
+    entry = {'mhz': round(mhz, 1), 'at': _iso(now), 'source': source}
     learned = st.setdefault('learned', {}).setdefault(mode, {})
     prev = learned.get(str(st['base']))
     learned[str(st['base'])] = entry
     if st.get('band_noted') != st['band_since']:
         st['band_noted'] = st['band_since']
-        _note(st, now, 'Lernwert gespeichert: Stufe %s → %.0f MHz%s.' % (
-            st['base'], cur, '' if not prev else ' (vorher %.0f MHz)' % prev['mhz']))
+        _note(st, now, 'Lernwert gespeichert: Stufe %s → %.0f MHz (%s)%s.' % (
+            st['base'], mhz, source, '' if not prev else ', vorher %.0f MHz' % prev['mhz']))
 
 
 def _boost(st, t):
@@ -169,6 +176,7 @@ def step(row, now, ac):
         if st.get('clock_set'):
             _note(st, now, 'Neustart/Moduswechsel: Firmware-Takt, Regelung beginnt neu.')
         st['clock_set'] = None
+        st['clock_own'] = False                     # firmware clocks now, not set by the automation
         st['changed_at'] = _iso(now)
     st['mode_key'], st['elapsed'] = m['mode_key'], m['elapsed']
     st['clock_now'] = round(sum(m['points']) / len(m['points']), 1) if m['points'] else None   # for the page
@@ -221,10 +229,15 @@ def step(row, now, ac):
         since_fan = _age(st.get('cal_fan_at'), now)
         new = fan
         if t is not None:
-            if t_fast >= T_PROTECT2 and since_fan >= PROTECT_WAIT_S:
-                new = fan + 2
-            elif t_fast >= T_PROTECT1 and since_fan >= PROTECT_WAIT_S:
-                new = fan + 1
+            # protection: a higher protection level acts at once (88 degC: +1, 90 degC: +2), still hot
+            # after PROTECT_WAIT_S: again
+            prot = 2 if t_fast >= T_PROTECT2 else 1 if t_fast >= T_PROTECT1 else 0
+            last_prot = int(st.get('cal_protect') or 0)
+            st['cal_protect'] = prot
+            if prot > last_prot:
+                new = fan + prot - last_prot
+            elif prot and since_fan >= PROTECT_WAIT_S:
+                new = fan + prot
             elif t > T_CAL_UP and since_fan >= CAL_FAN_GAP_S:
                 new = fan + 1
             elif t <= T_CAL_DOWN and since_fan >= CAL_FAN_GAP_S:
@@ -239,6 +252,9 @@ def step(row, now, ac):
         if st.pop('cal_fan', None) is not None:
             st['base'] = max(int(st.get('fan_set') or st['base']), st['base'])
             st.pop('cal_fan_at', None)
+            st.pop('cal_protect', None)
+            st['exit_learned'] = True               # take the learned clock of the chosen level at once
+            st['clock_own'] = False                 # the clocks of the run / manual throttle are in effect
             _note(st, now, 'Lüfter-Regelung beendet: zurück zur gewählten Stufe %d.' % row['level'])
         chosen = int(row['level'])
         mode = m['mode_key']
@@ -251,6 +267,7 @@ def step(row, now, ac):
             new = min(max(new, stock_avg * FLOOR_SHARE), stock_avg)
             calibration.set_frequency(ip, port, _points_for(stock, new))
             st['clock_set'] = round(new, 1) if new < stock_avg - 0.5 else None
+            st['clock_own'] = True
             st['changed_at'] = _iso(now)
             _note(st, now, text % new)
 
@@ -271,6 +288,15 @@ def step(row, now, ac):
                 set_clock(target, 'Lernwert Stufe %d: Takt %%.0f MHz, Lüfter folgt nach 3 min.' % chosen)
                 st['lower_learned'] = True
         st['phase'] = 'senken' if lowering else 'normal'
+        # after a run / manual clock: straight to the learned clock of the chosen level (lower: at once,
+        # higher: RAISE_DELAY_S after the fan); while lowering the fan this waits until the fan is down
+        if st.get('exit_learned') and not lowering:
+            st.pop('exit_learned', None)
+            target = _learned(learned, mode, chosen)
+            if target and can_clock and target < cur - 0.5:
+                set_clock(target, 'Lernwert Stufe %d: Takt %%.0f MHz.' % chosen)
+            elif target and can_clock and target > cur + 0.5:
+                st['raise_to'], st['raise_from'] = target, _iso(now)
         if lowering and not stock and _age(st.get('lower_since'), now) >= WAIT_S:
             st['base'] = chosen                         # no clock step possible: the fan after WAIT_S
             lowering = False
@@ -304,7 +330,7 @@ def step(row, now, ac):
                         for key in ('lower_since', 'lower_learned'):
                             st.pop(key, None)
         quiet = not lowering and not st.get('raise_to') and not int(st.get('boost') or 0)
-        _learn(st, now, mode, t, cur, quiet)
+        _learn(st, now, mode, t, cur, quiet, stock_avg)
         target_fan = min(st['base'] + int(st.get('boost') or 0), FAN_MAX)
 
     # --- fan: write the target level (at most every FAN_WRITE_GAP_S) ---
