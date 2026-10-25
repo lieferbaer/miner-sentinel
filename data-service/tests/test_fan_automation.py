@@ -971,6 +971,7 @@ def test_start_hold_after_restart_until_79(miner):
     assert r.st['clock_set'] == 300                               # langsam warm: keine Takterhöhung
     r.go(5, temp=79)
     assert not r.st.get('start_hold')                             # 79 °C erreicht: Pause vorbei
+    assert r.events('startpause_ende')[-1]['trigger'] == 'Startpause beendet: 79 °C erreicht (nach 7 min)'
     r.go(40, temp=78)
     assert r.st['clock_set'] == 305                               # danach wie immer
 
@@ -984,6 +985,7 @@ def test_start_hold_ends_after_10_min_at_the_latest(miner):
     assert r.st['clock_set'] == 300
     r.go(10, temp=70)
     assert r.st['clock_set'] == 305 and not r.st.get('start_hold')
+    assert r.events('startpause_ende')[-1]['trigger'] == 'Startpause beendet: 10 min vorbei (Chiptemperatur 70 °C)'
 
 
 def test_start_hold_keeps_high_temperature_rules(miner):

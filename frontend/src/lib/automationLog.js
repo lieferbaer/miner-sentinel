@@ -27,6 +27,7 @@ export const KIND_LABEL = {
   taktsperre: 'Taktsperre (5 min)',
   taktsperre_ende: 'Taktsperre beendet',
   startpause: 'Startpause',
+  startpause_ende: 'Startpause beendet',
   neustart_offline: 'Neustart: nicht erreichbar',
   neustart_online: 'Neustart: wieder erreichbar',
   over_hot: 'Over Hot',

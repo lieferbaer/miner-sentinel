@@ -373,7 +373,7 @@ class Round:
             # die Chips waren aus (Neustart, Wartung, Over Hot – auch wenn in derselben Runde ein anderer Startgrund
             # dazukam): der erste Messwert ist kalt (25.10.: 26 °C → +40 MHz → 85 °C)
             until = self.now + timedelta(seconds=START_HOLD_S)
-            st['start_hold'] = {'until': _iso(until)}
+            st['start_hold'] = {'since': _iso(self.now), 'until': _iso(until)}
             text = 'Startpause: keine Takterhöhung bis 79 °C, spätestens %s' % until.astimezone(LOCAL_TZ).strftime('%H:%M')
             self.base_event(kind='startpause', trigger=text, details={'bis': _iso(until), 'grund': reason})
             self.note(text + '.')
@@ -920,6 +920,14 @@ class Round:
         hold = st.get('start_hold')
         if hold and (self.t >= CALM_LOW or _age(hold['until'], self.now) >= 0):
             st['start_hold'] = None                      # Startpause endet bei 79 °C, spätestens nach 10 min
+            since = hold.get('since') or _iso(datetime.fromisoformat(hold['until']) - timedelta(seconds=START_HOLD_S))
+            mins = int(_age(since, self.now) // 60)
+            if self.t >= CALM_LOW:
+                text = 'Startpause beendet: 79 °C erreicht (nach %d min)' % mins
+            else:
+                text = 'Startpause beendet: 10 min vorbei (Chiptemperatur %d °C)' % self.t
+            self.base_event(kind='startpause_ende', trigger=text, details={'seit': since})
+            self.note(text + '.')
         if st.get('test') and not st.get('cal'):
             self.test_rules()
             return
