@@ -13,6 +13,7 @@ Regelungslogik nach dem Plan vom 24.10.2026 (docs/claude/Regelungslogik-Luefter-
     (einmal je Änderung; endet über 84 °C).
   * Schritt 4 - Takt 100-440 MHz, Modus folgt dem Takt (Spielraum 10 MHz nach unten).
   * Schritt 5 - Ausnahme: Takt 440 und 3 min stabil unter 70 °C -> Lüfter -1 (stufenweise); Ende über 70 °C.
+  * Startpause: nach Neustart, Wartung oder Over Hot 3 min keine Takterhöhung (kalte Chips, Nutzer 25.10.).
   * Lernen: 15 min in 79-84 °C (Nutzer 25.10.) bei unverändertem Lüfter -> Lernwert der aktiven Stufe.
   * Jeder Zyklus und jede Entscheidung wird protokolliert (automation_journal.py).
 Takt-Messung (Takt-Tabellen): Taktregelung pausiert, der Lüfter reagiert nur nach Schritt 1/2.
@@ -51,6 +52,8 @@ WINDOW_S = 30                 # Beobachtungsfenster nach jeder Taktänderung
 TENDENCY_S = 30               # Tendenz: gegen den Wert von vor höchstens 30 s (bzw. bei der letzten Taktänderung)
 CALM_LOW = 79                 # 79-84 °C: keine Taktänderung (Nutzer 25.10.)
 CALM_AFTER_HOT_S = 5 * 60     # Taktsperre: letzte Taktänderung über 84 °C, dann unter 79 °C → 5 min keine Taktänderung
+START_HOLD_S = 3 * 60         # Startpause: nach einem Start mit kalten Chips 3 min keine Takterhöhung (Nutzer 25.10.)
+START_HOLD_REASONS = ('Neustart des Miners', 'nach Wartung', 'nach Over Hot')
 RETURN_STABLE_S = 60          # Rückkehr zur Basisstufe nach 1 min stabil in 80-84 °C
 FAN_DOWN_DELAY_S = 30         # niedrigere Korrekturstufe erst, wenn die Tabelle sie 30 s lang verlangt
 EXC_BELOW = 70                # Ausnahme: unter 70 °C ...
@@ -364,6 +367,13 @@ class Round:
                                  details={'quelle': source, 'starttakt': target, 'basisstufe': self.base})
         self.note('%s: Starttakt %d MHz (%s Stufe %d), Lüfter Stufe %d.' % (reason, target, source, self.base, self.base))
         self.decide('Start (%s): %d MHz' % (reason, target), log_id)
+        if reason in START_HOLD_REASONS:
+            # die Chips waren aus: der erste Messwert ist kalt (25.10.: 26 °C → +40 MHz → 85 °C)
+            until = self.now + timedelta(seconds=START_HOLD_S)
+            st['start_hold'] = {'until': _iso(until)}
+            text = 'Startpause: keine Takterhöhung bis %s' % until.astimezone(LOCAL_TZ).strftime('%H:%M')
+            self.base_event(kind='startpause', trigger='%s (%s)' % (text, reason), details={'bis': _iso(until)})
+            self.note(text + '.')
 
     # --- commands (Kapitel 8)
     def drop_pending(self, why):
@@ -797,11 +807,13 @@ class Round:
 
     def fine_tuning(self):
         """Schritt 3: 79-84 °C keine Taktänderung; darunter +5/+20/+40 MHz (nicht in der Korrekturphase, nicht bei
-        steigender Tendenz, nicht während der Taktsperre)."""
+        steigender Tendenz, nicht während der Taktsperre oder der Startpause)."""
         st, t, d = self.st, self.t, self.st['tendency']
         old = st.get('clock_set')
         if old is None or t >= CALM_LOW or st.get('corr') or st.get('calm') or d > 0:
             return
+        if st.get('start_hold') and _age(st['start_hold']['until'], self.now) < 0:
+            return                                       # Startpause nach einem Start mit kalten Chips
         old = int(round(old))
         if old < CLOCK_MAX:
             size = plus_size(t)

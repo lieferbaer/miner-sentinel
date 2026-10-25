@@ -71,6 +71,7 @@ const LOGIC_TEXT =
   'runter (Korrekturphase; bei 85–87 °C −10 MHz, wenn sie vorher unter 10 min in 79–84 °C lag, sonst −5 MHz); ' +
   'zurück zur Basisstufe nach 1 min in 80–84 °C oder sobald unter 80 °C. War die letzte ' +
   'Taktänderung über 84 °C und fällt die Temperatur unter 79 °C: 5 min keine Taktänderung (endet über 84 °C). ' +
+  'Nach Neustart, Wartung oder Over Hot 3 min keine Takterhöhung (Startpause). ' +
   'Bei 440 MHz und 3 min unter 70 °C Lüfter −1 (Ausnahme).'
 const START_TEXT =
   'Start (Stufenwahl, Einschalten, Neustart, nach Wartung oder Takt-Messung): Lernwert der Basisstufe, sonst ' +
@@ -181,6 +182,8 @@ function AutomationCards({ auto, st }) {
     pending,
     windowOpen ? 'Beobachtungsfenster bis ' + clockTime(st.window_until, true) : null,
     st.calm && Date.parse(st.calm.until) > Date.now() ? 'Taktsperre bis ' + clockTime(st.calm.until) : null,
+    st.start_hold && Date.parse(st.start_hold.until) > Date.now()
+      ? 'keine Takterhöhung bis ' + clockTime(st.start_hold.until) : null,
     st.learn_since ? 'lernt seit ' + clockTime(st.learn_since) : null,
   ].filter(Boolean).join(' · ') || phase.sub
   return (
@@ -215,7 +218,7 @@ const RECENT_KINDS = ['takt', 'modus', 'luefter', 'hohe_temperatur', 'rueckkehr'
   'start', 'neustart', 'over_hot', 'miner_offline', 'miner_online', 'firmware_takt', 'messung_start',
   'messung_ende', 'fehler', 'basisstufe', 'automatik_ein', 'automatik_aus', 'wartung_start', 'wartung_ende',
   'test_start', 'test_stufe', 'test_ziel', 'test_schritt', 'test_messung', 'test_ende', 'neustart_nutzer', 'taktsperre',
-  'taktsperre_ende']
+  'taktsperre_ende', 'startpause']
 const RECENT_COUNT = 20
 const RECENT_REFRESH_MS = 10000
 const RECENT_LABEL = { takt: 'Takt', modus: 'Modus', luefter: 'Lüfter', start: 'Start' }

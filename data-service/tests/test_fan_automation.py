@@ -946,3 +946,56 @@ def test_new_measurement_after_the_correction_phase(miner):
     r.go(5, temp=85)                                              # jetzt nur ~3 min in 79–84 °C → −10
     assert r.st['clock_set'] == 285
 
+
+
+# ---------------------------------------------------------------- Startpause (Nutzer 25.10.)
+
+def test_start_hold_after_restart_no_plus_for_3_min(miner):
+    """25.10. live: nach dem Neustart meldete der Miner 26 °C, die Regelung setzte +40 MHz → 85 °C."""
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, learned={'5': {'mhz': 300, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    r.go(30, temp=82)
+    miner.elapsed = 10                                            # Neustart
+    start = r.now
+    r.go(5, temp=26)
+    ev = r.events('startpause')
+    until = start + timedelta(minutes=3)
+    assert len(ev) == 1 and ev[0]['trigger'] == ('Startpause: keine Takterhöhung bis %s (Neustart des Miners)'
+                                                  % until.astimezone(fa.LOCAL_TZ).strftime('%H:%M'))
+    r.go(170, temp=26)
+    assert r.st['clock_set'] == 300                               # 3 min keine Takterhöhung, auch bei 26 °C
+    r.go(10, temp=26)
+    assert r.st['clock_set'] == 340                               # danach wie immer (+40 unter 60 °C)
+
+
+def test_start_hold_keeps_high_temperature_rules(miner):
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, learned={'5': {'mhz': 300, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    r.go(30, temp=82)
+    miner.elapsed = 10
+    r.go(30, temp=70)
+    r.go(5, temp=85)
+    assert r.st['clock_set'] == 290 and r.st['phase'] == 'korrektur'   # Absenkung ab 85 °C gilt weiter
+
+
+def test_start_hold_after_over_hot(miner):
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, learned={'5': {'mhz': 300, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    r.go(30, temp=82)
+    miner.status = 'Over Hot'
+    r.go(10, temp=82)
+    miner.status = 'Work: In Work'
+    r.go(5, temp=40)
+    assert r.events('startpause') and r.events('start')[-1]['trigger'] == 'nach Over Hot'
+    r.go(60, temp=40)
+    assert r.st['clock_set'] == 300
+
+
+def test_no_start_hold_when_base_level_is_chosen(miner):
+    """Chips warm: Basisstufe gewählt, Automatik ein, nach Takt-Messung – keine Startpause."""
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, learned={'5': {'mhz': 300, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    r.go(30, temp=82)
+    r.kw['level_at'] = 'neu'
+    r.go(60, temp=72)
+    assert not r.events('startpause') and r.st['clock_set'] > 300

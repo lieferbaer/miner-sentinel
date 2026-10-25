@@ -26,6 +26,7 @@ export const KIND_LABEL = {
   neustart_nutzer: 'Neustart (Nutzer)',
   taktsperre: 'Taktsperre (5 min)',
   taktsperre_ende: 'Taktsperre beendet',
+  startpause: 'Startpause (3 min)',
   over_hot: 'Over Hot',
   miner_offline: 'Miner antwortet nicht',
   miner_online: 'Miner antwortet wieder',
