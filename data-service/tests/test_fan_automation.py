@@ -374,6 +374,7 @@ def test_clock_step_restarts_learning_noted_in_the_step(miner):
 def test_firmware_clock_change_is_sent_again(miner):
     ac = FakeAC(level=5)
     r = started(miner, ac, level=5, learned={'5': {'mhz': 250, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    r.go(60, temp=82)
     miner.points = list(STOCK['2/L4'])                           # Miner fährt wieder seinen Standardtakt
     r.go(10, temp=82)
     assert miner.clock() == 250 and r.events('firmware_takt')
@@ -644,3 +645,26 @@ def test_fan_read_error_retried_only_after_60_s(miner):
     r = started(miner, ac, level=5)
     r.go(55, temp=82)
     assert len(calls) == 1
+
+
+def test_firmware_ramp_after_a_clock_change_is_no_override(miner, monkeypatch):
+    """25.10. live: 183 → 100 MHz, die Firmware meldet erst 152, dann 123 – das ist die Rampe, kein Überschreiben."""
+    ac = FakeAC(level=1)
+    ramp = []
+
+    def ramping(ip, port, points):
+        miner.clock_sets.append(sum(points) / len(points))
+        ramp.extend([[p + 52 for p in points], [p + 23 for p in points], list(points)])
+        return 'set OK'
+    monkeypatch.setattr(calibration, 'set_frequency', ramping)
+    orig = miner.read
+
+    def read(ip, port, fresh=False):
+        if ramp:
+            miner.points = ramp.pop(0)
+        return orig(ip, port, fresh)
+    monkeypatch.setattr(calibration, 'read_miner', read)
+    miner.points = fa.points_for(STOCK['2/L4'], 183)
+    r = started(miner, ac, level=1)
+    r.go(30, temp=70)
+    assert [round(x) for x in miner.clock_sets].count(100) == 1 and not r.events('firmware_takt')

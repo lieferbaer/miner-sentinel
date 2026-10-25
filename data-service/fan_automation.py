@@ -53,6 +53,7 @@ FAN_MIN, FAN_MAX = 1, 10
 # --- bestehende Technik (unverändert übernommen) ---
 RESEND_S = 20                 # Modus-/Taktbefehl ohne Übernahme: erneut senden (wie Takt-Tabellen)
 OVERRIDE_MHZ = 25             # Takt laut Miner so weit über dem gesetzten: Miner hat den Takt selbst geändert (v1.0.2)
+OVERRIDE_AFTER_S = 60         # ... frühestens so lange nach der letzten Taktänderung (Rampe der Firmware, v1.0.2)
 FAN_READ_S = 60
 FAN_CONFIRM_S = 10            # the controller reports a new level only after > 5 s: read back 10 s after a write
 FAN_WRITE_GAP_S = 20
@@ -952,9 +953,11 @@ class Round:
 
         if not cal and not over_hot:
             self.confirm_pending()
-            # Miner hat den Takt selbst geändert (Takt laut Miner > gesetzt + 25 MHz): gesetzten Takt erneut senden
+            # Miner hat den Takt selbst geändert (Takt laut Miner > gesetzt + 25 MHz, frühestens 60 s nach der letzten
+            # Taktänderung – vorher stellt die Firmware den neuen Takt noch schrittweise ein): erneut senden
             if (not self.busy() and st.get('clock_set') and st['clock_now']
-                    and st['clock_now'] > st['clock_set'] + OVERRIDE_MHZ):
+                    and st['clock_now'] > st['clock_set'] + OVERRIDE_MHZ
+                    and _age(st.get('clock_changed_at'), now) >= OVERRIDE_AFTER_S):
                 self.base_event(kind='firmware_takt', trigger='Takt laut Miner %.0f MHz, gesetzt %s MHz'
                                 % (st['clock_now'], st['clock_set']))
                 self.note('Miner hat den Takt selbst geändert (%.0f MHz laut Miner): %s MHz erneut.'
