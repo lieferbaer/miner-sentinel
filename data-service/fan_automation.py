@@ -724,23 +724,35 @@ class Round:
         hold = self.st.get('start_hold')
         return bool(self.st.get('restart_req') or (hold and _age(hold['until'], self.now) < 0))
 
-    def remember_net(self, log_id, kind, took=None):
-        """„Antwortet nicht/wieder“ merken, um sie bei einem später erkannten Neustart umzubenennen."""
+    def remember_net(self, log_id, kind, took=None, err='', partner=None):
+        """„Antwortet nicht/wieder“ merken, um sie bei einem später erkannten Neustart umzubenennen; ein „wieder“ merkt
+        sich sein „antwortet nicht“ (partner: [id, Meldung, Zeit]), damit das Paar gemeinsam umbenannt wird."""
         net = [x for x in self.st.get('net_log') or [] if _age(x[2], self.now) <= RESTART_RELABEL_S]
         if log_id:
-            net.append([log_id, kind, _iso(self.now), took])
+            net.append([log_id, kind, _iso(self.now), took, err, partner])
         self.st['net_log'] = net
 
-    def relabel_restart(self):
-        """Neustart erkannt: „Miner antwortet nicht/wieder“ der 3 min davor sind Teil des Neustarts."""
-        for log_id, kind, at, took in self.st.get('net_log') or []:
-            if _age(at, self.now) > RESTART_RELABEL_S:
+    def relabel_restart(self, since=None):
+        """Neustart erkannt: „Miner antwortet nicht/wieder“ der 3 min davor sind Teil des Neustarts – beim Neustart über
+        den Knopf nur die ab dem Klick (since). Die technische Meldung wandert in die Einzelheiten (nicht rot)."""
+        def after_click(at):
+            return not since or _age(at, self.now) <= _age(since, self.now)
+
+        def offline(log_id, err):
+            self.j.update(log_id, kind='neustart_offline', trigger='A15 startet neu – nicht erreichbar (erwartet)', ok=None,
+                          error='', details={'meldung': err or ''})
+
+        for log_id, kind, at, took, *rest in self.st.get('net_log') or []:
+            if _age(at, self.now) > RESTART_RELABEL_S or not after_click(at):
                 continue
             if kind == 'miner_offline':
-                self.j.update(log_id, kind='neustart_offline', trigger='A15 startet neu – nicht erreichbar (erwartet)', ok=None)
+                offline(log_id, rest[0] if rest else '')
             elif kind == 'miner_online':
                 self.j.update(log_id, kind='neustart_online', trigger='A15 nach Neustart wieder erreichbar'
                               + (' nach %d s' % took if took is not None else ''))
+                partner = rest[1] if len(rest) > 1 else None
+                if partner and after_click(partner[2]):
+                    offline(partner[0], partner[1])      # das Paar gemeinsam, auch wenn „antwortet nicht“ älter als 3 min ist
         self.st['net_log'] = []
 
     # --- the rules (Kapitel 5)
@@ -1041,7 +1053,7 @@ class Round:
         if st.pop('off', False) or st.get('v') != STATE_VERSION:
             # Automatik ein bzw. Umstellung auf die neue Regelung (startet ohne Lernwerte, Plan Kapitel 7)
             keep = ('log', 'stock', 'fan_set', 'fan_read', 'fan_read_at', 'fan_set_at', 'elapsed', 'mode_key',
-                    'maint', 'maint_ended_at', 'offline', 'over_hot', 'test')
+                    'maint', 'maint_ended_at', 'offline', 'over_hot', 'test', 'restart_req_seen')
             new = {k: st[k] for k in keep if k in st}
             new['learned'] = (st.get('learned') or {}) if st.get('v') == STATE_VERSION else {}
             if new.get('stock') is None:
@@ -1076,19 +1088,22 @@ class Round:
             try:
                 m = calibration.read_miner(row['ip_address'], row['port'])
             except (OSError, RuntimeError, ValueError) as exc:
-                if not st.get('offline'):
+                err = str(exc)[:500]
+                if not st.get('offline') and self.restart_expected():
                     st['offline_since'] = _iso(now)
-                    if self.restart_expected():
-                        st['offline'] = 'neustart'
-                        log_id = self.base_event(kind='neustart_offline', trigger='A15 startet neu – nicht erreichbar (erwartet)',
-                                                 ok=None, error=str(exc)[:500])
-                        self.note('A15 startet neu: nicht erreichbar (erwartet).')
-                    else:
-                        st['offline'] = True
-                        log_id = self.base_event(kind='miner_offline', trigger='Miner antwortet nicht', ok=False,
-                                                 error=str(exc)[:500])
-                        self.note('Miner antwortet nicht: Lüfter unverändert, warten.')
-                    self.remember_net(log_id, 'neustart_offline' if st['offline'] == 'neustart' else 'miner_offline')
+                    st['offline'] = 'neustart'
+                    log_id = self.base_event(kind='neustart_offline', trigger='A15 startet neu – nicht erreichbar (erwartet)',
+                                             ok=None, details={'meldung': err})
+                    self.note('A15 startet neu: nicht erreichbar (erwartet).')
+                    self.remember_net(log_id, 'neustart_offline')
+                elif not st.get('offline') or (st['offline'] == 'neustart' and not self.restart_expected()):
+                    # nicht erwartet – oder länger als erwartet (Knopf 5 min, Startpause vorbei): wie bisher ein Fehler
+                    st['offline_since'] = st.get('offline_since') or _iso(now)
+                    st['offline'] = True
+                    log_id = self.base_event(kind='miner_offline', trigger='Miner antwortet nicht', ok=False, error=err)
+                    self.note('Miner antwortet nicht: Lüfter unverändert, warten.')
+                    self.remember_net(log_id, 'miner_offline', err=err)
+                    st['offline_entry'] = [log_id, err, _iso(now)]
                 self.j.cycle(recorded_at=now, phase=st.get('phase') or '', base_level=self.base,
                              clock_set=st.get('clock_set'), fan_level=st.get('fan_set'), fan_read=st.get('fan_read'),
                              decision='A15 startet neu' if st['offline'] == 'neustart' else 'Miner antwortet nicht')
@@ -1102,8 +1117,10 @@ class Round:
                                          + (' nach %d s' % took if took is not None else ''), details={'nicht_erreichbar_s': took})
             else:
                 log_id = self.base_event(kind='miner_online', trigger='Miner antwortet wieder', details={'nicht_erreichbar_s': took})
-            self.remember_net(log_id, 'neustart_online' if off == 'neustart' else 'miner_online', took)
+            self.remember_net(log_id, 'neustart_online' if off == 'neustart' else 'miner_online', took,
+                              partner=st.get('offline_entry'))
         st.pop('offline_since', None)
+        st.pop('offline_entry', None)
         st['seen_at'] = _iso(now)
         st['ac_error'] = None
 
@@ -1115,8 +1132,9 @@ class Round:
             st['start_reason'] = 'Neustart des Miners'
             st['start_cold'] = True
             self.restarted = True
+            since = st.get('restart_req')                 # Knopf: nur Einträge ab dem Klick
             st['restart_req'] = None
-            self.relabel_restart()
+            self.relabel_restart(since)
         st['elapsed'] = m['elapsed']
         level_at = row.get('level_at')
         if level_at is not None and str(level_at) != st.get('level_seen'):
@@ -1133,6 +1151,7 @@ class Round:
         if not cal and st.get('cal'):
             self.base_event(kind='messung_ende', trigger='Takt-Messung beendet')
             st['start_reason'] = 'nach Takt-Messung'
+            st.pop('start_cold', None)                   # Moduswechsel der Messung setzen die Laufzeit zurück: Chips warm
         st['cal'] = cal
 
         # readings for the page and the protocol

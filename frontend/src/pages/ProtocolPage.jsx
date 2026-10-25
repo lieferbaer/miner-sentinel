@@ -394,6 +394,8 @@ const DETAILS = {
   punkte: ['Punkte', listText],
   schritt: ['Schritt', (v) => signed(v, 0, ' MHz')],
   testschritt: ['Testschritt'],
+  meldung: ['Meldung'],
+  nicht_erreichbar_s: ['nicht erreichbar', (v) => fmt(v, 0, ' s')],
   von: ['von', when],
   bis: ['bis', when],
   lernperiode_neu_gestartet: ['Lernperiode neu gestartet'],

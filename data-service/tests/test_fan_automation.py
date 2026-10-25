@@ -1106,3 +1106,96 @@ def test_firmware_resend_waits_60_s_while_the_firmware_ramps(miner, monkeypatch)
     r.go(15, temp=82)
     assert len(r.events('firmware_takt')) == 2
 
+
+def test_restart_entries_carry_no_red_error_text(miner):
+    """Review 26.10.: die Protokoll-Seite zeigt error immer rot – bei Neustart-Einträgen steht die Meldung in details."""
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, learned={'5': {'mhz': 300, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    r.go(30, temp=82)
+    miner.offline = True
+    r.go(30)
+    miner.offline, miner.elapsed = False, 10
+    r.go(5, temp=26)
+    off = r.events('neustart_offline')[0]
+    assert not off.get('error') and off['details']['meldung'] == 'timed out'
+    miner.offline = True                                          # während der Startpause
+    r.go(20)
+    off = r.events('neustart_offline')[-1]
+    assert not off.get('error') and off['details']['meldung'] == 'timed out'
+
+
+def test_expected_offline_becomes_an_error_after_5_min(miner):
+    """Review 26.10.: Knopf-Neustart, die A15 kommt nicht zurück – nach 5 min wie bisher „Miner antwortet nicht“."""
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, learned={'5': {'mhz': 300, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    r.go(30, temp=82)
+    r.kw['restart_req_at'] = r.now.isoformat()
+    r.go(5, temp=82)
+    miner.offline = True
+    r.go(4 * 60)
+    assert r.st['offline'] == 'neustart' and not r.events('miner_offline')
+    r.go(60)
+    assert r.st['offline'] is True and r.events('miner_offline')[0]['ok'] is False
+
+
+def test_button_restart_does_not_relabel_entries_before_the_click(miner):
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, learned={'5': {'mhz': 300, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    r.go(30, temp=82)
+    miner.offline = True                                          # Zeitüberschreitung ohne Neustart
+    r.go(10)
+    miner.offline = False
+    r.go(60, temp=82)
+    r.kw['restart_req_at'] = r.now.isoformat()                    # dann der Knopf
+    r.go(5, temp=82)
+    miner.offline = True
+    r.go(30)
+    miner.offline, miner.elapsed = False, 10
+    r.go(5, temp=26)
+    assert len(r.events('miner_offline')) == 1 and r.events('miner_offline')[0]['ok'] is False
+    assert len(r.events('neustart_offline')) == 1
+
+
+def test_no_start_hold_after_takt_messung_with_mode_switch_restart(miner):
+    """Review 26.10.: Moduswechsel der Takt-Messung setzen die Laufzeit zurück – danach keine Startpause (Chips warm)."""
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, learned={'5': {'mhz': 300, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    r.go(30, temp=82)
+    r.kw['cal'] = True
+    r.go(10, temp=83)
+    miner.elapsed = 10
+    r.go(60, temp=83)
+    r.kw['cal'] = False
+    r.go(5, temp=75)
+    assert r.events('start')[-1]['trigger'] == 'nach Takt-Messung' and not r.events('startpause')
+
+
+def test_automatik_off_on_does_not_revive_an_old_button_restart(miner):
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, learned={'5': {'mhz': 300, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    r.go(30, temp=82)
+    r.kw['restart_req_at'] = r.now.isoformat()
+    r.go(5, temp=82)
+    miner.elapsed = 10
+    r.go(5, temp=26)
+    assert not r.st.get('restart_req')
+    r.kw['enabled'] = False
+    r.go(10)
+    r.kw['enabled'] = True
+    r.go(10, temp=40)
+    assert not r.st.get('restart_req')
+
+
+def test_long_outage_pair_is_relabeled_together(miner):
+    """Nutzer 26.10.: Strom 6 min aus – „antwortet nicht“ (älter als 3 min) und „wieder“ gemeinsam umbenennen."""
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, learned={'5': {'mhz': 300, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    r.go(30, temp=82)
+    miner.offline = True
+    r.go(6 * 60)
+    miner.offline, miner.elapsed = False, 10
+    r.go(5, temp=26)
+    assert not r.events('miner_offline') and not r.events('miner_online')
+    assert r.events('neustart_offline')[0]['details']['meldung'] == 'timed out'
+    assert r.events('neustart_online')[0]['trigger'] == 'A15 nach Neustart wieder erreichbar nach 360 s'
+
