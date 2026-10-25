@@ -13,6 +13,9 @@ import { Select, SelectOption } from '@/components/ui/select'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import api from '@/lib/api'
+import {
+  ERROR_KINDS, KIND_LABEL, change, clockChange, fanChange, fmt, has, isError, levelText, modeText, signed, tempText,
+} from '@/lib/automationLog'
 import { cn } from '@/lib/utils'
 import { ChevronLeft, ChevronRight, Download, Loader2 } from 'lucide-react'
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -32,40 +35,6 @@ const EVENTS_REFRESH_MS = 10000
 const CYCLES_REFRESH_MS = 30000
 const HOUR_MS = 3600 * 1000
 const HISTORY_MAX_DAYS = 7    // Verlauf „frei“: longer ranges would load and draw far too many points
-
-// every kind of automation_log in plain German (fixed list of the contract)
-const KIND_LABEL = {
-  basisstufe: 'Basisstufe gewählt',
-  automatik_ein: 'Automatik ein',
-  automatik_aus: 'Automatik aus',
-  wartung_start: 'Wartung gestartet',
-  wartung_ende: 'Wartung beendet',
-  start: 'Start (Starttakt)',
-  takt: 'Taktbefehl',
-  modus: 'Modusbefehl',
-  luefter: 'Lüfterbefehl',
-  hohe_temperatur: 'Hohe Chiptemperatur',
-  rueckkehr: 'Rückkehr zur Basisstufe',
-  ausnahme: 'Ausnahme: Lüfter −1',
-  ausnahme_ende: 'Ausnahme beendet',
-  stabilitaet_start: 'Stabilitätsprüfung beginnt',
-  stabilitaet_ende: 'Stabilitätsprüfung endet',
-  lernen_start: 'Lernperiode beginnt',
-  lernen_ende: 'Lernperiode endet',
-  lernwert: 'Lernwert gespeichert',
-  neustart: 'Neustart des Miners',
-  over_hot: 'Over Hot',
-  miner_offline: 'Miner antwortet nicht',
-  miner_online: 'Miner antwortet wieder',
-  luefter_fehler: 'Lüftersteuerung: Fehler',
-  firmware_takt: 'Miner hat den Takt geändert',
-  messung_start: 'Takt-Messung beginnt',
-  messung_ende: 'Takt-Messung endet',
-  fehler: 'Fehler',
-}
-// shown in red in both tabs; the list also marks failed commands (ok=false), the Verlauf cannot (its events
-// carry no result)
-const ERROR_KINDS = new Set(['fehler', 'over_hot', 'miner_offline', 'luefter_fehler'])
 
 const PHASE_LABEL = {
   normal: 'Normalbetrieb',
@@ -89,21 +58,8 @@ const PHASE_FILL_OTHER = '#a3a3a3'
 const SOURCE_LABEL = { regelung: 'Regelung', nutzer: 'Nutzer' }
 const TARGET_LABEL = { 'miner-takt': 'Miner (Takt)', 'miner-modus': 'Miner (Modus)', lueftersteuerung: 'Lüftersteuerung' }
 const RESULT_TEXT = { erfuellt: 'erfüllt', abgebrochen: 'abgebrochen', gespeichert: 'gespeichert' }
-const MODE_LABEL = { '2/L4': 'mode 04', '2/L3': 'mode 03', '2/L2': 'mode 02', '2/L1': 'mode 01', '2/L0': 'mode 00',
-  '1/-': 'High Performance' }
-
 const RANGES = { '2h': '2 h', heute: 'heute', '24h': '24 h', '7d': '7 Tage', frei: 'frei' }
 const RANGE_HOURS = { '2h': 2, '24h': 24, '7d': 168 }
-
-function fmt(value, digits = 1, unit = '') {
-  if (value === null || value === undefined || value === '' || Number.isNaN(Number(value))) return '—'
-  return Number(value).toLocaleString('de-DE', { minimumFractionDigits: digits, maximumFractionDigits: digits }) + unit
-}
-
-function signed(value, digits = 0, unit = '') {
-  if (value === null || value === undefined || Number.isNaN(Number(value))) return '—'
-  return (value > 0 ? '+' : value < 0 ? '−' : '±') + fmt(Math.abs(value), digits, unit)
-}
 
 function when(iso) {
   if (!iso) return '—'
@@ -112,37 +68,6 @@ function when(iso) {
 
 function errText(err, fallback) {
   return err?.response?.data?.error || err?.response?.data?.detail || fallback
-}
-
-function has(value) {
-  return value !== null && value !== undefined && value !== ''
-}
-
-/** "alt → neu"; one value if unchanged, '—' without values. */
-function change(a, b, f = String) {
-  if (!has(a) && !has(b)) return '—'
-  if (!has(b)) return f(a)
-  if (!has(a) || a === b) return f(b)
-  return f(a) + ' → ' + f(b)
-}
-
-const levelText = (v) => (Number(v) === 0 ? 'aus' : String(v))
-const modeText = (key) => MODE_LABEL[key] || key
-
-function clockChange(e) {
-  const text = change(e.clock_old, e.clock_new, (v) => fmt(v, 0))
-  return text === '—' ? text : text + ' MHz'
-}
-
-function fanChange(e) {
-  const fan = change(e.fan_old, e.fan_new, levelText)
-  const base = has(e.base_new) && e.base_old !== e.base_new ? 'Basis ' + change(e.base_old, e.base_new) : null
-  return [fan !== '—' ? 'Stufe ' + fan : null, base].filter(Boolean).join(' · ') || '—'
-}
-
-function tempText(e) {
-  if (!has(e.chip_temp)) return '—'
-  return fmt(e.chip_temp, 0, ' °C') + (e.tendency ? ' (' + signed(e.tendency) + ')' : '')
 }
 
 function apiText(e) {
@@ -163,11 +88,6 @@ function resultOf(e) {
   if (d.kein_befehl) return { text: 'kein Befehl nötig', again: '', tone: 'muted' }
   if (d.ergebnis) return { text: RESULT_TEXT[d.ergebnis] || d.ergebnis, again: '', tone: 'muted' }
   return { text: '—', again: '', tone: 'muted' }
-}
-
-/** Shown in red: failed commands and the error kinds (same kinds as in the Verlauf). */
-function isError(e) {
-  return e.ok === false || ERROR_KINDS.has(e.kind)
 }
 
 function Result({ entry }) {

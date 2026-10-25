@@ -7,9 +7,11 @@ import MetricCard from '@/components/metrics/MetricCard'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import api from '@/lib/api'
+import { KIND_LABEL, clockChange, fanChange, has, isError, modeText, tempText } from '@/lib/automationLog'
 import { useLive } from '@/lib/LiveContext'
 import { Activity, Fan, Gauge, Hash, Loader2, RefreshCw, Thermometer } from 'lucide-react'
 import { useCallback, useEffect, useState } from 'react'
+import { Link } from 'react-router-dom'
 
 const ACTIONS = {
   set: 'Stufe',
@@ -203,6 +205,125 @@ function AutomationCards({ auto, st }) {
   )
 }
 
+// what the automation and the user did (protocol); the noisy kinds (learning period, stability check) only on the
+// Protokoll page
+const RECENT_KINDS = ['takt', 'modus', 'luefter', 'hohe_temperatur', 'rueckkehr', 'ausnahme', 'ausnahme_ende', 'lernwert',
+  'start', 'neustart', 'over_hot', 'miner_offline', 'miner_online', 'firmware_takt', 'messung_start',
+  'messung_ende', 'fehler', 'basisstufe', 'automatik_ein', 'automatik_aus', 'wartung_start', 'wartung_ende']
+const RECENT_COUNT = 20
+const RECENT_REFRESH_MS = 10000
+const RECENT_LABEL = { takt: 'Takt', modus: 'Modus', luefter: 'Lüfter', start: 'Start' }
+const FAN_KINDS = new Set(['luefter', 'hohe_temperatur', 'rueckkehr', 'ausnahme', 'ausnahme_ende'])
+const USER_KINDS = new Set(['basisstufe', 'automatik_ein', 'automatik_aus', 'wartung_start', 'wartung_ende'])
+
+function recentTone(e) {
+  if (isError(e)) return 'text-destructive'
+  if (FAN_KINDS.has(e.kind)) return 'text-amber-600'
+  if (e.kind === 'lernwert') return 'text-emerald-600'
+  if (USER_KINDS.has(e.kind)) return 'text-muted-foreground'
+  return 'text-sky-600'
+}
+
+/** The change of one entry in a few words (clock, mode, fan level or the learned value). */
+function recentChange(e) {
+  const d = e.details || {}
+  if (e.kind === 'lernwert') return 'Stufe ' + d.luefterstufe + ': ' + fmt(d.takt, 1, ' MHz')
+  if (e.kind === 'takt' || e.kind === 'start' || e.kind === 'firmware_takt') {
+    const mode = has(e.mode_new) && e.mode_old !== e.mode_new && e.kind !== 'takt' ? ' · ' + modeText(e.mode_new) : ''
+    return clockChange(e) + mode
+  }
+  if (e.kind === 'modus') return (has(e.mode_old) ? modeText(e.mode_old) + ' → ' : '') + modeText(e.mode_new)
+  if (FAN_KINDS.has(e.kind) || USER_KINDS.has(e.kind)) return fanChange(e)
+  return '—'
+}
+
+function recentTime(iso) {
+  const d = new Date(iso)
+  const time = d.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+  return d.toDateString() === new Date().toDateString() ? time
+    : d.toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit' }) + ' ' + time
+}
+
+/** The last 20 entries of the protocol: table on larger screens, two-line rows on the phone. */
+function RecentEvents() {
+  const [rows, setRows] = useState(null)
+  const [error, setError] = useState(null)
+  useEffect(() => {
+    let alive = true
+    const load = () => api.get('/api/automation/log/', { params: { kind: RECENT_KINDS.join(','), page: 1 } })
+      .then(({ data }) => {
+        if (!alive) return
+        setRows((data.results || []).slice(0, RECENT_COUNT))
+        setError(null)
+      })
+      .catch(() => alive && setError('Protokoll nicht geladen.'))
+    load()
+    const timer = setInterval(load, RECENT_REFRESH_MS)
+    return () => {
+      alive = false
+      clearInterval(timer)
+    }
+  }, [])
+  return (
+    <div className="space-y-1.5 pt-2">
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <p className="text-sm font-medium">Letzte {RECENT_COUNT} Einträge</p>
+        <Link to="/protokoll" className="text-xs text-primary underline-offset-2 hover:underline">
+          Alle Einträge im Protokoll
+        </Link>
+      </div>
+      {error && <p className="text-destructive">{error}</p>}
+      {rows && rows.length === 0 && <p className="text-muted-foreground">Noch keine Einträge.</p>}
+      {rows && rows.length > 0 && (
+        <>
+          <table className="hidden w-full text-xs sm:table">
+            <thead>
+              <tr className="border-b border-border/60 text-left text-muted-foreground">
+                <th className="py-1 pr-3 font-medium">Zeit</th>
+                <th className="py-1 pr-3 font-medium">Ereignis</th>
+                <th className="py-1 pr-3 font-medium">Chip</th>
+                <th className="py-1 pr-3 font-medium">Änderung</th>
+                <th className="py-1 font-medium">Grund</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((e) => (
+                <tr key={e.id} className="border-b border-border/30 align-top last:border-0">
+                  <td className="whitespace-nowrap py-1 pr-3 tabular-nums text-muted-foreground">{recentTime(e.recorded_at)}</td>
+                  <td className={'whitespace-nowrap py-1 pr-3 font-medium ' + recentTone(e)}>
+                    {RECENT_LABEL[e.kind] || KIND_LABEL[e.kind] || e.kind}
+                  </td>
+                  <td className="whitespace-nowrap py-1 pr-3 tabular-nums">{tempText(e)}</td>
+                  <td className="whitespace-nowrap py-1 pr-3 tabular-nums">{recentChange(e)}</td>
+                  <td className="py-1 text-muted-foreground">
+                    {e.trigger || '—'}
+                    {e.ok === false && e.error && <span className="block text-destructive">{e.error}</span>}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <ul className="divide-y divide-border/40 sm:hidden">
+            {rows.map((e) => (
+              <li key={e.id} className="py-1.5">
+                <div className="flex items-baseline justify-between gap-2">
+                  <span className={'font-medium ' + recentTone(e)}>{RECENT_LABEL[e.kind] || KIND_LABEL[e.kind] || e.kind}</span>
+                  <span className="tabular-nums text-muted-foreground">{recentTime(e.recorded_at)}</span>
+                </div>
+                <div className="tabular-nums">
+                  {recentChange(e)}{has(e.chip_temp) ? ' · ' + tempText(e) : ''}
+                </div>
+                <div className="text-muted-foreground">{e.trigger || '—'}</div>
+                {e.ok === false && e.error && <div className="text-destructive">{e.error}</div>}
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+    </div>
+  )
+}
+
 function AutomationPanel({ auto, here, port, level, locked, onCommand, busy }) {
   const [confirmOff, setConfirmOff] = useState(false)
   if (!auto) return null
@@ -270,15 +391,7 @@ function AutomationPanel({ auto, here, port, level, locked, onCommand, busy }) {
       <LearnedTable learned={auto.learned} level={auto.level} />
       {st.ac_error && <p className="text-amber-600">AC Infinity: {st.ac_error}</p>}
       {st.last_error && <p className="text-destructive">Fehler: {st.last_error}</p>}
-      {auto.log?.length > 0 && (
-        <ul className="space-y-0.5 pt-1 text-muted-foreground">
-          {auto.log.slice(0, 8).map(([at, text], i) => (
-            <li key={i}>
-              {when(at)} · {text}
-            </li>
-          ))}
-        </ul>
-      )}
+      <RecentEvents />
     </div>
   )
 }
