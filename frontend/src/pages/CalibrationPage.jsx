@@ -426,7 +426,7 @@ export default function CalibrationPage() {
           <CardDescription className="text-xs">
             Max-Messung: jede Messung frühestens 5 Minuten nach dem Moduswechsel bzw. der vorherigen Messung. Messreihe:
             frühestens 145 s nach einer Taktänderung. Während einer
-            Messung ist Drosseln gesperrt; eine laufende Drosselung wird beim Start aufgehoben.
+            Messung pausiert die Taktregelung der Temperatur-Automatik; der Lüfter reagiert nur ab 85 °C.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3 pt-0">
@@ -557,21 +557,24 @@ export default function CalibrationPage() {
         </CardContent>
       </Card>
 
-      <Card>
-        <CardHeader className="pb-2">
-          <CardTitle className="text-base font-semibold">Manuell</CardTitle>
-          <CardDescription className="text-xs">
-            Messpunkte der Drosselung: gespeichert nach 15 Minuten mit unverändertem Takt (neueste zuerst).
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="pt-0">
-          <PointTable
-            points={data.manual || []}
-            columns={cols.columns}
-            lead={{ label: 'Zeit · Modus', get: (p) => when(p.recorded_at) + ' · ' + p.mode_label }}
-          />
-        </CardContent>
-      </Card>
+      {data.manual?.length > 0 && (
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-base font-semibold">Manuell (alt)</CardTitle>
+            <CardDescription className="text-xs">
+              Alte Messpunkte der früheren Drosselung (bis 24.10.2026): gespeichert nach 15 Minuten mit unverändertem
+              Takt (neueste zuerst). Neue kommen nicht mehr hinzu.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="pt-0">
+            <PointTable
+              points={data.manual}
+              columns={cols.columns}
+              lead={{ label: 'Zeit · Modus', get: (p) => when(p.recorded_at) + ' · ' + p.mode_label }}
+            />
+          </CardContent>
+        </Card>
+      )}
     </div>
   )
 }

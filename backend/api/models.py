@@ -762,3 +762,89 @@ class FanAutomation(models.Model):
 
     class Meta:
         db_table = 'fan_automation'
+
+
+class AutomationCycle(models.Model):
+    """Protokoll der Temperatur-Automatik: one row per regulation round (every 5 s), written by the
+    data-service (automation_journal.py), kept 360 days."""
+    # no single index on device: the index (device, -recorded_at) covers it
+    device = models.ForeignKey(Device, on_delete=models.CASCADE, related_name='automation_cycles', db_index=False)
+    recorded_at = models.DateTimeField(default=timezone.now)
+    phase = models.CharField(max_length=16)       # normal|korrektur|ausnahme|messung|wartung|aus|start|warten
+    chip_temp = models.FloatField(blank=True, null=True)       # hottest chip (TMax), null if not valid
+    boards = models.JSONField(default=list, blank=True)        # MTmax per board
+    tendency = models.IntegerField(blank=True, null=True)      # chip temperature now - reference (degC)
+    clock_set = models.FloatField(blank=True, null=True)       # clock set by the automation (MHz)
+    clock_reported = models.FloatField(blank=True, null=True)  # clock reported by the miner (mean of SF0)
+    points = models.JSONField(default=list, blank=True)        # SF0 reported by the miner
+    mode_key = models.CharField(max_length=16, blank=True, default='')
+    base_level = models.IntegerField(blank=True, null=True)
+    fan_level = models.IntegerField(blank=True, null=True)     # active fan level (set)
+    fan_read = models.IntegerField(blank=True, null=True)      # fan level reported by the controller
+    power_w = models.FloatField(blank=True, null=True)
+    ghsspd_ths = models.FloatField(blank=True, null=True)
+    dh_pct = models.FloatField(blank=True, null=True)
+    status = models.CharField(max_length=40, blank=True, default='')   # SYSTEMSTATU
+    window_active = models.BooleanField(default=False)
+    learn_since = models.DateTimeField(blank=True, null=True)
+    pending = models.CharField(max_length=40, blank=True, default='')  # running command, e.g. 'takt 300'
+    decision = models.CharField(max_length=200, blank=True, default='')
+    log = models.BigIntegerField(blank=True, null=True)        # id of the automation_log entry (no FK)
+
+    class Meta:
+        db_table = 'automation_cycle'
+        ordering = ['-recorded_at']
+        indexes = [
+            models.Index(fields=['device', '-recorded_at'], name='automation_cycle_dev_rec_idx'),
+            models.Index(fields=['recorded_at'], name='automation_cycle_rec_idx'),
+        ]
+
+
+class AutomationLog(models.Model):
+    """Protokoll der Temperatur-Automatik: one row per event, command and attempt. source 'regelung' is
+    written by the data-service (automation_journal.py), 'nutzer' by the backend (fan_views.py).
+    request/response never contain credentials. Kept 360 days."""
+    device = models.ForeignKey(Device, on_delete=models.CASCADE, null=True, blank=True,
+                               related_name='automation_logs', db_index=False)   # covered by (device, -recorded_at)
+    recorded_at = models.DateTimeField(default=timezone.now)
+    kind = models.CharField(max_length=32)
+    source = models.CharField(max_length=16, default='regelung')     # regelung|nutzer
+    trigger = models.TextField(blank=True, default='')
+    phase = models.CharField(max_length=16, blank=True, default='')  # state before the decision
+    chip_temp = models.FloatField(blank=True, null=True)
+    tendency = models.IntegerField(blank=True, null=True)
+    base_old = models.IntegerField(blank=True, null=True)
+    base_new = models.IntegerField(blank=True, null=True)
+    fan_old = models.IntegerField(blank=True, null=True)
+    fan_new = models.IntegerField(blank=True, null=True)
+    clock_old = models.FloatField(blank=True, null=True)
+    clock_new = models.FloatField(blank=True, null=True)
+    clock_reported = models.FloatField(blank=True, null=True)
+    mode_old = models.CharField(max_length=16, blank=True, default='')
+    mode_new = models.CharField(max_length=16, blank=True, default='')
+    target = models.CharField(max_length=24, blank=True, default='')     # miner-takt|miner-modus|lueftersteuerung
+    endpoint = models.CharField(max_length=200, blank=True, default='')
+    request = models.TextField(blank=True, default='')
+    response = models.TextField(blank=True, default='')
+    status = models.CharField(max_length=40, blank=True, default='')
+    ok = models.BooleanField(blank=True, null=True)                       # null: no command (event only)
+    error = models.TextField(blank=True, default='')
+    attempt = models.IntegerField(default=1)
+    api_sent_at = models.DateTimeField(blank=True, null=True)
+    api_reply_at = models.DateTimeField(blank=True, null=True)
+    api_ms = models.IntegerField(blank=True, null=True)
+    takeover_at = models.DateTimeField(blank=True, null=True)
+    takeover_s = models.FloatField(blank=True, null=True)
+    takeover_state = models.CharField(max_length=16, blank=True, default='')   # offen|gemessen|nicht gemessen
+    temp_before = models.FloatField(blank=True, null=True)
+    thermal = models.JSONField(default=list, blank=True)    # chip temperature every 30 s after the command (10)
+    details = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        db_table = 'automation_log'
+        ordering = ['-recorded_at']
+        indexes = [
+            models.Index(fields=['device', '-recorded_at'], name='automation_log_dev_rec_idx'),
+            models.Index(fields=['kind', '-recorded_at'], name='automation_log_kind_rec_idx'),
+            models.Index(fields=['recorded_at'], name='automation_log_rec_idx'),
+        ]

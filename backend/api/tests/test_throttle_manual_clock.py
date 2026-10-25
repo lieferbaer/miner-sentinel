@@ -1,4 +1,4 @@
-"""Drosselung A15: manual clock (MHz) instead of a target hashrate; Nano/Q unchanged."""
+"""Drosselung: abolished for the A15 (24.10.: the Temperatur-Automatik sets its clock); Nano/Q unchanged."""
 from unittest.mock import patch
 
 import pytest
@@ -37,24 +37,23 @@ def miner():
         yield cmd
 
 
-def test_a15_sets_manual_clock(client, miner):
+@pytest.mark.parametrize('body', [{'clock_mhz': 300}, {'reset': True}, {'target_ths': 100}])
+def test_a15_throttle_abolished(client, miner, body):
     dev = _device('A15', 'Avalon A15')
-    res = client.post('/api/devices/%d/throttle/' % dev.id, {'clock_mhz': 300}, format='json')
-    assert res.status_code == 200, res.data
-    sent = miner.call_args[0][2]
-    assert '0,frequency,300:302:298-0-0' in sent
-    active = Device.objects.get(pk=dev.pk).connection_config['throttle']['active']
-    assert active['clock_mhz'] == 300.0 and active['status'] == 'manual'
-    assert res.data['min_mhz'] == 54 and res.data['max_mhz'] == 360
-    assert res.data['active']['clock_mhz'] == 300.0
-
-
-@pytest.mark.parametrize('clock', [40, 361, 'abc'])
-def test_a15_clock_out_of_range(client, miner, clock):
-    dev = _device('A15', 'Avalon A15')
-    res = client.post('/api/devices/%d/throttle/' % dev.id, {'clock_mhz': clock}, format='json')
+    res = client.post('/api/devices/%d/throttle/' % dev.id, body, format='json')
     assert res.status_code == 400
+    assert res.data['error'] == 'Die Drosselung des A15 ist abgeschafft; den Takt regelt die Temperatur-Automatik.'
     assert not miner.called
+    assert 'active' not in Device.objects.get(pk=dev.pk).connection_config['throttle']
+
+
+def test_a15_throttle_still_shown(client):
+    dev = _device('A15', 'Avalon A15')
+    dev.connection_config['throttle']['last_seen'] = {'points': STOCK, 'mode_key': '2/L4',
+                                                      'mode_label': 'Power Mode 04', 'ghsspd_ths': 150.0}
+    dev.save()
+    res = client.get('/api/devices/%d/throttle/' % dev.id)
+    assert res.status_code == 200 and res.data['family'] == 'a15' and res.data['max_mhz'] == 360
 
 
 def test_nano_still_needs_target_hashrate(client, miner):
@@ -62,6 +61,33 @@ def test_nano_still_needs_target_hashrate(client, miner):
     res = client.post('/api/devices/%d/throttle/' % dev.id, {'clock_mhz': 300}, format='json')
     assert res.status_code == 409          # mode not measured yet: TH/s path unchanged
     assert not miner.called
+
+
+def test_nano_reset_sends_stock_clock(client, miner):
+    dev = _device('nano3s-1', 'Avalon Nano 3S')
+    dev.connection_config['throttle']['active'] = {'target_ths': 3.0, 'profile': '2/L4',
+                                                   'applied_points': [300, 300, 300]}
+    dev.save()
+    res = client.post('/api/devices/%d/throttle/' % dev.id, {'reset': True}, format='json')
+    assert res.status_code == 200, res.data
+    assert '0,frequency,360:362:358-0-0' in miner.call_args[0][2]
+    assert Device.objects.get(pk=dev.pk).connection_config['throttle']['active'] is None
+
+
+def test_migration_drops_old_a15_throttle(db):
+    import importlib
+    from django.apps import apps
+    a15, nano = _device('A15', 'Avalon A15'), _device('nano3s-1', 'Avalon Nano 3S')
+    a15.connection_config['throttle'].update(rev=3, active={'clock_mhz': 164.0, 'profile': '2/L4', 'status': 'manual',
+                                                            'applied_points': [164, 165, 163]})
+    a15.save()
+    nano.connection_config['throttle']['active'] = {'target_ths': 3.0, 'profile': '2/L4', 'applied_points': [300]}
+    nano.save()
+    importlib.import_module('api.migrations.0024_automation_logging').drop_a15_throttle(apps, None)
+    st = Device.objects.get(pk=a15.pk).connection_config['throttle']
+    assert st['active'] is None and st['rev'] == 4 and st['last_event']['clock_mhz'] == 164.0
+    assert st['profiles']['2/L4']['points'] == STOCK                       # nothing else changed
+    assert Device.objects.get(pk=nano.pk).connection_config['throttle']['active']['target_ths'] == 3.0
 
 
 def test_manual_points_listed_in_calibration(client):

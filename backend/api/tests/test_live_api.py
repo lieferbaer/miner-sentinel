@@ -1,7 +1,7 @@
 """/api/live/: one payload with everything the web UI shows live (database only)."""
 import pytest
 from django.utils import timezone
-from api.models import CalibrationRun, Device, DeviceHardwareStats, DeviceMiningStats
+from api.models import CalibrationRun, Device, DeviceHardwareStats, DeviceMiningStats, FanAutomation
 from django.contrib.auth.models import User
 from rest_framework.test import APIClient
 
@@ -39,6 +39,16 @@ def test_live_payload(client, a15):
     assert data['automation']['device']['id'] == a15.id
     assert data['calibration']['run']['status'] == 'paused'
     assert data['server_now']
+
+
+def test_live_automation_clock(client, a15):
+    FanAutomation.objects.create(device=a15, ac_dev_id='dev1', ac_port=1, level=3, enabled=True, state={
+        'v': 2, 'phase': 'normal', 't': 82, 'clock_set': 240, 'clock_changed_at': timezone.now().isoformat(),
+        'window_active': False})
+    data = client.get('/api/live/').data
+    assert data['automation']['state']['phase'] == 'normal' and data['automation']['state']['clock_set'] == 240
+    throttle = data['throttle'][a15.id]
+    assert (throttle['set_mhz'], throttle['set_by'], throttle['automation_active']) == (240, 'Automatik', True)
 
 
 def test_live_needs_login(db):

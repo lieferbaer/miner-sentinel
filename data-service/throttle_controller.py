@@ -46,7 +46,6 @@ MEASURE_OUTLIER = 0.10            # a single measurement >10 % off only counts o
 CAL_KEEP = 12                     # measured (clock, TH/s) points kept per mode
 CAL_SPACING = 0.02                # one point per ~2 % of clock; a newer one replaces an older one
 CACHE_MAX_AGE = 15                # s: readings of the central reader (every 5 s; this runs right after it)
-MANUAL_MEASURE_S = 15 * 60        # A15 manual clock: a measured point is stored after 15 min unchanged
 
 A15_LEVEL_LABELS = {4: 'Power Mode 04', 3: 'Power Mode 03', 2: 'Power Mode 02', 1: 'Power Mode 01', 0: 'Power Mode 00'}
 A15_MODES = {1: 'High Performance'}   # WORKMODE 2 = Power Mode with levels 00-04
@@ -251,23 +250,6 @@ def next_clock(points, target, x_now):
     return x1 + (target - y1) * (x2 - x1) / (y2 - y1)
 
 
-def _manual_point(conn, dev, active, m, mkey, now):
-    speed = m['ghsspd_ths']
-    fresh = speed is not None and active.get('last_speed') is not None and abs(speed - active['last_speed']) > 1e-6
-    active['last_speed'] = speed
-    if active.get('manual_measured_at') or active.get('pending_until') or not fresh:
-        return
-    since = (now - (_parse(active.get('last_change_at')) or now)).total_seconds()
-    if since < MANUAL_MEASURE_S:
-        return
-    full = calibration.read_miner(dev['ip_address'], dev['port'])
-    if not full['ghsspd'] or 'Over Hot' in full['status'] or full['mode_key'] != mkey:
-        return
-    calibration.save_manual_point(conn, dev['id'], full, mkey, active['applied_points'])
-    active['manual_measured_at'] = _iso(now)
-    logger.info('Throttle device %s: manual clock %.1f MHz measured', dev['id'], active['clock_mhz'])
-
-
 def control_device(conn, dev):
     cfg = dev['connection_config'] or {}
     st = json.loads(json.dumps(cfg.get('throttle') or {}))
@@ -299,11 +281,9 @@ def control_device(conn, dev):
                 and m['elapsed'] < last['elapsed'])
     mode_changed = last.get('mode_key') not in (None, mkey)
     observe = bool(dev.get('calibrating'))   # Takt-Messung / Temperatur-Automatik: nur lesen, nichts regeln
-    # a manual clock (A15) may be set while a run is paused: it is watched and measured even then
-    manual = bool(active) and active.get('clock_mhz') is not None
 
-    # 1) was an active throttle lifted on the miner?
-    if active and (not observe or manual):
+    # 1) was an active throttle lifted on the miner? (Nano 3S / Avalon Q; the A15 has no throttle since 24.10.)
+    if active and not observe:
         applied = active['applied_points']
         pending_until = _parse(active.get('pending_until'))
         pending = pending_until is not None and now < pending_until
@@ -327,13 +307,16 @@ def control_device(conn, dev):
             logger.info('Throttle on device %s lifted: %s', dev['id'], event[1])
 
     # 2) unthrottled: the clocks the miner runs are the stock clocks of this mode; measure full power
-    if observe and not (active and active.get('clock_mhz') is not None):
+    if observe:
         st['profile'] = mkey
     elif not active:
         prof = profiles.setdefault(mkey, {'mode_key': mkey})
         prof['mode_label'] = label
         steady = last.get('points') == points and not mode_changed and not rebooted
-        if steady:
+        # A15: the stock clocks of a mode never change; once known they are kept, and none are learned after the
+        # Temperatur-Automatik set clocks (it leaves its clock when switched off, that is not the stock clock)
+        a15_keep = family == 'a15' and (prof.get('points') or dev.get('auto_clock_set') is not None)
+        if steady and not a15_keep:
             prof['points'] = points
             prof['avg_mhz'] = round(avg(points), 1)
         st['profile'] = mkey
@@ -348,10 +331,6 @@ def control_device(conn, dev):
             if value:
                 _record_measurement(prof, value, watts, now)
 
-    # 3a) A15 manual clock: nothing is regulated; after MANUAL_MEASURE_S unchanged the next fresh
-    #     GHSspd is stored as a measured point (Takt-Tabellen, kind 'manual'), once per setting
-    elif active.get('clock_mhz') is not None:
-        _manual_point(conn, dev, active, m, mkey, now)
 
     # 3) active: proportional regulation on the miner's own measured speed (GHSspd).
     #    GHSspd refreshes about every 130 s and averages that period, so only a refresh seen at
@@ -431,7 +410,9 @@ def run_throttle_controller(database_url):
                         ", (EXISTS (SELECT 1 FROM "
                         "calibration_runs r WHERE r.device_id = devices.id AND r.status IN "
                         "('running', 'paused', 'cancelling', 'finishing')) OR EXISTS (SELECT 1 FROM "
-                        "fan_automation f WHERE f.device_id = devices.id AND f.enabled)) AS calibrating "
+                        "fan_automation f WHERE f.device_id = devices.id AND f.enabled)) AS calibrating, "
+                        "(SELECT f.state->>'clock_set' FROM fan_automation f WHERE f.device_id = devices.id) "
+                        "AS auto_clock_set "
                         "FROM devices WHERE is_active AND protocol = 'cgminer_tcp'")
             devices = cur.fetchall()
         for dev in devices:

@@ -123,11 +123,13 @@ def a15_set_mode(ip, conf, mode, level):
 
 
 def set_frequency(ip, port, points):
+    """Send the four clock points; returns the miner's reply (the protocol stores it)."""
     with miner_cache.command(ip):
         reply = _cmd(ip, port, json.dumps({'command': 'ascset',
                                            'parameter': '0,frequency,%s-0-0' % ':'.join(str(p) for p in points)}))
     if 'set OK' not in reply:
         raise RuntimeError('miner rejected frequency: ' + reply[:200])
+    return reply[:500]
 
 
 def mode_key(mode, level):
@@ -233,11 +235,6 @@ def _save_point(conn, run, m, kind, key, seq, set_points, spread=None):
              round(avg(m['points']), 1) if m['points'] else None, json.dumps(m['points'] or []),
              round(speed, 3), m['power'], round(m['power'] / speed, 2) if m['power'] and speed else None,
              m['dh'], m['tmax'], json.dumps(data), _now()))
-
-
-def save_manual_point(conn, device_id, m, key, set_points):
-    """Measured point of a manual clock (Drosselung A15), shown in the Takt-Tabellen; no commit."""
-    _save_point(conn, {'id': None, 'device_id': device_id}, m, 'manual', key, 0, set_points)
 
 
 def _power_stable(st, power, now):

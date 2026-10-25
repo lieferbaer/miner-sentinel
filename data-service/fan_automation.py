@@ -1,57 +1,65 @@
 """Temperatur-Automatik (A15 + AC Infinity fan), right after every central reading (live_reader.py, 5 s).
 
-Normal operation: the fan runs at the level chosen on the "Lüfter" page (never below it); the A15 clock
-keeps the hottest chip (TMax, median of the last 60 s) between T_LOW and T_HIGH:
-  above T_HIGH: clock down 10 MHz per 1.5 degC (max 30 MHz), then wait WAIT_S,
-  below T_LOW : clock up 10 MHz (at most to the stock clock of the mode), then wait WAIT_S.
-A lower fan level is applied only after the clock brought TMax to T_LOW and WAIT_S passed; a higher one
-at once. Protection: TMax > T_HIGH -> fan +1 level, >= T_PROTECT1 -> fan +2 and clock -30 MHz, >= T_PROTECT2 ->
-fan +3, back to the chosen level at TMax <= T_LOW.
-During a Takt-Tabellen run and while a manual clock (Drosselung) is set no clock is set by the automation;
-the fan holds TMax around 80 degC (levels 1-10): +1 level above T_CAL_UP, -1 level at T_CAL_DOWN or below,
-at least CAL_FAN_GAP_S between two changes. Afterwards back to the chosen level (lower: clock first).
-
+Regelungslogik nach dem Plan vom 24.10.2026 (docs/claude/Regelungslogik-Luefter-Takt.drawio):
+  * Der Nutzer wählt die Lüfterstufe = Basisstufe. Die Automatik regelt den Takt, damit die Chiptemperatur
+    (heißester Chip, TMax) bei 80-84 °C liegt.
+  * Start (Basisstufe gewählt, Automatik ein, Neustart des Miners, nach Wartung, nach Takt-Messung, nach Over Hot):
+    Starttakt = Lernwert der Basisstufe, sonst Initialwert (Stufe 1 = 100 ... Stufe 10 = 190 MHz).
+  * Schritt 1 - hohe Chiptemperatur (ab 85 °C): Lüfter = Basisstufe + 1/+2 (Korrekturphase), Takt -10 ... -100 MHz.
+  * Schritt 2 - Korrekturphase: keine Plus-Schritte; zurück zur Basisstufe nach 1 min stabil in 80-84 °C oder unter 80 °C.
+  * Schritt 3 - Feintuning: 80-84 mit Tendenz nach oben -1/-2; 70-79 +1/+2/+5; 60-69 +20; unter 60 +40.
+  * Schritt 4 - Takt 100-440 MHz, Modus folgt dem Takt (Spielraum 10 MHz nach unten).
+  * Schritt 5 - Ausnahme: Takt 440 und 3 min stabil unter 70 °C -> Lüfter -1 (stufenweise); Ende über 70 °C.
+  * Lernen: 15 min in 80-84 °C bei unverändertem Takt und Lüfter -> Lernwert der aktiven Stufe.
+  * Jeder Zyklus und jede Entscheidung wird protokolliert (automation_journal.py).
+Takt-Messung (Takt-Tabellen): Taktregelung pausiert, der Lüfter reagiert nur nach Schritt 1/2.
 Live only (MINERSENTINEL_ENV != Test). The AC Infinity client is the backend's (backend/api/acinfinity.py,
 mounted read-only), so both use the same stored session. The data-service writes only fan_automation.state.
 """
 import importlib.util
 import json
 import logging
-import math
 import os
-import statistics
+import time
 from datetime import datetime, timedelta, timezone
 
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
+import automation_journal
 import calibration
 import miner_cache
 
 logger = logging.getLogger(__name__)
 
-RUN_S = 5                    # one round per central reading (every 5 s; user decision 21.10.)
-T_LOW, T_HIGH = 80.0, 84.0
-T_PROTECT1, T_PROTECT2 = 88.0, 90.0
-T_CAL_UP, T_CAL_DOWN = 81.0, 78.0   # Takt-Messung: fan +1 above 81 degC, -1 at <= 78 degC (user decision 21.10.)
-CAL_FAN_GAP_S = 60           # ... at least 60 s between two fan changes (~half of the effect is visible after 60-90 s)
-WAIT_S = 180                 # measured: ~85 % of a temperature change after 3 min
-PROTECT_WAIT_S = 60
-STEP_MHZ = 10
-C_PER_STEP = 1.5             # measured (run 7, 320 -> 280 MHz): ~1.5 degC per 10 MHz
-MAX_STEP_MHZ = 30
-FLOOR_SHARE = 0.15
-TEMP_WINDOW_S = 60           # readings kept; the band uses the median of the last 30 s, protection the latest
-FAN_READ_S = 60
-FAN_CONFIRM_S = 10           # the controller reports a new level only after > 5 s: read back 10 s after a write
-FAN_WRITE_GAP_S = 20
+STATE_VERSION = 2
+RUN_S = 5                     # one round per central reading
+# --- Vorgaben des Nutzers (Plan) ---
+T_LOW, T_HIGH = 80, 84        # Zieltemperatur
+T_HOT = 85                    # ab hier Tabelle „Hohe Chiptemperaturen“
+HIGH_TABLE = [(94, 2, 100), (92, 2, 80), (90, 2, 50), (88, 2, 30), (86, 1, 20), (85, 1, 10)]   # (ab °C, Lüfter +, Takt −)
+START_CLOCK = {1: 100, 2: 110, 3: 120, 4: 130, 5: 140, 6: 150, 7: 160, 8: 170, 9: 180, 10: 190}
+CLOCK_MIN, CLOCK_MAX = 100, 440
+MODE_TOP = {4: 360, 3: 380, 2: 400, 1: 420, 0: 440}   # oberer Takt je Modus (mode 04 ... mode 00)
+MODE_DOWN_MARGIN = 10         # Spielraum nach unten: Wechsel in den tieferen Modus erst 10 MHz unter dessen Obergrenze
+WINDOW_S = 30                 # Beobachtungsfenster nach jeder Taktänderung
+TENDENCY_S = 30               # Tendenz: gegen den Wert von vor höchstens 30 s (bzw. bei der letzten Taktänderung)
+RETURN_STABLE_S = 60          # Rückkehr zur Basisstufe nach 1 min stabil in 80-84 °C
+FAN_DOWN_DELAY_S = 30         # niedrigere Korrekturstufe erst, wenn die Tabelle sie 30 s lang verlangt
+EXC_BELOW = 70                # Ausnahme: unter 70 °C ...
+EXC_STABLE_S = 180            # ... 3 min stabil (Nutzer 24.10.: 3 min für die Ausnahme)
+LEARN_S = 15 * 60             # Lernperiode
 FAN_MIN, FAN_MAX = 1, 10
-LEARN_S = 600                # learned value: TMax 10 min quietly within 80-84 degC at one fan level and mode
-OVERRIDE_MHZ = 25            # reported clock this far above the set one: the firmware overrode it (drift is ~+11)
-PROTECT_CUT_GAP_S = 600      # a) the permanent cut of a protection at most every 10 min (a cut needs 3-7 min to act)
-CEILING_S = 4 * 3600         # b) a clock that needed protection is not reached again at this level for 4 h
-PROTECT_HOLD_S = 900         # after a protection (fan above the chosen level) the clock is not raised for 15 min
-RAISE_DELAY_S = 60           # higher fan level: the learned clock follows 60 s after the fan
+# --- bestehende Technik (unverändert übernommen) ---
+RESEND_S = 20                 # Modus-/Taktbefehl ohne Übernahme: erneut senden (wie Takt-Tabellen)
+OVERRIDE_MHZ = 25             # Takt laut Miner so weit über dem gesetzten: Miner hat den Takt selbst geändert (v1.0.2)
+FAN_READ_S = 60
+FAN_CONFIRM_S = 10            # the controller reports a new level only after > 5 s: read back 10 s after a write
+FAN_WRITE_GAP_S = 20
+TEMP_KEEP_S = 60
+OWN_SWITCH_S = 120            # so lange nach einem eigenen Modusbefehl gilt ein Neustart als Folge davon
+STOCK_PLAUSIBLE_MHZ = 15      # gemerkter Standardtakt nur, wenn er nahe am Standardtakt des Modus (Tabelle) liegt
+THERMAL_EVERY_S, THERMAL_N = 30, 10   # thermischer Verlauf je Befehl: alle 30 s, 10 Werte
 LOG_KEEP = 40
 
 _ac = []
@@ -90,123 +98,71 @@ def _note(st, now, text):
     logger.info('Temperatur-Automatik: %s', text)
 
 
-def _stock(row, mode_key):
-    prof = ((((row['connection_config'] or {}).get('throttle') or {}).get('profiles') or {}).get(mode_key) or {})
-    return prof.get('points')
+# ---------------------------------------------------------------- Modus und Takt
+
+def level_of(mode_key):
+    """'2/L3' -> 3 (mode 03); other work modes (High Performance) -> None."""
+    return int(mode_key[3:]) if mode_key and mode_key.startswith('2/L') else None
 
 
-def _points_for(stock, mhz):
+def table_level(mhz):
+    """Modus nach der Tabelle, ohne Spielraum (Start)."""
+    for level in (4, 3, 2, 1):
+        if mhz <= MODE_TOP[level]:
+            return level
+    return 0
+
+
+def required_level(mhz, current):
+    """Modus für einen Takt: aufwärts ab Obergrenze + 1, abwärts erst 10 MHz unter der Obergrenze des tieferen Modus."""
+    if current is None:
+        return table_level(mhz)
+    level = current
+    while level > 0 and mhz >= MODE_TOP[level] + 1:
+        level -= 1
+    while level < 4 and mhz <= MODE_TOP[level + 1] - MODE_DOWN_MARGIN:
+        level += 1
+    return level
+
+
+def points_for(stock, mhz):
+    """The four clock points for an average clock, scaled from the stock points of the mode."""
     factor = mhz / (sum(stock) / len(stock))
-    return [min(max(int(round(p * factor)), int(p * FLOOR_SHARE)), p) for p in stock]
+    return [min(max(int(round(p * factor)), int(p * 0.15)), p) for p in stock]
 
 
-def _raise_step(t):
-    """c) fine from below: +2 MHz just under 80 degC, +5 from 75, +10 further down (21.10.: +10 MHz at a low clock
-    added ~220 W and 6 degC because the firmware's power changes in jumps there)."""
-    return 2 if t >= 78 else 5 if t >= 75 else STEP_MHZ
+def high_rule(t):
+    for limit, fan_plus, minus in HIGH_TABLE:
+        if t >= limit:
+            return limit, fan_plus, minus
+    return None
 
 
-def _ceiling(st, mode, level, now):
-    """b) clock that needed protection at this fan level within CEILING_S (raise only below it), or None."""
-    c = ((st.get('ceiling') or {}).get(mode) or {}).get(str(level))
-    return c['mhz'] if c and _age(c.get('at'), now) < CEILING_S else None
+def plus_size(t):
+    if t >= 79:
+        return 1
+    if t >= 76:
+        return 2
+    if t >= 70:
+        return 5
+    if t >= 60:
+        return 20
+    return 40
 
 
-def _clock_step(st, now, t, t_fast, cur, stock_avg, upper, lowering, ceiling=None):
-    """New average clock or None (no change). The clock is raised only WAIT_S after the last clock AND fan change
-    (a lower fan level cools less only after 1-3 min)."""
-    since = _age(st.get('changed_at'), now)
-    since_fan = _age(st.get('fan_set_at'), now)
-    if t_fast >= T_PROTECT1 and since >= PROTECT_WAIT_S:
-        new = cur - MAX_STEP_MHZ
-    elif t > upper and since >= WAIT_S:
-        new = cur - min(MAX_STEP_MHZ, STEP_MHZ * math.ceil((t - upper) / C_PER_STEP))
-    elif (t < T_LOW and not lowering and since >= WAIT_S and since_fan >= WAIT_S and cur < stock_avg - 0.5
-          and _age(st.get('protect_at'), now) >= PROTECT_HOLD_S):
-        new = cur + _raise_step(t)
-        if ceiling is not None:
-            new = min(new, ceiling - 2)                 # b) stay below the clock that needed protection
-            if new <= cur + 0.5:
-                return None
-    else:
-        return None
-    new = min(max(new, stock_avg * FLOOR_SHARE), stock_avg)
-    return new if abs(new - cur) >= 1 else None
 
 
-def _learned(learned, mode, level):
-    return ((learned.get(mode) or {}).get(str(level)) or {}).get('mhz')
+def smaller_plus(size):
+    """+5 → +2 → +1 (Kapitel 6: eine Größe kleiner)."""
+    return {5: 2, 2: 1, 1: 1}.get(size)
 
 
-def _start_clock(learned, mode, level, cur):
-    """(clock, text) to start from at a fan level, or (None, None) to keep the current clock.
-    Learned value of the level; a lower fan level never starts above any learned value of a higher level,
-    a higher level never below any learned value of a lower level (also when its own value says otherwise)."""
-    vals = {int(k): v.get('mhz') for k, v in (learned.get(mode) or {}).items() if v.get('mhz')}
-    higher = [mhz for lv, mhz in vals.items() if lv > level]
-    lower = [mhz for lv, mhz in vals.items() if lv < level]
-    hi = min(higher) if higher else None
-    lo = max(lower) if lower else None
-    own = vals.get(level)
-    if own is not None:
-        target = min(own, hi) if hi is not None else own
-        target = max(target, lo) if lo is not None else target
-        return target, 'Lernwert Stufe %d' % level
-    if hi is not None and cur > hi + 0.5:
-        return hi, 'Stufe %d: höchstens Lernwert der höheren Stufe' % level
-    if lo is not None and cur < lo - 0.5:
-        return lo, 'Stufe %d: mindestens Lernwert der niedrigeren Stufe' % level
-    return None, None
+# ---------------------------------------------------------------- Wartung
 
-
-def _learn(st, now, mode, t, cur, quiet, stock_avg=None):
-    """Remember the clock at which TMax stayed LEARN_S within T_LOW..T_HIGH at this fan level and mode.
-    Stored is the clock the automation SET (it is sent again when the value is used; the firmware drifts the
-    reported clock upwards). Only if the clocks were not set by the automation (e.g. right after a run):
-    the clock the miner reports."""
-    key = [mode, st.get('base')]
-    if not quiet or t is None or cur is None or not T_LOW <= t <= T_HIGH:
-        st.pop('band_since', None)
-        return
-    if st.get('band_key') != key or not st.get('band_since'):
-        st['band_key'], st['band_since'] = key, _iso(now)
-        return
-    if _age(st['band_since'], now) < LEARN_S:
-        return
-    if st.get('clock_own'):
-        mhz, source = (st.get('clock_set') or stock_avg or cur), 'gesetzt'
-    else:
-        mhz, source = cur, 'laut Miner'
-    entry = {'mhz': round(mhz, 1), 'at': _iso(now), 'source': source}
-    learned = st.setdefault('learned', {}).setdefault(mode, {})
-    prev = learned.get(str(st['base']))
-    learned[str(st['base'])] = entry
-    if st.get('band_noted') != st['band_since']:
-        st['band_noted'] = st['band_since']
-        _note(st, now, 'Lernwert gespeichert: Stufe %s → %.0f MHz (%s)%s.' % (
-            st['base'], mhz, source, '' if not prev else ', vorher %.0f MHz' % prev['mhz']))
-
-
-def _boost(st, t):
-    """Fan protection above the chosen level (user decision 21.10.): > 84 degC +1, >= 88 +2, >= 90 +3 (latest
-    reading); kept until TMax is back at T_LOW (80 degC) or below, so the fan does not swing at the 84 degC line."""
-    boost = int(st.get('boost') or 0)
-    if t >= T_PROTECT2:
-        return max(boost, 3)
-    if t >= T_PROTECT1:
-        return max(boost, 2)
-    if t > T_HIGH:
-        return max(boost, 1)
-    if t <= T_LOW:
-        return 0
-    return boost
-
-
-def _maintenance(row, st, now, ac):
+def _maintenance(row, st, now, ac, journal):
     """Wartung (A15 switched off by hand): normal regulation while the A15 still answers; once it stopped
     answering the fan goes off („Aus“, atType 1); when it answers again the fan goes back on at the level it had
-    and the maintenance ends (the reboot is then handled as usual: start clock of the level).
-    Returns the miner reading, or None while the A15 is off."""
+    and the maintenance ends. Returns the miner reading, or None while the A15 is off."""
     mt = st.get('maint') or {}
     if mt.get('since') != str(row['maintenance_at']):
         mt = {'since': str(row['maintenance_at'])}
@@ -214,297 +170,835 @@ def _maintenance(row, st, now, ac):
     st['maint'] = mt
     dev_id, fport = row['ac_dev_id'], row['ac_port']
     m = None
-    # only the central reading (every 5 s): no own request with timeouts while the A15 is switched off
     if miner_cache.get(row['ip_address'], 'estats', calibration.CACHE_MAX_AGE):
         try:
             m = calibration.read_miner(row['ip_address'], row['port'])
         except (OSError, RuntimeError, ValueError):
             m = None
-    if m is None:                                   # switched off
+    if m is None:
         if not mt.get('seen_off'):
             mt['seen_off'] = True
-            mt['fan_before'] = int(st.get('fan_set') or st.get('base') or row['level'])
+            mt['fan_before'] = int(st.get('fan_set') or row['level'])
             _note(st, now, 'A15 aus (Wartung).')
-        if not mt.get('fan_off'):
+        if not mt.get('fan_off') and _age(mt.get('fail_at'), now) >= FAN_WRITE_GAP_S:
+            sent, t0 = _now(), time.monotonic()
+            ok, err = True, ''
             try:
                 ac.set_fan_power(dev_id, fport, False)
                 mt['fan_off'] = True
                 st['ac_error'] = None
                 _note(st, now, 'Wartung: Lüfter aus.')
             except ac.ACError as exc:
-                st['ac_error'] = str(exc)
-        st['phase'] = 'wartung'
+                ok, err = False, str(exc)
+                st['ac_error'] = err
+                mt['fail_at'] = _iso(now)
+            journal.event(kind='luefter', trigger='Wartung: Miner ausgeschaltet', phase='wartung',
+                          fan_old=st.get('fan_set'), fan_new=0, target='lueftersteuerung',
+                          endpoint='AC Infinity: Port %s aus (atType 1)' % fport, request='Lüfter aus',
+                          ok=ok, error=err, api_sent_at=sent, api_reply_at=_now(),
+                          api_ms=int((time.monotonic() - t0) * 1000), takeover_state='nicht gemessen')
         return None
     if not mt.get('seen_off'):
-        return m                                    # still running (not switched off yet): regulate as usual
+        return m
     level = mt.get('fan_before') or int(row['level'])
+    if _age(mt.get('fail_at'), now) < FAN_WRITE_GAP_S:
+        return None
+    sent, t0 = _now(), time.monotonic()
     try:
         ac.set_fan_power(dev_id, fport, True, level)
     except ac.ACError as exc:
         st['ac_error'] = str(exc)
-        st['phase'] = 'wartung'
-        return None                                 # fan not back on yet: try again next round
-    st.update({'fan_set': level, 'fan_set_at': _iso(now), 'ac_error': None,
+        mt['fail_at'] = _iso(now)
+        journal.event(kind='luefter', trigger='Wartung beendet: Lüfter wieder an', phase='wartung', fan_new=level,
+                      target='lueftersteuerung', endpoint='AC Infinity: Port %s an (atType 2)' % fport,
+                      request='Lüfter an, Stufe %d' % level, ok=False, error=str(exc), api_sent_at=sent,
+                      api_reply_at=_now(), api_ms=int((time.monotonic() - t0) * 1000), takeover_state='nicht gemessen')
+        return None
+    st.update({'fan_set': level, 'fan_target': level, 'fan_set_at': _iso(now), 'ac_error': None,
                'fan_read_at': _iso(now - timedelta(seconds=FAN_READ_S - FAN_CONFIRM_S)),
                'maint_end': True, 'maint_ended_at': _iso(now)})
     st.pop('maint', None)
     _note(st, now, 'A15 wieder an: Wartung beendet, Lüfter wieder an auf Stufe %d.' % level)
+    journal.event(kind='wartung_ende', trigger='Miner antwortet wieder', phase='wartung', fan_new=level,
+                  target='lueftersteuerung', endpoint='AC Infinity: Port %s an (atType 2)' % fport,
+                  request='Lüfter an, Stufe %d' % level, ok=True, api_sent_at=sent, api_reply_at=_now(),
+                  api_ms=int((time.monotonic() - t0) * 1000), takeover_state='nicht gemessen')
     return m
 
 
-def step(row, now, ac):
-    """One round for one automation row; returns the new state."""
-    st = dict(row['state'] or {})
-    ip, port = row['ip_address'], row['port']
-    if not row['enabled']:
-        # no clock is sent: the clock stays (the backend keeps it as a manual throttle); before 21.10. the stock
-        # clocks were set here, which overheated the A15 at a low fan level (3.670 W, 111 degC, Over Hot)
-        _note(st, now, 'Automatik aus: Takt bleibt %s.' % (
-            ('auf %.0f MHz (als Drosselung)' % st['clock_set']) if st.get('clock_own') and st.get('clock_set')
-            else 'wie er ist'))
-        st.update({'clock_set': None, 'clock_own': False, 'off': True, 'phase': 'aus'})
-        return st
-    if st.pop('off', False) or not st.get('seen_at'):
-        st = {'log': st.get('log') or [], 'learned': st.get('learned') or {}}   # learned values stay
-        _note(st, now, 'Automatik ein (Stufe %d).' % row['level'])
+# ---------------------------------------------------------------- one round
 
-    if row.get('maintenance_at'):
-        m = _maintenance(row, st, now, ac)
-        if m is None:
-            return st                               # A15 off for maintenance: fan off, nothing to regulate
-    else:
-        st.pop('maint', None)
-        m = calibration.read_miner(ip, port)     # the central reading taken just before (fallback: own request)
-    st['seen_at'] = _iso(now)
-    rebooted = st.get('elapsed') is not None and m['elapsed'] is not None and m['elapsed'] < st['elapsed']
-    if st.get('mode_key') not in (None, m['mode_key']) or rebooted:
-        _note(st, now, 'Neustart/Moduswechsel: Firmware-Takt – Ausgangspunkt der Stufe wird sofort gesetzt.')
-        st['clock_set'] = None
-        st['clock_own'] = False                     # firmware clocks now, not set by the automation
-        st['changed_at'] = _iso(now)
-        st['exit_learned'] = True                   # 21.10.: after a reboot the A15 runs its full stock clocks
-    st['mode_key'], st['elapsed'] = m['mode_key'], m['elapsed']
-    st['clock_now'] = round(sum(m['points']) / len(m['points']), 1) if m['points'] else None   # for the page
+class Round:
+    """One regulation round for one automation row.
 
-    tmax = calibration._num(m['fields'].get('TMax'))
-    temps = [x for x in st.get('temps') or [] if _age(x[0], now) <= TEMP_WINDOW_S]
-    if tmax is not None and -50 < tmax < 200 and 'Over Hot' not in m['status']:
-        temps.append([_iso(now), tmax])
-    st['temps'] = temps
-    recent = [x[1] for x in temps if _age(x[0], now) <= 30]
-    # band 80-84: median of the last 30 s; protection (88/90): the latest reading
-    t = statistics.median(recent) if len(recent) >= 2 else None
-    t_fast = temps[-1][1] if temps and _age(temps[-1][0], now) < 1 else None
-    if t is not None and t_fast is None:
-        t_fast = t
-    st['t'], st['t_now'] = t, t_fast
+    Flags in the state: corr (Korrekturphase), exc_active (Ausnahme läuft), cal (Takt-Messung), start_reason (Start
+    nach Kapitel 4 steht aus). The shown phase is derived from them at the end of the round."""
 
-    # --- fan: read every FAN_READ_S ---
-    dev_id, fport = row['ac_dev_id'], row['ac_port']
-    st['ac_error'] = None
-    if _age(st.get('fan_read_at'), now) >= FAN_READ_S:
+    def __init__(self, row, now, ac, journal):
+        self.row, self.now, self.ac, self.j = row, now, ac, journal
+        self.st = dict(row['state'] or {})
+        self.base = int(row['level'])
+        self.decisions = []
+        self.cycle_log = None
+        self.m = None
+        self.t = None
+        self.ref = None
+
+    # --- helpers
+    def note(self, text):
+        _note(self.st, self.now, text)
+
+    def decide(self, text, log_id=None):
+        self.decisions.append(text)
+        if log_id and not self.cycle_log:
+            self.cycle_log = log_id
+
+    def phase(self):
+        st = self.st
+        if st.get('cal'):
+            return 'messung'
+        if st.get('corr'):
+            return 'korrektur'
+        if st.get('exc_active'):
+            return 'ausnahme'
+        return 'normal'
+
+    def base_event(self, **fields):
+        st = self.st
+        fields.setdefault('phase', self.phase())
+        fields.setdefault('chip_temp', self.t)
+        fields.setdefault('tendency', st.get('tendency') if self.t is not None else None)
+        fields.setdefault('base_old', self.base)
+        fields.setdefault('base_new', self.base)
+        fields.setdefault('fan_old', st.get('fan_target'))
+        fields.setdefault('fan_new', st.get('fan_target'))
+        fields.setdefault('clock_old', st.get('clock_set'))
+        fields.setdefault('clock_new', st.get('clock_set'))
+        fields.setdefault('clock_reported', st.get('clock_now'))
+        fields.setdefault('mode_old', st.get('mode_key') or '')
+        fields.setdefault('mode_new', st.get('mode_key') or '')
+        fields.setdefault('recorded_at', self.now)
+        return self.j.event(**fields)
+
+    def plausible(self, key, pts):
+        level = level_of(key)
+        if not pts or level is None:
+            return bool(pts) and level is None          # High Performance: no table value to check against
+        return abs(sum(pts) / len(pts) - MODE_TOP[level]) <= STOCK_PLAUSIBLE_MHZ
+
+    def stock(self, key):
+        """Standardtakt (vier Punkte) eines Modus: beim eigenen Moduswechsel gemerkt, sonst Profil des
+        Throttle-Controllers – beide nur, wenn plausibel (nahe am Standardtakt der Tabelle)."""
+        own = (self.st.get('stock') or {}).get(key)
+        if own and self.plausible(key, own):
+            return own
+        prof = ((((self.row['connection_config'] or {}).get('throttle') or {}).get('profiles') or {}).get(key) or {})
+        if prof.get('points') and self.plausible(key, prof['points']):
+            return prof['points']
+        return None
+
+    def stock_for_send(self):
+        """Standardtakt des gemeldeten Modus; fehlt er, aus der Form der gemeldeten Punkte auf den Standardtakt
+        der Tabelle hochgerechnet (einmal protokolliert), damit ein Taktbefehl nie hängen bleibt."""
+        m, key = self.m, self.m['mode_key']
+        stock = self.stock(key)
+        if stock:
+            return stock
+        pts = list(m['points'] or [])
+        if not pts:
+            return None
+        level = level_of(key)
+        est = [int(round(p * MODE_TOP[level] / (sum(pts) / len(pts)))) for p in pts] if level is not None else pts
+        if self.st.get('stock_missing') != key:
+            self.st['stock_missing'] = key
+            self.base_event(kind='fehler', trigger='Standardtakt von %s unbekannt: aus den gemeldeten Punkten geschätzt' % key,
+                            ok=None, details={'grund': 'standardtakt_fehlt', 'modus': key, 'geschaetzt': est})
+        return est
+
+    def tendency(self):
+        """(Tendenz, Bezugswert): Chiptemperatur jetzt gegenüber dem Wert von vor höchstens 30 s; liegt die letzte
+        Taktänderung weniger als 30 s zurück, gegenüber dem Wert bei dieser Änderung."""
+        st, now = self.st, self.now
+        since = _age(st.get('clock_changed_at'), now)
+        if since < TENDENCY_S and st.get('clock_changed_t') is not None:
+            ref = st['clock_changed_t']
+        else:
+            ref = None
+            for at, value in st.get('temps') or []:
+                if _age(at, now) <= TENDENCY_S + 0.5:
+                    ref = value
+                    break
+        if ref is None:
+            ref = self.t
+        return int(round(self.t - ref)), ref
+
+    # --- start (Kapitel 4)
+    def start(self, reason):
+        st = self.st
+        learned = (st.get('learned') or {}).get(str(self.base))
+        target = int(round(learned['mhz'])) if learned else START_CLOCK.get(self.base, START_CLOCK[1])
+        source = 'Lernwert' if learned else 'Initialwert'
+        target = min(max(target, CLOCK_MIN), CLOCK_MAX)
+        old_fan, old_clock = st.get('fan_target'), st.get('clock_set')
+        self.drop_pending('Start (%s)' % reason)
+        st.update({'corr': False, 'exc_active': False, 'clock_set': target, 'queue': [], 'window_until': None,
+                   'band_since': None, 'cold_since': None, 'down_since': None, 'last_step': None,
+                   'clock_changed_at': _iso(self.now), 'clock_changed_t': self.t, 'start_reason': None})
+        self.set_fan_target(self.base, 'Start: Basisstufe %d' % self.base)
+        self.end_learning(None)
+        level = table_level(target)
+        queue = []
+        if level_of(self.m['mode_key']) != level:
+            queue.append({'kind': 'modus', 'value': level, 'why': 'Start: Modus für %d MHz' % target})
+        queue.append({'kind': 'takt', 'value': target, 'from': old_clock, 'why': 'Start: %s Stufe %d' % (source, self.base)})
+        st['queue'] = queue
+        log_id = self.base_event(kind='start', trigger=reason, fan_old=old_fan, fan_new=self.base, clock_old=old_clock,
+                                 clock_new=target, mode_new=calibration.mode_key(2, level),
+                                 details={'quelle': source, 'starttakt': target, 'basisstufe': self.base})
+        self.note('%s: Starttakt %d MHz (%s Stufe %d), Lüfter Stufe %d.' % (reason, target, source, self.base, self.base))
+        self.decide('Start (%s): %d MHz' % (reason, target), log_id)
+
+    # --- commands (Kapitel 8)
+    def drop_pending(self, why):
+        """Ein offener Befehl wird abgelöst oder erneut gesendet: Übernahme „nicht gemessen“."""
+        p = self.st.get('pending')
+        if p and p.get('log_id'):
+            self.j.update(p['log_id'], takeover_state='nicht gemessen')
+        self.st['pending'] = None
+        self.st['settle'] = None
+
+    def confirm_pending(self):
+        """Übernahme prüfen (Modus: Miner meldet den Modus; Takt: Miner meldet den gesetzten Wert oder einen anderen
+        Wert als vorher). Nach einem Moduswechsel wartet der nächste Taktbefehl, bis die Firmware ihren Standardtakt
+        eingestellt hat (gemeldete Punkte geändert oder Neustart, höchstens OWN_SWITCH_S)."""
+        st, m, now = self.st, self.m, self.now
+        p = st.get('pending')
+        if p and p['ok']:
+            if p['kind'] == 'modus':
+                confirmed = level_of(m['mode_key']) == p['value']
+            else:
+                pts = list(m['points'] or [])
+                confirmed = bool(pts) and (pts == p['points'] or pts != p.get('prev_points'))
+            if confirmed:
+                took = _age(p['sent_at'], now)
+                self.j.update(p['log_id'], takeover_at=now, takeover_s=round(took, 1), takeover_state='gemessen')
+                self.follow(p['log_id'])
+                st['pending'] = None
+                if st.get('queue'):
+                    st['queue'].pop(0)
+                if p['kind'] == 'modus':
+                    st['settle'] = {'key': calibration.mode_key(2, p['value']), 'points_before': p.get('prev_points'),
+                                    'since': _iso(now), 'elapsed': m['elapsed']}
+                    self.note('Modus mode %02d übernommen (%.0f s).' % (p['value'], took))
+                else:
+                    st['sent_points'] = p['points']
+                    self.clock_done(p['cmd'])
+        se = st.get('settle')
+        if se:
+            pts = list(m['points'] or [])
+            restarted = se.get('elapsed') is not None and m['elapsed'] is not None and m['elapsed'] < se['elapsed']
+            changed = bool(pts) and pts != se.get('points_before')
+            if changed or restarted or _age(se['since'], now) >= OWN_SWITCH_S:
+                key = se['key']
+                if changed and not self.stock(key) and self.plausible(key, pts):
+                    st.setdefault('stock', {})[key] = pts     # der Moduswechsel stellt den Standardtakt ein: merken
+                st['settle'] = None
+            else:
+                se['elapsed'] = m['elapsed']
+
+    def resend_or_send(self):
+        """Ohne Übernahme nach RESEND_S erneut senden (bis es klappt); sonst den nächsten Befehl der Folge senden."""
+        st = self.st
+        p = st.get('pending')
+        if p:
+            if _age(p['sent_at'], self.now) < RESEND_S:
+                return
+            self.drop_pending('erneut senden')
+            cmd = dict(p['cmd'], attempt=p['attempt'] + 1)
+            st['queue'] = [cmd] + [c for c in (st.get('queue') or [])[1:]]
+        if st.get('settle'):
+            return
+        self.send_queue_head()
+
+    def send_queue_head(self):
+        st, m = self.st, self.m
+        while st.get('queue'):
+            cmd = st['queue'][0]
+            if cmd['kind'] == 'modus':
+                if level_of(m['mode_key']) == cmd['value']:
+                    st['queue'].pop(0)
+                    continue
+                self.send_mode(cmd)
+                return
+            stock = self.stock_for_send()
+            if not stock or not m['points']:
+                return                                      # the miner reports no clocks yet (booting)
+            pts = points_for(stock, cmd['value'])
+            if list(m['points']) == pts:
+                # Zieltakt = Takt laut Miner: kein Taktbefehl, gilt als übernommen
+                st['queue'].pop(0)
+                st['sent_points'] = pts
+                self.base_event(kind='takt', trigger=cmd.get('why') or '', target='miner-takt', ok=None,
+                                clock_old=cmd.get('from'), clock_new=cmd['value'], takeover_state='',
+                                details={'kein_befehl': 'Takt laut Miner = Zieltakt', 'punkte': pts})
+                self.clock_done(cmd)
+                continue
+            self.send_clock(cmd, pts)
+            return
+
+    def send_clock(self, cmd, pts):
+        st, m = self.st, self.m
+        attempt = cmd.get('attempt', 1)
+        request = 'ascset 0,frequency,%s-0-0' % ':'.join(str(p) for p in pts)
+        sent, t0 = _now(), time.monotonic()
+        ok, reply, err = True, '', ''
         try:
-            st['fan_read'] = ac.speed_of(dev_id, fport)
-            st['fan_read_at'] = _iso(now)
+            reply = calibration.set_frequency(self.row['ip_address'], self.row['port'], pts) or 'set OK'
+        except (OSError, RuntimeError) as exc:
+            ok, err = False, str(exc)
+        ms = int((time.monotonic() - t0) * 1000)
+        details = dict(cmd.get('details') or {}, punkte=pts)
+        if cmd.get('learn_restart') and attempt == 1:
+            details['lernperiode_neu_gestartet'] = True
+        log_id = self.base_event(kind='takt', trigger=cmd.get('why') or '', target='miner-takt',
+                                 endpoint='cgminer %s:%s ascset frequency' % (self.row['ip_address'], self.row['port'] or 4028),
+                                 request=request, response=reply if ok else '', status='set OK' if ok else 'Fehler',
+                                 ok=ok, error=err, attempt=attempt, api_sent_at=sent, api_reply_at=_now(), api_ms=ms,
+                                 clock_old=cmd.get('from'), clock_new=cmd['value'], temp_before=self.t,
+                                 takeover_state='offen' if ok else 'nicht gemessen', details=details)
+        st['pending'] = {'kind': 'takt', 'value': cmd['value'], 'points': pts, 'prev_points': list(m['points']),
+                         'sent_at': _iso(self.now), 'attempt': attempt, 'log_id': log_id, 'ok': ok, 'cmd': cmd}
+        self.decide('Takt %d MHz gesendet%s' % (cmd['value'], '' if ok else ' (Fehler)'), log_id)
+        if not ok:
+            self.note('Taktbefehl %d MHz fehlgeschlagen: %s' % (cmd['value'], err))
+
+    def send_mode(self, cmd):
+        st, m = self.st, self.m
+        level, attempt = cmd['value'], cmd.get('attempt', 1)
+        conf = m.get('conf')
+        sent, t0 = _now(), time.monotonic()
+        ok, err = True, ''
+        if not conf:
+            ok, err = False, 'A15-Einstellungsseite nicht gelesen'
+        else:
+            try:
+                calibration.a15_set_mode(self.row['ip_address'], conf, 2, level)
+            except (OSError, RuntimeError) as exc:
+                ok, err = False, str(exc)
+        ms = int((time.monotonic() - t0) * 1000)
+        key = calibration.mode_key(2, level)
+        log_id = self.base_event(kind='modus', trigger=cmd.get('why') or '', target='miner-modus',
+                                 endpoint='http://%s/cgconf.cgi' % self.row['ip_address'],
+                                 request='mode=2, power_level=%02d (Pool-Felder unverändert, nicht protokolliert)' % level,
+                                 status='gesendet' if ok else 'Fehler', ok=ok, error=err, attempt=attempt,
+                                 api_sent_at=sent, api_reply_at=_now(), api_ms=ms, mode_new=key, temp_before=self.t,
+                                 takeover_state='offen' if ok else 'nicht gemessen')
+        st['pending'] = {'kind': 'modus', 'value': level, 'sent_at': _iso(self.now), 'attempt': attempt,
+                         'prev_points': list(m['points'] or []), 'log_id': log_id, 'ok': ok, 'cmd': cmd}
+        st['mode_sent_at'] = _iso(self.now)
+        self.decide('Modus %02d gesendet%s' % (level, '' if ok else ' (Fehler)'), log_id)
+        self.note('Modus → mode %02d%s.' % (level, '' if ok else ' (Fehler: %s)' % err))
+
+    def clock_done(self, cmd):
+        """Takt übernommen: Beobachtungsfenster beginnt."""
+        st = self.st
+        st['window_until'] = _iso(self.now + timedelta(seconds=WINDOW_S))
+        if cmd.get('step') is not None:
+            st['last_step'] = {'size': cmd['step'], 't0': cmd.get('t0'), 'effect': None,
+                               'window_end': st['window_until']}
+
+    def follow(self, log_id):
+        """Thermischen Verlauf nachtragen (alle 30 s, 10 Werte)."""
+        if log_id:
+            fl = self.st.setdefault('thermal', [])
+            fl.append({'id': log_id, 'at': _iso(self.now), 'vals': []})
+            del fl[:-50]
+
+    def update_thermal(self):
+        keep = []
+        for f in self.st.get('thermal') or []:
+            if _age(f['at'], self.now) >= THERMAL_EVERY_S * (len(f['vals']) + 1):
+                f['vals'].append(self.t)
+                self.j.update(f['id'], thermal=f['vals'])
+            if len(f['vals']) < THERMAL_N:
+                keep.append(f)
+        self.st['thermal'] = keep
+
+    def queue_clock(self, value, why, hot=False, step=None):
+        """Takt setzen (Schritt 4): Grenzen, Modus nach Regel; bei hoher Chiptemperatur erst Takt, dann Modus, dann Takt."""
+        st, m = self.st, self.m
+        old = st.get('clock_set')
+        if value < CLOCK_MIN:
+            log_id = self.base_event(kind='fehler', trigger=why, ok=False,
+                                     error='Berechneter Takt %d MHz liegt unter %d MHz: nicht gesendet' % (value, CLOCK_MIN),
+                                     details={'grund': 'takt_unter_100', 'berechnet': value})
+            self.note('Takt %d MHz unter %d MHz: nicht gesendet, Takt bleibt %s MHz.' % (value, CLOCK_MIN, old))
+            self.decide('Fehler: Takt unter 100 MHz', log_id)
+            return False
+        value = min(value, CLOCK_MAX)
+        current = level_of(m['mode_key'])
+        level = required_level(value, current)
+        learn_restart = bool(st.get('learn_since'))
+        common = {'from': old, 'why': why, 'step': step, 't0': self.t, 'learn_restart': learn_restart,
+                  'details': {'schritt': step} if step is not None else {}}
+        queue = []
+        if hot:
+            queue.append(dict(common, kind='takt', value=value))
+            if level != current:
+                queue.append({'kind': 'modus', 'value': level, 'why': why + ' (Modus danach)'})
+                queue.append(dict(common, kind='takt', value=value, why=why + ' (erneut nach Moduswechsel)',
+                                  learn_restart=False))
+        else:
+            if level != current:
+                queue.append({'kind': 'modus', 'value': level, 'why': why + ' (Modus zuerst)'})
+            queue.append(dict(common, kind='takt', value=value))
+        self.drop_pending('abgelöst: ' + why)
+        st['queue'] = queue
+        st['clock_set'] = value
+        st['clock_changed_at'] = _iso(self.now)
+        st['clock_changed_t'] = self.t
+        st['window_until'] = None
+        if learn_restart:
+            st['learn_since'] = None                     # Vermerk steht im Eintrag des Taktschritts
+        return True
+
+    # --- fan (Lüftersteuerung)
+    def set_fan_target(self, level, why):
+        level = min(max(int(level), FAN_MIN), FAN_MAX)
+        st = self.st
+        if level != st.get('fan_target'):
+            fp = st.get('fan_pending')
+            if fp and fp.get('log_id'):
+                self.j.update(fp['log_id'], takeover_state='nicht gemessen')
+            st['fan_pending'] = None
+            st['fan_target'] = level
+            st['fan_why'] = why
+
+    def write_fan(self):
+        st, now, ac = self.st, self.now, self.ac
+        fport = self.row['ac_port']
+        target = st.get('fan_target')
+        if target is None:
+            return
+        read_after_write = _age(st.get('fan_read_at'), now) <= _age(st.get('fan_set_at'), now) - FAN_CONFIRM_S
+        fp = st.get('fan_pending')
+        if fp and st.get('fan_read') == target and read_after_write:
+            self.j.update(fp['log_id'], takeover_at=now, takeover_s=round(_age(fp['at'], now), 1),
+                          takeover_state='gemessen')
+            self.follow(fp['log_id'])
+            st['fan_pending'] = fp = None
+        # eine neue Lüfterstufe sofort (Plan: „Lüfter sofort“); erneut senden (Fehler oder andere Rückmeldung)
+        # frühestens FAN_WRITE_GAP_S nach dem letzten Versuch
+        new_level = target != st.get('fan_set') and _age(st.get('fan_fail_at'), now) >= FAN_WRITE_GAP_S
+        mismatch = (st.get('fan_read') is not None and st['fan_read'] != target and read_after_write
+                    and _age(st.get('fan_set_at'), now) >= FAN_WRITE_GAP_S)
+        if not new_level and not mismatch:
+            return
+        old = st.get('fan_set')
+        attempt = 1 + (fp['attempt'] if fp and fp.get('level') == target else 0)
+        if fp and fp.get('log_id'):
+            self.j.update(fp['log_id'], takeover_state='nicht gemessen')
+        sent, t0 = _now(), time.monotonic()
+        ok, err, reply = True, '', ''
+        try:
+            res = ac.set_fan_level(self.row['ac_dev_id'], fport, target)
+            reply = 'Code %s' % ((res or {}).get('code') if isinstance(res, dict) else 'ok')
+            st['ac_error'] = None
         except ac.ACError as exc:
+            ok, err = False, str(exc)
+            st['ac_error'] = err
+        why = st.get('fan_why') or 'Lüfterstufe %s → %d' % (old, target)
+        log_id = self.base_event(kind='luefter', trigger=why, target='lueftersteuerung',
+                                 endpoint='AC Infinity: Port %s Stufe (onSpead)' % fport,
+                                 request='Stufe %d' % target, response=reply, status=reply or ('Fehler' if not ok else ''),
+                                 ok=ok, error=err, attempt=attempt, api_sent_at=sent, api_reply_at=_now(),
+                                 api_ms=int((time.monotonic() - t0) * 1000), fan_old=old, fan_new=target,
+                                 temp_before=self.t, takeover_state='offen' if ok else 'nicht gemessen')
+        st['fan_set_at'] = _iso(now)
+        st['fan_pending'] = {'level': target, 'at': _iso(now), 'attempt': attempt, 'log_id': log_id if ok else None}
+        if ok:
+            if target != old:
+                self.note('Lüfter Stufe %d gesetzt.' % target)
+            st['fan_set'] = target
+            st['fan_fail_at'] = None
+            st['fan_why'] = None
+            st['fan_read_at'] = _iso(now - timedelta(seconds=FAN_READ_S - FAN_CONFIRM_S))
+        else:
+            st['fan_fail_at'] = _iso(now)
+            self.note('Lüfterbefehl Stufe %d fehlgeschlagen: %s' % (target, err))
+        self.decide('Lüfter Stufe %d%s' % (target, '' if ok else ' (Fehler)'), log_id)
+
+    def read_fan(self):
+        """Lüfterstufe lesen: alle 60 s (10 s nach dem Setzen), auch nach einem Fehler erst wieder nach 60 s."""
+        st, now = self.st, self.now
+        if _age(st.get('fan_read_at'), now) < FAN_READ_S or _age(st.get('fan_read_fail_at'), now) < FAN_READ_S:
+            return
+        try:
+            st['fan_read'] = self.ac.speed_of(self.row['ac_dev_id'], self.row['ac_port'])
+            st['fan_read_at'] = _iso(now)
+            st['fan_read_fail_at'] = None
+        except self.ac.ACError as exc:
             st['ac_error'] = str(exc)
-    if st.get('base') is None:
-        if st.get('fan_read') is None:
-            return st                                   # the fan level must be known first
-        st['base'] = max(int(st['fan_read']), FAN_MIN)
-        st.setdefault('fan_set', int(st['fan_read']))   # the fan already runs at this level
-        if st['fan_set'] is None:
-            st['fan_set'] = int(st['fan_read'])
+            st['fan_read_fail_at'] = _iso(now)
 
-    cal = bool(row['cal_active'])
-    st['cal'] = cal
-    # a manual clock (Drosselung) overrides the automation's clock control until it is lifted
-    throttled = bool((((row['connection_config'] or {}).get('throttle') or {}).get('active')))
-    st['throttled'] = throttled
-    stock = _stock(row, m['mode_key'])
-    if stock:
-        st['stock_points'] = stock
-        st['stock_mhz'] = round(sum(stock) / len(stock), 1)
+    # --- learning (Kapitel 7)
+    def end_learning(self, reason):
+        st = self.st
+        if st.get('learn_since') and reason:
+            self.base_event(kind='lernen_ende', trigger=reason, details={'ergebnis': 'abgebrochen', 'grund': reason,
+                                                                         'seit': st['learn_since']})
+        st['learn_since'] = None
+        st['learn_sum'], st['learn_n'] = 0, 0
 
-    if cal or throttled:
-        # Takt-Tabellen or manual clock: no clocks; the fan holds ~80 degC (T_CAL_DOWN..T_CAL_UP), levels 1-10
-        why = 'Takt-Messung' if cal else 'Manueller Takt'
-        st['phase'] = 'messung' if cal else 'manuell'
-        fan = int(st.get('cal_fan') or st.get('fan_set') or st['base'])
-        since_fan = _age(st.get('cal_fan_at'), now)
-        new = fan
-        if t is not None:
-            # protection: a higher protection level acts at once (88 degC: +1, 90 degC: +2), still hot
-            # after PROTECT_WAIT_S: again
-            prot = 2 if t_fast >= T_PROTECT2 else 1 if t_fast >= T_PROTECT1 else 0
-            last_prot = int(st.get('cal_protect') or 0)
-            st['cal_protect'] = prot
-            if prot > last_prot:
-                new = fan + prot - last_prot
-            elif prot and since_fan >= PROTECT_WAIT_S:
-                new = fan + prot
-            elif t > T_CAL_UP and since_fan >= CAL_FAN_GAP_S:
-                new = fan + 1
-            elif t <= T_CAL_DOWN and since_fan >= CAL_FAN_GAP_S:
-                new = fan - 1
-        new = min(max(new, FAN_MIN), FAN_MAX)
-        if new != fan:
-            st['cal_fan_at'] = _iso(now)
-            _note(st, now, '%s: TMax %.0f °C → Lüfter Stufe %d.' % (why, t, new))
-        st['cal_fan'] = new
-        target_fan = new
-    else:
-        if st.pop('cal_fan', None) is not None:
-            st['base'] = max(int(st.get('fan_set') or st['base']), st['base'])
-            st.pop('cal_fan_at', None)
-            st.pop('cal_protect', None)
-            st['exit_learned'] = True               # take the learned clock of the chosen level at once
-            st['clock_own'] = False                 # the clocks of the run / manual throttle are in effect
-            _note(st, now, 'Lüfter-Regelung beendet: zurück zur gewählten Stufe %d.' % row['level'])
-        chosen = int(row['level'])
-        mode = m['mode_key']
-        learned = st.setdefault('learned', {})
-        cur = sum(m['points']) / len(m['points']) if m['points'] else None
-        stock_avg = st['stock_mhz'] if stock else None
-        can_clock = bool(stock) and cur is not None
+    def learn(self):
+        st, t = self.st, self.t
+        key = [st.get('clock_set'), st.get('fan_target')]
+        busy = st.get('pending') or st.get('queue') or st.get('fan_target') != st.get('fan_set')
+        if not (T_LOW <= t <= T_HIGH) or busy:
+            if st.get('learn_since'):
+                self.end_learning('Chiptemperatur %d °C außerhalb 80–84 °C' % t if not (T_LOW <= t <= T_HIGH)
+                                  else 'Einstellung ändert sich')
+            return
+        if not st.get('learn_since') or st.get('learn_key') != key:
+            if st.get('learn_since'):
+                self.end_learning('Lüfterstufe geändert')
+            st['learn_since'], st['learn_key'], st['learn_sum'], st['learn_n'] = _iso(self.now), key, t, 1
+            self.base_event(kind='lernen_start', trigger='Chiptemperatur %d °C in 80–84 °C' % t,
+                            details={'takt': key[0], 'luefterstufe': key[1]})
+            return
+        st['learn_sum'] += t
+        st['learn_n'] += 1
+        if _age(st['learn_since'], self.now) >= LEARN_S:
+            level = str(st['fan_target'])
+            avg_t = round(st['learn_sum'] / max(st['learn_n'], 1), 1)
+            prev = (st.get('learned') or {}).get(level)
+            entry = {'mhz': st['clock_set'], 'temp_avg': avg_t, 'at': _iso(self.now),
+                     'count': (prev or {}).get('count', 0) + 1}
+            st.setdefault('learned', {})[level] = entry
+            log_id = self.base_event(kind='lernwert', trigger='15 min stabil in 80–84 °C',
+                                     details={'luefterstufe': int(level), 'takt': entry['mhz'], 'temp_mittel': avg_t,
+                                              'anzahl': entry['count'], 'vorher': prev})
+            self.base_event(kind='lernen_ende', trigger='15 min erreicht', details={'ergebnis': 'gespeichert'})
+            self.note('Lernwert Stufe %s: %s MHz, Ø %.1f °C (%d. Mal).' % (level, entry['mhz'], avg_t, entry['count']))
+            self.decide('Lernwert gespeichert', log_id)
+            st['learn_since'], st['learn_sum'], st['learn_n'] = _iso(self.now), 0, 0
 
-        def set_clock(new, text):
-            new = min(max(new, stock_avg * FLOOR_SHARE), stock_avg)
-            calibration.set_frequency(ip, port, _points_for(stock, new))
-            st['clock_set'] = round(new, 1) if new < stock_avg - 0.5 else None
-            st['clock_own'] = True
-            st['changed_at'] = _iso(now)
-            _note(st, now, text % new)
+    # --- the rules (Kapitel 5)
+    def window_over(self):
+        wu = self.st.get('window_until')
+        return _age(wu, self.now) >= 0 if wu else True
 
-        # a click on a level (also the same level again): its learned clock is set at once, in both
-        # directions (user decision 21.10.); a lower fan level still follows after WAIT_S
-        clicked = False
+    def busy(self):
+        return bool(self.st.get('pending') or self.st.get('queue') or self.st.get('settle'))
+
+    def high_temperature(self):
+        """Schritt 1: Lüfter = Basisstufe + 1/+2 sofort (niedrigere Korrekturstufe erst nach 30 s), Takt − Tabellenwert:
+        beim Eintritt in die Korrekturphase sofort, danach erst nach dem Beobachtungsfenster und nur bei nicht
+        fallender Tendenz."""
+        st, t, now = self.st, self.t, self.now
+        limit, fan_plus, minus = high_rule(t)
+        want = min(self.base + fan_plus, FAN_MAX)
+        active = st.get('fan_target') or self.base
+        first = not st.get('corr')
+        if want > active:
+            self.set_fan_target(want, 'Chiptemperatur %d °C: Basisstufe %d + %d' % (t, self.base, fan_plus))
+            st['down_since'] = None
+        elif want < active and st.get('corr'):
+            st['down_since'] = st.get('down_since') or _iso(now)
+            if _age(st['down_since'], now) >= FAN_DOWN_DELAY_S:
+                self.set_fan_target(want, 'Chiptemperatur %d °C seit 30 s: Basisstufe %d + %d' % (t, self.base, fan_plus))
+                st['down_since'] = None
+        else:
+            st['down_since'] = None
+        if st.get('band_since'):
+            self.stability_end('rueckkehr', 'abgebrochen', 'Chiptemperatur %d °C' % t)
+        if first:
+            st['corr'] = True
+            st['exc_active'] = False
+            if st.get('cold_since'):
+                self.stability_end('ausnahme', 'abgebrochen', 'Chiptemperatur %d °C' % t)
+            self.base_event(kind='hohe_temperatur', trigger='Chiptemperatur %d °C (Tabelle ab %d °C)' % (t, limit),
+                            fan_new=st['fan_target'], details={'ab': limit, 'luefter_plus': fan_plus, 'takt_minus': minus})
+            self.note('Chiptemperatur %d °C: Korrekturphase, Lüfter Stufe %d.' % (t, st['fan_target']))
+        if st.get('cal'):
+            return                                       # Takt-Messung: nur der Lüfter reagiert
+        old = st.get('clock_set')
+        if old is None:
+            return
+        if first or (self.window_over() and not self.busy() and st['tendency'] >= 0):
+            why = 'Chiptemperatur %d °C (ab %d °C): Takt −%d MHz' % (t, limit, minus)
+            if self.queue_clock(int(round(old)) - minus, why, hot=True, step=-minus):
+                self.note('Chiptemperatur %d °C: Takt %s → %d MHz.' % (t, old, int(round(old)) - minus))
+
+    def correction_phase(self):
+        """Schritt 2: in der Korrekturphase zurück zur Basisstufe (1 min stabil in 80-84 °C oder unter 80 °C)."""
+        st, t, now = self.st, self.t, self.now
+        if t < T_LOW:
+            self.stability_end('rueckkehr', 'erfuellt', 'Chiptemperatur unter 80 °C')
+            self.return_to_base('Chiptemperatur %d °C unter 80 °C' % t)
+            return
+        if not st.get('band_since'):
+            st['band_since'] = _iso(now)
+            self.base_event(kind='stabilitaet_start', trigger='Rückkehr: Chiptemperatur %d °C in 80–84 °C' % t,
+                            details={'pruefung': 'rueckkehr', 'dauer_s': RETURN_STABLE_S})
+        elif _age(st['band_since'], now) >= RETURN_STABLE_S:
+            self.stability_end('rueckkehr', 'erfuellt', '1 min stabil in 80–84 °C')
+            self.return_to_base('1 min stabil in 80–84 °C')
+
+    def stability_end(self, check, result, why):
+        st = self.st
+        key = 'band_since' if check == 'rueckkehr' else 'cold_since'
+        if st.get(key):
+            self.base_event(kind='stabilitaet_ende', trigger=why,
+                            details={'pruefung': check, 'ergebnis': result, 'seit': st[key]})
+        st[key] = None
+
+    def return_to_base(self, why):
+        st = self.st
+        st['corr'] = False
+        st['band_since'] = None
+        st['down_since'] = None
+        self.set_fan_target(self.base, 'Rückkehr zur Basisstufe: ' + why)
+        log_id = self.base_event(kind='rueckkehr', trigger=why, fan_new=self.base)
+        self.note('Rückkehr zur Basisstufe %d (%s).' % (self.base, why))
+        self.decide('Rückkehr zur Basisstufe', log_id)
+
+    def fine_tuning(self):
+        """Schritt 3 mit Kapitel 6 (Wahl der Schrittgröße)."""
+        st, t, d, ref = self.st, self.t, self.st['tendency'], self.ref
+        old = st.get('clock_set')
+        if old is None:
+            return
+        old = int(round(old))
+        last = st.get('last_step') or {}
+        # Tendenz zur oberen Grenze: die Chiptemperatur steigt IM Bereich 80-84 (Bezugswert auch im Bereich)
+        if T_LOW <= t <= T_HIGH and d > 0 and ref is not None and T_LOW <= ref <= T_HIGH:
+            size = 1 if d == 1 else 2
+            if (last.get('size') == -1 and (last.get('effect') or 0) > 0
+                    and _age(last.get('window_end'), self.now) <= 2 * RUN_S):
+                size = 2                                 # nach −1 im nächsten Fenster weiter steigend → −2
+            self.queue_clock(old - size, 'Chiptemperatur %d °C, Tendenz +%d: Feintuning −%d MHz' % (t, d, size),
+                             step=-size)
+            return
+        if not st.get('corr') and t < T_LOW and d <= 0 and old < CLOCK_MAX:
+            size = plus_size(t)
+            last_size = last.get('size') or 0
+            if last_size > 0 and (last.get('effect') or 0) >= 2 and smaller_plus(last_size):
+                size = min(size, smaller_plus(last_size))   # letzter Plus-Schritt brachte ≥ 2 °C: eine Größe kleiner
+            self.queue_clock(old + size, 'Chiptemperatur %d °C: +%d MHz' % (t, size), step=size)
+
+    def exception(self):
+        """Schritt 5: Takt 440 und 3 min stabil unter 70 °C → aktive Lüfterstufe − 1; Ende über 70 °C."""
+        st, t, now = self.st, self.t, self.now
+        if st.get('exc_active') and t > EXC_BELOW:
+            st['exc_active'] = False
+            self.base_event(kind='ausnahme_ende', trigger='Chiptemperatur %d °C über 70 °C' % t,
+                            details={'luefterstufe_bleibt': st.get('fan_target')})
+            self.note('Ausnahme beendet (%d °C), Lüfter bleibt auf Stufe %s.' % (t, st.get('fan_target')))
+        at_max = int(round(st.get('clock_set') or 0)) >= CLOCK_MAX and not self.busy()
+        if at_max and t < EXC_BELOW:
+            if not st.get('cold_since'):
+                st['cold_since'] = _iso(now)
+                self.base_event(kind='stabilitaet_start', trigger='Ausnahme: Takt 440 MHz, Chiptemperatur %d °C' % t,
+                                details={'pruefung': 'ausnahme', 'dauer_s': EXC_STABLE_S})
+            elif _age(st['cold_since'], now) >= EXC_STABLE_S:
+                active = st.get('fan_target') or self.base
+                self.stability_end('ausnahme', 'erfuellt', '3 min stabil unter 70 °C')
+                if active > FAN_MIN:
+                    self.set_fan_target(active - 1, 'Ausnahme: 440 MHz und 3 min unter 70 °C')
+                    st['exc_active'] = True
+                    log_id = self.base_event(kind='ausnahme', trigger='Takt 440 MHz, 3 min stabil unter 70 °C',
+                                             fan_old=active, fan_new=active - 1)
+                    self.note('Ausnahme: Lüfter Stufe %d → %d.' % (active, active - 1))
+                    self.decide('Ausnahme: Lüfter −1', log_id)
+                    st['cold_since'] = _iso(now)         # erneut 3 min Stabilität vor der nächsten Senkung
+                    self.base_event(kind='stabilitaet_start', trigger='Ausnahme: erneut 3 min prüfen',
+                                    details={'pruefung': 'ausnahme', 'dauer_s': EXC_STABLE_S})
+        elif st.get('cold_since'):
+            self.stability_end('ausnahme', 'abgebrochen',
+                               'Chiptemperatur %d °C' % t if t >= EXC_BELOW else 'Takt nicht mehr 440 MHz')
+
+    def rules(self):
+        st, t = self.st, self.t
+        if t >= T_HOT:
+            # Sicherheit zuerst: beim Eintritt in die Korrekturphase ersetzt die Taktsenkung einen laufenden Befehl
+            if not st.get('corr') and not st.get('cal') and (st.get('queue') or st.get('pending')):
+                self.drop_pending('abgelöst: hohe Chiptemperatur')
+                st['queue'] = []
+            self.high_temperature()
+            return
+        st['down_since'] = None
+        if st.get('corr'):
+            self.correction_phase()
+        if st.get('cal'):
+            return
+        if not self.busy() and self.window_over():
+            self.fine_tuning()
+        if not st.get('corr'):
+            self.exception()
+
+    # --- main
+    def run(self):
+        st, row, now = self.st, self.row, self.now
+        if not row['enabled']:
+            if not st.get('off'):
+                self.note('Automatik aus: Takt bleibt %s.' % ('%s MHz' % st['clock_set'] if st.get('clock_set') else 'wie er ist'))
+                self.drop_pending('Automatik aus')
+            st.update({'off': True, 'phase': 'aus', 'queue': [], 'settle': None})
+            self.j.cycle(recorded_at=now, phase='aus', base_level=self.base, clock_set=st.get('clock_set'),
+                         fan_level=st.get('fan_set'), decision='Automatik aus')
+            return st
+        if st.pop('off', False) or st.get('v') != STATE_VERSION:
+            # Automatik ein bzw. Umstellung auf die neue Regelung (startet ohne Lernwerte, Plan Kapitel 7)
+            keep = ('log', 'stock', 'fan_set', 'fan_read', 'fan_read_at', 'fan_set_at', 'elapsed', 'mode_key',
+                    'maint', 'maint_ended_at', 'offline', 'over_hot')
+            new = {k: st[k] for k in keep if k in st}
+            new['learned'] = (st.get('learned') or {}) if st.get('v') == STATE_VERSION else {}
+            if new.get('stock') is None:
+                new['stock'] = {}
+            new.update({'v': STATE_VERSION, 'level_seen': str(row.get('level_at')), 'start_reason': 'Automatik ein',
+                        'fan_target': st.get('fan_set') or self.base})
+            st = self.st = new
+            self.note('Automatik ein (Basisstufe %d).' % self.base)
+
+        if row.get('maintenance_at'):
+            m = _maintenance(row, st, now, self.ac, self.j)
+            if m is None:
+                st['phase'] = 'wartung'
+                self.j.cycle(recorded_at=now, phase='wartung', base_level=self.base, clock_set=st.get('clock_set'),
+                             fan_level=0 if (st.get('maint') or {}).get('fan_off') else st.get('fan_set'),
+                             decision='Wartung: Miner aus')
+                return st
+            if st.get('maint_end'):
+                st['start_reason'] = 'nach Wartung'
+        else:
+            st.pop('maint', None)
+            try:
+                m = calibration.read_miner(row['ip_address'], row['port'])
+            except (OSError, RuntimeError, ValueError) as exc:
+                if not st.get('offline'):
+                    st['offline'] = True
+                    self.base_event(kind='miner_offline', trigger='Miner antwortet nicht', ok=False, error=str(exc)[:500])
+                    self.note('Miner antwortet nicht: Lüfter unverändert, warten.')
+                self.j.cycle(recorded_at=now, phase=st.get('phase') or '', base_level=self.base,
+                             clock_set=st.get('clock_set'), fan_level=st.get('fan_set'), fan_read=st.get('fan_read'),
+                             decision='Miner antwortet nicht')
+                return st
+        self.m = m
+        if st.pop('offline', False):
+            self.base_event(kind='miner_online', trigger='Miner antwortet wieder')
+        st['seen_at'] = _iso(now)
+        st['ac_error'] = None
+
+        # Neustart (nicht durch den eigenen Moduswechsel), Stufenwahl, Takt-Messung, Over Hot
+        own_switch = (st.get('pending') or {}).get('kind') == 'modus' or _age(st.get('mode_sent_at'), now) < OWN_SWITCH_S
+        if (st.get('elapsed') is not None and m['elapsed'] is not None and m['elapsed'] < st['elapsed']
+                and not own_switch):
+            self.base_event(kind='neustart', trigger='Laufzeit des Miners zurückgesetzt (%s s → %s s)' % (st['elapsed'], m['elapsed']))
+            st['start_reason'] = 'Neustart des Miners'
+        st['elapsed'] = m['elapsed']
         level_at = row.get('level_at')
         if level_at is not None and str(level_at) != st.get('level_seen'):
             st['level_seen'] = str(level_at)
-            if can_clock:
-                ref = (st.get('clock_set') or stock_avg) if st.get('clock_own') else cur
-                target, why = _start_clock(learned, mode, chosen, ref)
-                if target is not None:
-                    clicked = True
-                    for key in ('raise_to', 'raise_why', 'exit_learned'):
-                        st.pop(key, None)
-                    if abs(target - ref) >= 0.5:
-                        set_clock(target, why + ': Takt %.0f MHz (Stufe gewählt).')
+            st['start_reason'] = 'Basisstufe gewählt (Stufe %d)' % self.base
+        cal = bool(row['cal_active'])
+        if cal and not st.get('cal'):
+            self.base_event(kind='messung_start', trigger='Takt-Messung läuft: Taktregelung pausiert')
+            self.note('Takt-Messung: Taktregelung pausiert, Lüfter nur nach „Hohe Chiptemperaturen“.')
+            self.drop_pending('Takt-Messung')
+            st['queue'] = []
+            self.end_learning('Takt-Messung')
+        if not cal and st.get('cal'):
+            self.base_event(kind='messung_ende', trigger='Takt-Messung beendet')
+            st['start_reason'] = 'nach Takt-Messung'
+        st['cal'] = cal
 
-        if chosen > st['base']:
-            st['base'] = chosen                         # higher level: the fan at once ...
-            for key in ('lower_since', 'lower_learned'):
-                st.pop(key, None)
-            target, why = _start_clock(learned, mode, chosen, cur) if can_clock and not clicked else (None, None)
-            if target and target > cur + 0.5:
-                st['raise_to'], st['raise_from'] = target, _iso(now)   # ... the start clock RAISE_DELAY_S later
-                st['raise_why'] = why
-            elif target and target < cur - 0.5:
-                set_clock(target, why + ': Takt %.0f MHz.')
-        lowering = chosen < st['base']
-        if lowering and not st.get('lower_since'):
-            st['lower_since'] = _iso(now)
-            st.pop('raise_to', None)
-            if clicked:
-                st['lower_learned'] = True              # clock already at the start clock: the fan after WAIT_S
-            target, why = _start_clock(learned, mode, chosen, cur) if can_clock and not clicked else (None, None)
-            if target and target < cur - 0.5:
-                # start clock of the lower level: clock straight to it, the fan follows after WAIT_S
-                set_clock(target, why + ': Takt %.0f MHz, Lüfter folgt nach 3 min.')
-                st['lower_learned'] = True
-        st['phase'] = 'senken' if lowering else 'normal'
-        # after a run / manual clock: straight to the learned clock of the chosen level (lower: at once,
-        # higher: RAISE_DELAY_S after the fan); while lowering the fan this waits until the fan is down
-        if st.get('exit_learned') and not lowering and can_clock:
-            st.pop('exit_learned', None)            # kept until the miner reports clocks again (e.g. after a boot)
-            target, why = _start_clock(learned, mode, chosen, cur)
-            if target and target < cur - 0.5:
-                set_clock(target, why + ': Takt %.0f MHz.')
-            elif target and target > cur + 0.5:
-                st['raise_to'], st['raise_from'], st['raise_why'] = target, _iso(now), why
-        if lowering and not stock and _age(st.get('lower_since'), now) >= WAIT_S:
-            st['base'] = chosen                         # no clock step possible: the fan after WAIT_S
-            lowering = False
-        if not lowering:
-            for key in ('lower_since', 'lower_learned'):
-                st.pop(key, None)
-        # the firmware overrode a set clock (e.g. its boot sequence applies the stock clocks): set it again
-        if (can_clock and st.get('clock_own') and st.get('clock_set') and cur > st['clock_set'] + OVERRIDE_MHZ
-                and _age(st.get('changed_at'), now) >= 60):
-            set_clock(st['clock_set'], 'Firmware hat den Takt überschrieben (%.0f MHz laut Miner) – erneut %%.0f MHz.' % cur)
-        if t is not None:
-            prev_boost = int(st.get('boost') or 0)
-            st['boost'] = _boost(st, t_fast)
-            # the firmware drifts a set clock up by ~10 MHz within minutes: regulate from the clock SET last
-            # (steps then add up), not from the reported one (21.10.: -10 MHz steps were eaten by the drift)
-            ref = (st.get('clock_set') or stock_avg) if st.get('clock_own') and stock_avg else cur
-            if can_clock and prev_boost == 0 and st['boost'] > 0:
-                # b) remember the clock that needed protection at this level (not reached again for CEILING_S)
-                st.setdefault('ceiling', {}).setdefault(mode, {})[str(st['base'])] = {'mhz': round(ref, 1),
-                                                                                       'at': _iso(now)}
-                st['protect_at'] = _iso(now)            # every protection: no raise for PROTECT_HOLD_S
-            if (can_clock and prev_boost == 0 and st['boost'] > 0
-                    and _age(st.get('protect_cut_at'), now) >= PROTECT_CUT_GAP_S):
-                # protection needed: the clock is too high for this fan level -> lower it for good,
-                # a) at most every PROTECT_CUT_GAP_S (the previous cut may still be acting)
-                st['protect_cut_at'] = _iso(now)
-                st['protect_at'] = _iso(now)
-                step = min(MAX_STEP_MHZ, STEP_MHZ * math.ceil((t - T_HIGH) / C_PER_STEP)) if t > T_HIGH else 0
-                new = max(ref - step - STEP_MHZ, stock_avg * FLOOR_SHARE)     # the usual step plus 10 MHz
-                set_clock(new, 'Schutz bei TMax %.1f °C: Takt dauerhaft auf %%.0f MHz für Stufe %d.' % (t_fast, st['base']))
-                lv = learned.setdefault(mode, {}).get(str(st['base']))
-                if not lv or lv.get('mhz', 1e9) > new:
-                    learned[mode][str(st['base'])] = {'mhz': round(new, 1), 'at': _iso(now), 'source': 'Schutz'}
-                ref = new
-            if can_clock:
-                raise_to = st.get('raise_to')
-                if raise_to and t > T_HIGH:
-                    st.pop('raise_to', None)            # too warm already: normal regulation
-                    raise_to = None
-                if raise_to:
-                    if _age(st.get('raise_from'), now) >= RAISE_DELAY_S:
-                        st.pop('raise_to', None)
-                        set_clock(raise_to, (st.pop('raise_why', None) or 'Lernwert Stufe %d' % st['base'])
-                                  + ': Takt %.0f MHz.')
-                else:
-                    upper = T_LOW if lowering and not st.get('lower_learned') else T_HIGH
-                    new = _clock_step(st, now, t, t_fast, ref, stock_avg, upper, lowering,
-                                      _ceiling(st, mode, st['base'], now))
-                    if new is not None:
-                        set_clock(new, 'TMax %.1f °C → Takt %%.0f MHz.' % t)
-                if lowering:
-                    floor = st.get('clock_set') and st['clock_set'] <= stock_avg * FLOOR_SHARE + 0.5
-                    settled = _age(st.get('changed_at'), now) >= WAIT_S
-                    if settled and (t <= T_LOW or floor or st.get('lower_learned')):
-                        _note(st, now, 'Temperatur %.1f °C, 3 min abgewartet → Lüfter auf Stufe %d.' % (t, chosen))
-                        st['base'] = chosen
-                        st['phase'] = 'normal'
-                        lowering = False
-                        for key in ('lower_since', 'lower_learned'):
-                            st.pop(key, None)
-                        st['exit_learned'] = True       # next round: start clock of the new level if still needed
-        quiet = not lowering and not st.get('raise_to') and not int(st.get('boost') or 0)
-        _learn(st, now, mode, t, cur, quiet, stock_avg)
-        target_fan = min(st['base'] + int(st.get('boost') or 0), FAN_MAX)
+        # readings for the page and the protocol
+        st['mode_key'] = m['mode_key']
+        st['points'] = list(m['points'] or [])
+        st['clock_now'] = round(sum(m['points']) / len(m['points']), 1) if m['points'] else None
+        stock = self.stock(m['mode_key'])
+        st['stock_mhz'] = round(sum(stock) / len(stock), 1) if stock else (
+            MODE_TOP.get(level_of(m['mode_key'])) if level_of(m['mode_key']) is not None else None)
+        boards = [calibration._num(x) for x in str(m['fields'].get('MTmax') or '').split()]
+        st['boards'] = [b for b in boards if b is not None]
+        tmax = calibration._num(m['fields'].get('TMax'))
+        over_hot = 'Over Hot' in (m['status'] or '')
+        valid = tmax is not None and -50 < tmax < 200 and not over_hot
+        if over_hot and not st.get('over_hot'):
+            st['over_hot'] = True
+            self.base_event(kind='over_hot', trigger='Miner meldet Over Hot: keine Entscheidung bis zu gültigen Werten')
+            self.note('Over Hot gemeldet: keine Entscheidung bis zu gültigen Werten.')
+        if not over_hot and st.get('over_hot'):
+            st.pop('over_hot')
+            st['start_reason'] = 'nach Over Hot'
 
-    # --- fan: write the target level (at most every FAN_WRITE_GAP_S) ---
-    # a different read level counts only if it was read at least FAN_CONFIRM_S after the last write
-    read_after_write = _age(st.get('fan_read_at'), now) <= _age(st.get('fan_set_at'), now) - FAN_CONFIRM_S
-    differs = target_fan != st.get('fan_set') or (st.get('fan_read') is not None and st['fan_read'] != target_fan
-                                                   and read_after_write)
-    if differs and _age(st.get('fan_set_at'), now) >= FAN_WRITE_GAP_S:
-        try:
-            ac.set_fan_level(dev_id, fport, target_fan)
-            if target_fan != st.get('fan_set'):
-                _note(st, now, 'Lüfter Stufe %d gesetzt.' % target_fan)
-            st['fan_set'] = target_fan
-            st['fan_set_at'] = _iso(now)
-            # read back FAN_CONFIRM_S after the write (earlier the controller still reports the old level)
-            st['fan_read_at'] = _iso(now - timedelta(seconds=FAN_READ_S - FAN_CONFIRM_S))
-        except ac.ACError as exc:
-            st['ac_error'] = str(exc)
-    return st
+        if valid:
+            self.t = int(round(tmax))
+            temps = [x for x in st.get('temps') or [] if _age(x[0], now) <= TEMP_KEEP_S]
+            st['temps'] = temps
+            st['t'] = self.t
+            st['tendency'], self.ref = self.tendency()
+            temps.append([_iso(now), self.t])
+            self.update_thermal()
+        if st.get('fan_target') is None:
+            st['fan_target'] = st.get('fan_set') or self.base
+
+        # Start (Kapitel 4): braucht keine Temperatur, nur gemeldete Takte; nicht während Takt-Messung und Over Hot
+        if st.get('start_reason') and not cal and not over_hot and m['points']:
+            self.start(st['start_reason'])
+        elif st.get('start_reason') and cal:
+            self.set_fan_target(self.base, 'Takt-Messung: Basisstufe')
+
+        if not cal and not over_hot:
+            self.confirm_pending()
+            # Miner hat den Takt selbst geändert (Takt laut Miner > gesetzt + 25 MHz): gesetzten Takt erneut senden
+            if (not self.busy() and st.get('clock_set') and st['clock_now']
+                    and st['clock_now'] > st['clock_set'] + OVERRIDE_MHZ):
+                self.base_event(kind='firmware_takt', trigger='Takt laut Miner %.0f MHz, gesetzt %s MHz'
+                                % (st['clock_now'], st['clock_set']))
+                self.note('Miner hat den Takt selbst geändert (%.0f MHz laut Miner): %s MHz erneut.'
+                          % (st['clock_now'], st['clock_set']))
+                current = level_of(m['mode_key'])
+                level = required_level(st['clock_set'], current)
+                q = []
+                if level != current:
+                    q.append({'kind': 'modus', 'value': level, 'why': 'Takt erneut: Modus'})
+                q.append({'kind': 'takt', 'value': int(round(st['clock_set'])),
+                          'why': 'Miner hat den Takt geändert: erneut senden'})
+                st['queue'] = q
+            # Wirkung des letzten Schritts am Ende seines Fensters
+            ls = st.get('last_step')
+            if valid and ls and ls.get('effect') is None and self.window_over() and st.get('window_until'):
+                ls['effect'] = self.t - (ls.get('t0') if ls.get('t0') is not None else self.t)
+        if valid:
+            self.rules()
+        self.write_fan()                                   # Lüfter vor den (möglicherweise langsamen) Miner-Befehlen
+        if not cal and not over_hot:
+            self.resend_or_send()
+            if valid:
+                self.learn()
+        self.read_fan()
+        st['phase'] = self.phase()
+        st['window_active'] = bool(st.get('window_until')) and _age(st['window_until'], now) < 0
+        p = st.get('pending')
+        self.j.cycle(recorded_at=now, phase=st['phase'], chip_temp=self.t, boards=st.get('boards'),
+                     tendency=st.get('tendency') if valid else None, clock_set=st.get('clock_set'),
+                     clock_reported=st.get('clock_now'), points=st.get('points'), mode_key=m['mode_key'] or '',
+                     base_level=self.base, fan_level=st.get('fan_set'), fan_read=st.get('fan_read'),
+                     power_w=m.get('power'), ghsspd_ths=(m['ghsspd'] / 1000.0) if m.get('ghsspd') else None,
+                     dh_pct=m.get('dh'), status=(m['status'] or '')[:40], window_active=st['window_active'],
+                     learn_since=st.get('learn_since'),
+                     pending=('%s %s' % (p['kind'], p['value'])) if p else '',
+                     decision=' · '.join(self.decisions)[:200] if self.decisions else ('Over Hot' if over_hot else
+                                                                                         ('' if valid else 'Chiptemperatur ungültig')),
+                     log=self.cycle_log)
+        return st
+
+
+def step(row, now, ac, journal=None):
+    """One round for one automation row; returns the new state."""
+    return Round(row, now, ac, journal or automation_journal.MemoryJournal()).run()
 
 
 def run_fan_automation(database_url, ac=None):
@@ -519,20 +1013,23 @@ def run_fan_automation(database_url, ac=None):
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 "SELECT f.id, f.enabled, f.ac_dev_id, f.ac_port, f.level, f.level_at, f.maintenance_at, f.state, "
-                "d.ip_address, d.port, "
+                "d.id AS device_id, d.ip_address, d.port, "
                 "d.connection_config, EXISTS (SELECT 1 FROM calibration_runs r WHERE r.device_id = d.id "
                 "AND r.status IN ('running', 'cancelling', 'finishing')) AS cal_active "
                 "FROM fan_automation f JOIN devices d ON d.id = f.device_id "
                 "WHERE f.enabled OR NOT COALESCE((f.state->>'off')::boolean, false)")
             rows = cur.fetchall()
+        jconn = automation_journal.connect(database_url) if rows else None
         for row in rows:
+            journal = automation_journal.Journal(jconn, row['device_id'])
             try:
-                state = step(row, _now(), ac or load_ac())
+                state = step(row, _now(), ac or load_ac(), journal)
                 state.pop('last_error', None)
             except (OSError, RuntimeError, ValueError, KeyError, TypeError, IndexError, AttributeError) as exc:
+                logger.exception('Temperatur-Automatik: Fehler')
                 state = dict(row['state'] or {})
                 state['last_error'] = '%s: %s' % (_now().strftime('%H:%M:%S UTC'), str(exc)[:200])
-                logger.info('Temperatur-Automatik: %s', exc)
+                journal.event(kind='fehler', trigger='Fehler in der Regelung', ok=False, error=str(exc)[:2000])
             with conn.cursor() as cur:
                 cur.execute("UPDATE fan_automation SET state = %s WHERE id = %s", (json.dumps(state), row['id']))
                 if state.pop('maint_end', False):

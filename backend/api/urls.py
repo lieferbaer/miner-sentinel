@@ -1,7 +1,7 @@
 from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 
-from . import fan_views, live_views, views
+from . import automation_log_views, fan_views, live_views, views
 
 router = DefaultRouter()
 
@@ -61,6 +61,12 @@ urlpatterns = [
     path('fans/test/', fan_views.fans_test, name='fans-test'),
     path('fans/session/', fan_views.fans_session, name='fans-session'),
     path('fans/automation/', fan_views.fans_automation, name='fans-automation'),
+    # Protokoll der Temperatur-Automatik
+    path('automation/log/', automation_log_views.log_list, name='automation-log'),
+    path('automation/log/stats/', automation_log_views.log_stats, name='automation-log-stats'),
+    path('automation/log/<int:pk>/', automation_log_views.log_detail, name='automation-log-detail'),
+    path('automation/cycles/', automation_log_views.cycles, name='automation-cycles'),
+    path('automation/export.csv', automation_log_views.export_csv, name='automation-export'),
     path('live/', live_views.live, name='live'),
     # Authentication endpoints
     path('auth/csrf/', views.csrf_token_view, name='csrf-token'),

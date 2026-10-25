@@ -564,13 +564,13 @@ class DeviceViewSet(viewsets.ModelViewSet):
         from django.utils.dateparse import parse_datetime
         seen_at = parse_datetime(live['seen_at']) if live.get('seen_at') else None
         stock_avg = prof.get('avg_mhz')
-        auto = FanAutomation.objects.filter(device=device, enabled=True).first()
-        set_mhz, set_by = self._last_set_clock(device, active, auto)
+        auto = FanAutomation.objects.filter(device=device).first()
+        set_mhz, set_by = self._last_set_clock(device, auto)
         return {
             'supported': True,
             'set_mhz': set_mhz,
             'set_by': set_by,
-            'automation_active': bool(auto),
+            'automation_active': bool(auto and auto.enabled),
             'calibration_paused': CalibrationRun.objects.filter(device=device, status='paused').exists(),
             'min_mhz': round(stock_avg * self.THROTTLE_FLOOR) if stock_avg else None,
             'max_mhz': round(stock_avg) if stock_avg else None,
@@ -611,13 +611,12 @@ class DeviceViewSet(viewsets.ModelViewSet):
             'family': self._throttle_family(device),
         }
 
-    def _last_set_clock(self, device, active, auto):
-        """(MHz, by) of the clock MinerSentinel set last - manual throttle, Takt-Messung or Temperatur-Automatik,
-        whichever was latest; (None, None) if the firmware's own clocks are in effect."""
+    def _last_set_clock(self, device, auto):
+        """(MHz, by) of the clock MinerSentinel set last on the A15 - Takt-Messung or Temperatur-Automatik,
+        whichever was latest; (None, None) if the firmware's own clocks are in effect. (The A15 has no
+        Drosselung since 24.10.)"""
         from django.utils.dateparse import parse_datetime
         candidates = []
-        if active and active.get('clock_mhz') is not None:
-            candidates.append((active.get('last_change_at') or active.get('set_at'), active['clock_mhz'], 'Drosselung'))
         run = CalibrationRun.objects.filter(device=device).order_by('-created_at').first()
         rst = (run.state or {}) if run else {}
         if run and run.status in self.CAL_ACTIVE:
@@ -629,14 +628,39 @@ class DeviceViewSet(viewsets.ModelViewSet):
         elif run and run.finished_at:
             candidates.append((run.finished_at.isoformat(), None, 'Takt-Messung'))  # run ended: firmware clocks
         ast = (auto.state or {}) if auto else {}
-        if auto and ast.get('changed_at'):
-            # clock_set None: the automation gave the clocks back to the firmware (stock clock)
-            candidates.append((ast['changed_at'], ast.get('clock_set'), 'Automatik'))
+        if ast.get('clock_changed_at') and (auto.enabled or self._auto_clock_kept(device, ast)):
+            # also when the automation is off: its clock stays as it is (Automatik aus sends no clock)
+            candidates.append((ast['clock_changed_at'], ast.get('clock_set'), 'Automatik'))
         dated = [(parse_datetime(at), mhz, by) for at, mhz, by in candidates if at and parse_datetime(at)]
         if not dated:
             return None, None
         _, mhz, by = max(dated, key=lambda c: c[0])
         return (mhz, by) if mhz is not None else (None, None)
+
+    AUTO_OFF_TOL_MHZ = 25      # as OVERRIDE_MHZ of the data-service: the miner runs another clock
+    AUTO_OWN_SWITCH_S = 120    # as OWN_SWITCH_S of the data-service: a restart this soon follows its own mode switch
+
+    @staticmethod
+    def _auto_clock_kept(device, ast):
+        """Automatik aus: the data-service no longer reads the miner, so its clock counts only while the miner
+        (as the throttle controller last read it) still runs it - not after a restart or a mode switch."""
+        from django.utils.dateparse import parse_datetime
+        seen = ((device.connection_config or {}).get('throttle') or {}).get('last_seen') or {}
+        points, clock = seen.get('points'), ast.get('clock_set')
+        if points and clock and abs(sum(points) / len(points) - clock) > DeviceViewSet.AUTO_OFF_TOL_MHZ:
+            return False
+        if seen.get('mode_key') and ast.get('mode_key') and seen['mode_key'] != ast['mode_key']:
+            return False                                        # mode switched since: its stock clock
+        try:
+            changed, at = parse_datetime(ast['clock_changed_at']), parse_datetime(seen.get('at') or '')
+        except (TypeError, ValueError):
+            return True
+        elapsed = seen.get('elapsed')
+        if changed and at and isinstance(elapsed, (int, float)):
+            booted = at - timedelta(seconds=elapsed)
+            if booted > changed + timedelta(seconds=DeviceViewSet.AUTO_OWN_SWITCH_S):
+                return False                                    # restarted since: the firmware's own clocks
+        return True
 
     @staticmethod
     def _throttle_keep_measured(device, st):
@@ -659,7 +683,8 @@ class DeviceViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['get', 'post'], url_path='throttle')
     def throttle(self, request, pk=None):
-        """GET: throttle state. POST {target_ths} or {reset: true}."""
+        """GET: throttle state (A15: display only). POST {target_ths} or {reset: true} - Nano 3S and Avalon Q;
+        the Drosselung of the A15 is abolished (24.10.), its clock is set by the Temperatur-Automatik."""
         device = self.get_object()
         if device.protocol != Device.PROTOCOL_CGMINER_TCP:
             return Response({'supported': False})
@@ -669,8 +694,10 @@ class DeviceViewSet(viewsets.ModelViewSet):
             if not seen or not seen['supported']:
                 return Response({'supported': False})
             return Response(self._throttle_payload(device, seen))
-        # a running Takt-Messung blocks; with the Temperatur-Automatik a manual clock is allowed: it overrides
-        # the automation's clock control (the automation then regulates the fan) until it is lifted
+        if self._throttle_family(device) == 'a15':
+            return Response({'error': 'Die Drosselung des A15 ist abgeschafft; den Takt regelt die '
+                                      'Temperatur-Automatik.'}, status=status.HTTP_400_BAD_REQUEST)
+        # a running Takt-Messung blocks
         if CalibrationRun.objects.filter(device=device, status__in=self.CAL_RUNNING).exists():
             return Response({'error': 'Takt-Messung läuft – Drosseln ist gesperrt.'}, status=status.HTTP_409_CONFLICT)
         try:
@@ -690,31 +717,12 @@ class DeviceViewSet(viewsets.ModelViewSet):
         stock = prof['points']
         now = timezone.now().isoformat()
 
-        # Temperatur-Automatik on (possible while a run is paused): lifting the throttle sends no clock,
-        # the automation continues from the current clock in its small steps (no jump to the stock clock)
-        handover = bool(request.data.get('reset')) and FanAutomation.objects.filter(device=device, enabled=True).exists()
         if request.data.get('reset'):
-            target_points = None if handover else stock
+            target_points = stock
             st['active'] = None
             st['last_event'] = {'type': 'reset', 'detail': 'Drosselung aufgehoben', 'at': now,
                                 'target_ths': active.get('target_ths') if active else None,
                                 'clock_mhz': active.get('clock_mhz') if active else None}
-        elif self._throttle_family(device) == 'a15':
-            # A15: manual clock (MHz); the data-service stores a measured point after 15 min unchanged
-            stock_avg = sum(stock) / len(stock)
-            lo, hi = stock_avg * self.THROTTLE_FLOOR, stock_avg
-            try:
-                clock = float(str(request.data.get('clock_mhz')).replace(',', '.'))
-            except (TypeError, ValueError):
-                return Response({'error': 'Bitte einen Takt in MHz angeben.'}, status=status.HTTP_400_BAD_REQUEST)
-            if not lo <= clock <= hi:
-                return Response({'error': 'Erlaubt sind {:.0f}–{:.0f} MHz.'.format(lo, hi)},
-                                status=status.HTTP_400_BAD_REQUEST)
-            factor = clock / stock_avg
-            target_points = [min(max(int(round(p * factor)), int(p * self.THROTTLE_FLOOR)), p) for p in stock]
-            st['active'] = {'clock_mhz': round(clock, 1), 'profile': pkey, 'applied_points': target_points,
-                            'set_at': now, 'last_change_at': now, 'status': 'manual', 'steps': 0}
-            st['last_event'] = None
         else:
             max_ths = prof.get('measured_max_ths')
             if not max_ths:
@@ -736,17 +744,16 @@ class DeviceViewSet(viewsets.ModelViewSet):
                             'set_at': now, 'last_change_at': now, 'status': 'adjusting', 'steps': 0}
             st['last_event'] = None
 
-        if target_points is not None:
-            command = json.dumps({'command': 'ascset',
-                                  'parameter': '0,frequency,{}-0-0'.format(':'.join(str(v) for v in target_points))})
-            try:
-                reply = _cgminer_command(device.ip_address, device.port, command, timeout=8)
-            except OSError as exc:
-                return Response({'error': 'Miner nicht erreichbar: {}'.format(exc)},
-                                status=status.HTTP_502_BAD_GATEWAY)
-            if 'set OK' not in reply:
-                return Response({'error': 'Der Miner hat den Wert abgelehnt.', 'device_reply': reply},
-                                status=status.HTTP_502_BAD_GATEWAY)
+        command = json.dumps({'command': 'ascset',
+                              'parameter': '0,frequency,{}-0-0'.format(':'.join(str(v) for v in target_points))})
+        try:
+            reply = _cgminer_command(device.ip_address, device.port, command, timeout=8)
+        except OSError as exc:
+            return Response({'error': 'Miner nicht erreichbar: {}'.format(exc)},
+                            status=status.HTTP_502_BAD_GATEWAY)
+        if 'set OK' not in reply:
+            return Response({'error': 'Der Miner hat den Wert abgelehnt.', 'device_reply': reply},
+                            status=status.HTTP_502_BAD_GATEWAY)
         if st.get('active'):
             # the firmware ramps the clock over several seconds; the controller adopts
             # the settled values once this window has passed

@@ -13,6 +13,7 @@ import DeviceDetails from '@/pages/DeviceDetails';
 import LoginPage from '@/pages/LoginPage';
 import MiningDashboard from '@/pages/MiningDashboard';
 import OverviewDashboard from '@/pages/OverviewDashboard';
+import ProtocolPage from '@/pages/ProtocolPage';
 import SettingsPage from '@/pages/SettingsPage';
 import { Navigate, Route, BrowserRouter as Router, Routes } from 'react-router-dom';
 
@@ -61,6 +62,7 @@ function AppRoutes() {
           <Route path="/analytics" element={<AnalyticsDashboard />} />
           <Route path="/takt-tabellen" element={<CalibrationPage />} />
           <Route path="/luefter" element={<FansPage />} />
+          <Route path="/protokoll" element={<ProtocolPage />} />
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>

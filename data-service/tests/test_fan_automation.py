@@ -1,13 +1,17 @@
-"""Temperatur-Automatik (A15 + AC Infinity fan): clock keeps TMax 80-84 degC, fan fixed at the chosen level."""
+"""Temperatur-Automatik nach dem Plan vom 24.10.2026: Basisstufe fest, Takt regelt 80-84 °C, Protokoll je Zyklus."""
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
+import automation_journal
 import calibration
 import fan_automation as fa
+import miner_cache
 
-T0 = datetime(2026, 10, 21, 12, 0, tzinfo=timezone.utc)
-STOCK = [360, 360, 360]
+T0 = datetime(2026, 10, 24, 12, 0, tzinfo=timezone.utc)
+STOCK = {'2/L4': [330, 349, 369, 390], '2/L3': [351, 370, 390, 411], '2/L2': [371, 390, 410, 431],
+         '2/L1': [391, 410, 430, 451], '2/L0': [411, 430, 450, 471]}
+PROFILES = {k: {'points': STOCK[k]} for k in ('2/L4', '2/L3', '2/L0')}     # 01 und 02 kennt nur der Miner
 
 
 class FakeAC:
@@ -17,28 +21,59 @@ class FakeAC:
     def __init__(self, level=5):
         self.level = level
         self.writes = []
+        self.power = []
+        self.fail = False
 
     def speed_of(self, dev_id, port):
         return self.level
 
     def set_fan_level(self, dev_id, port, level):
+        if self.fail:
+            raise self.ACError('Cloud nicht erreichbar')
         self.writes.append(level)
         self.level = level
+        return {'code': 200}
+
+    def set_fan_power(self, dev_id, port, on, level=None):
+        self.power.append(('an' if on else 'aus', level))
+        if on and level is not None:
+            self.level = level
 
 
 class Miner:
-    def __init__(self, tmax=82.0, points=None):
+    """The A15 as the automation sees it: TMax, the four clock points (SF0), the power level, uptime."""
+
+    def __init__(self, tmax=82, level=4, points=None):
         self.tmax = tmax
-        self.points = list(points or STOCK)
-        self.sets = []
+        self.level = level
+        self.points = list(points or STOCK['2/L4'])
+        self.clock_sets, self.mode_sets = [], []
+        self.elapsed = 1000
+        self.status = 'Work: In Work'
+        self.offline = False
+        self.ignore_clock = False
 
     def read(self, ip, port, fresh=False):
-        return {'fields': {'TMax': str(self.tmax)}, 'points': self.points, 'mode_key': '2/L4',
-                'status': 'Work: In Work', 'elapsed': 1000}
+        if self.offline:
+            raise OSError('timed out')
+        self.elapsed += 5
+        return {'fields': {'TMax': str(self.tmax), 'MTmax': '%s 70 69' % self.tmax}, 'points': list(self.points),
+                'mode_key': '2/L%d' % self.level, 'status': self.status, 'elapsed': self.elapsed,
+                'conf': {'mode': 2, 'power_level': self.level}, 'power': 2000.0, 'ghsspd': 150000.0, 'dh': 1.2}
 
     def set_frequency(self, ip, port, points):
-        self.sets.append(sum(points) / len(points))
-        self.points = list(points)
+        self.clock_sets.append(sum(points) / len(points))
+        if not self.ignore_clock:
+            self.points = list(points)
+        return 'STATUS=S,Msg=ASC 0 set OK'
+
+    def set_mode(self, ip, conf, mode, level):
+        self.mode_sets.append(level)
+        self.level = level
+        self.points = list(STOCK['2/L%d' % level])        # der Moduswechsel stellt den Standardtakt ein
+
+    def clock(self):
+        return round(sum(self.points) / len(self.points))
 
 
 @pytest.fixture
@@ -46,481 +81,566 @@ def miner(monkeypatch):
     mn = Miner()
     monkeypatch.setattr(calibration, 'read_miner', mn.read)
     monkeypatch.setattr(calibration, 'set_frequency', mn.set_frequency)
+    monkeypatch.setattr(calibration, 'a15_set_mode', mn.set_mode)
     return mn
 
 
-def row(state=None, level=5, enabled=True, cal=False):
-    return {'id': 1, 'enabled': enabled, 'ac_dev_id': 'dev', 'ac_port': 1, 'level': level, 'state': state or {},
+def row(state=None, level=5, enabled=True, cal=False, level_at=None, maintenance_at=None):
+    return {'id': 1, 'device_id': 3, 'enabled': enabled, 'ac_dev_id': 'dev', 'ac_port': 1, 'level': level,
+            'level_at': level_at, 'maintenance_at': maintenance_at, 'state': state or {},
             'ip_address': '10.0.0.15', 'port': 4028, 'cal_active': cal,
-            'connection_config': {'throttle': {'profiles': {'2/L4': {'points': STOCK}}}}}
+            'connection_config': {'throttle': {'profiles': PROFILES}}}
 
 
-def run(st, miner, ac, seconds, level=5, cal=False, step_s=fa.RUN_S, start=T0):
-    """Run rounds every step_s seconds; returns the state and the time after the last round."""
-    now = start
-    for _ in range(int(seconds // step_s)):
-        st = fa.step(row(st, level=level, cal=cal), now, ac)
-        now += timedelta(seconds=step_s)
-    return st, now
+class Run:
+    """Rounds every 5 s with one journal; temperature can follow a function of the clock and fan level."""
+
+    def __init__(self, miner, ac, level=5, state=None, journal=None):
+        self.miner, self.ac, self.level = miner, ac, level
+        self.st = state or {}
+        self.now = T0
+        self.j = journal or automation_journal.MemoryJournal()
+        self.kw = {}
+
+    def go(self, seconds, temp=None, **kw):
+        self.kw.update(kw)
+        for _ in range(int(seconds // 5)):
+            if temp is not None:
+                self.miner.tmax = temp(self) if callable(temp) else temp
+            self.st = fa.step(row(self.st, level=self.level, **self.kw), self.now, self.ac, self.j)
+            self.now += timedelta(seconds=5)
+        return self
+
+    def events(self, kind):
+        return [e for e in self.j.events if e['kind'] == kind]
 
 
-def test_in_band_nothing_changes(miner):
-    ac = FakeAC(level=5)
-    st, _ = run({}, miner, ac, 600)
-    assert miner.sets == [] and ac.writes == [] and st['phase'] == 'normal'
-    assert st['clock_now'] == 360.0             # the clock the miner really runs (shown on the page)
-
-
-def test_too_hot_lowers_clock_then_waits(miner):
-    miner.tmax = 87.0
-    ac = FakeAC(level=5)
-    st, _ = run({}, miner, ac, 170)
-    assert miner.sets == [330.0]                 # protection: 3 degC over 84 -> 20 MHz + 10 MHz, then 3 min wait
-    assert ac.writes == [6]                      # > 84 degC: fan +1 (protection) as well
-
-
-def test_cool_raises_clock_up_to_stock(miner):
-    miner.tmax = 76.0
-    miner.points = [300, 300, 300]
-    ac = FakeAC(level=5)
-    st, _ = run({}, miner, ac, 15 * 60)
-    assert miner.sets[0] == 305.0 and max(miner.sets) <= 360          # 76 degC: +5 MHz (fine from below)
-
-
-def test_protection_88_and_90(miner):
-    ac = FakeAC(level=5)
-    miner.tmax = 86.0
-    st, now = run({}, miner, ac, 30)
-    assert ac.writes[-1] == 6                                    # > 84 degC: +1 level
-    miner.tmax = 88.5
-    st, now = run(st, miner, ac, 60, start=now)
-    assert ac.writes[-1] == 7 and miner.sets[-1] == miner.sets[-2] - 30   # >= 88: +2 levels, -30 MHz
-    miner.tmax = 90.5
-    st, now = run(st, miner, ac, 60, start=now)
-    assert ac.writes[-1] == 8                                    # >= 90: +3 levels
-    miner.tmax = 83.0
-    st, now = run(st, miner, ac, 90, start=now)
-    assert ac.writes[-1] == 8                                    # still above 80: protection stays
-    miner.tmax = 79.0
-    st, now = run(st, miner, ac, 60, start=now)
-    assert ac.writes[-1] == 5                                    # <= 80 degC: back to the chosen level
-
-
-def test_lower_fan_only_after_clock_and_wait(miner):
-    ac = FakeAC(level=7)
-    miner.tmax = 83.0
-    st, now = run({}, miner, ac, 60, level=7)
-    assert st['base'] == 7
-    st = fa.step(row(st, level=4), now, ac)
-    assert st['phase'] == 'senken' and ac.writes == []
-    # clock goes down until TMax <= 80, the fan stays at 7 meanwhile
-    for i in range(1, 40):
-        if miner.sets:
-            miner.tmax = 79.5
-        st = fa.step(row(st, level=4), now + timedelta(seconds=15 * i), ac)
-        if ac.writes:
-            break
-    assert miner.sets and miner.sets[0] < 360
-    assert ac.writes == [4]
-    assert (15 * i) >= fa.WAIT_S                                 # applied only after the wait
-
-
-def test_higher_fan_at_once(miner):
-    ac = FakeAC(level=4)
-    st, now = run({}, miner, ac, 60, level=4)
-    st = fa.step(row(st, level=8), now, ac)
-    assert ac.writes == [8]
-
-
-def test_calibration_run_no_clocks_fan_holds_80(miner):
-    ac = FakeAC(level=5)
-    miner.tmax = 83.0
-    st, now = run({}, miner, ac, 400, cal=True)
-    assert miner.sets == []                      # no clock changes during a run
-    assert ac.writes and ac.writes[0] == 6       # fan up to bring TMax to 80
-    miner.tmax = 77.0
-    st, _ = run(st, miner, ac, 400, cal=True, start=now)
-    assert ac.writes[-1] < 6
-
-
-def test_disable_keeps_the_clock(miner):
-    """21.10.: switching the automation off set the stock clocks at fan level 2 -> 3.670 W, 111 degC, Over Hot."""
-    miner.tmax = 87.0
-    ac = FakeAC(level=5)
-    st, now = run({}, miner, ac, 60)
-    assert st['clock_set']
-    sets = list(miner.sets)
-    st = fa.step(row(st, enabled=False), now, ac)
-    assert miner.sets == sets and st['off'] is True                 # no clock sent (stays as a throttle)
-    assert 'als Drosselung' in st['log'][-1][1]
-
-
-def test_ac_error_keeps_clock_regulation(miner):
-    class BrokenAC(FakeAC):
-        def speed_of(self, dev_id, port):
-            raise self.ACError('Cloud nicht erreichbar')
-
-    miner.tmax = 87.0
-    st = fa.step(row({'base': 5, 'seen_at': 'x', 'fan_set': 5}), T0, BrokenAC())
-    for i in range(1, 4):
-        st = fa.step(row(st), T0 + timedelta(seconds=15 * i), BrokenAC())
-    assert miner.sets and 'Cloud' in st['ac_error']
-
-
-def _throttled_row(st, level=5):
-    r = row(st, level=level)
-    r['connection_config']['throttle']['active'] = {'clock_mhz': 300.0}
+def started(miner, ac, level=5, tmax=82, learned=None):
+    """Automatik ein (Basisstufe `level`) and the start clock taken over."""
+    r = Run(miner, ac, level)
+    if learned:
+        r.st = {'v': fa.STATE_VERSION, 'seen_at': T0.isoformat(), 'learned': learned, 'level_seen': 'x'}
+        r.kw['level_at'] = 'klick'
+    miner.tmax = tmax
+    r.go(10)
     return r
 
 
-def test_manual_clock_fan_holds_80(miner):
+# ---------------------------------------------------------------- Start (Kapitel 4)
+
+def test_start_without_learned_value_uses_initial_value(miner):
     ac = FakeAC(level=5)
-    miner.tmax = 83.0                                 # higher manual clock: warmer
-    st, now = {}, T0
-    for i in range(30):
-        st = fa.step(_throttled_row(st), now, ac)
-        now += timedelta(seconds=5)
-    assert miner.sets == [] and st['throttled'] is True and st['phase'] == 'manuell'
-    assert ac.writes[:2] == [6, 7]                    # fan up (> 81 degC), 60 s apart
-    miner.tmax = 76.0                                 # lower manual clock: the fan may go below the chosen level
-    for i in range(60):
-        st = fa.step(_throttled_row(st), now, ac)
-        now += timedelta(seconds=5)
-    assert ac.writes[-1] < 5
+    r = started(miner, ac, level=5)
+    assert [round(x) for x in miner.clock_sets] == [140]                 # Stufe 5 = 140 MHz, Modus 04 passt schon
+    assert miner.mode_sets == [] and r.st['clock_set'] == 140 and r.st['phase'] == 'normal'
+    assert r.events('start')[0]['details']['quelle'] == 'Initialwert'
+    assert r.events('takt')[0]['takeover_state'] == 'gemessen'
 
 
-def test_lifting_manual_clock_returns_to_chosen_level(miner):
+def test_start_uses_learned_value_of_the_base_level(miner):
+    ac = FakeAC(level=3)
+    r = started(miner, ac, level=3, learned={'3': {'mhz': 250, 'temp_avg': 82.0, 'at': 'x', 'count': 2}})
+    assert r.st['clock_set'] == 250 and miner.clock() == 250
+    assert r.events('start')[-1]['details']['quelle'] == 'Lernwert'
+
+
+def test_start_with_mode_change_sets_mode_first(miner):
+    ac = FakeAC(level=4)
+    r = started(miner, ac, level=4, learned={'4': {'mhz': 390, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    assert miner.mode_sets == [2]                      # 390 MHz → mode 02 (Tabelle ohne Spielraum)
+    assert r.st['stock']['2/L2'] == STOCK['2/L2']      # Standardtakt von mode 02 beim Wechsel gemerkt
+    assert miner.clock() == 390
+    kinds = [k for k in r.j.kinds() if k in ('modus', 'takt')]
+    assert kinds == ['modus', 'takt']
+
+
+def test_no_clock_command_when_miner_already_runs_the_target(miner):
     ac = FakeAC(level=5)
-    miner.tmax = 83.0
-    st, now = {}, T0
-    for i in range(20):
-        st = fa.step(_throttled_row(st), now, ac)
-        now += timedelta(seconds=5)
-    assert ac.writes[-1] >= 6                         # fan above the chosen level
-    miner.tmax = 79.0
-    for i in range(int((fa.WAIT_S + 60) / 5)):        # throttle lifted: back to level 5 (clock first, fan later)
-        st = fa.step(row(st), now, ac)
-        now += timedelta(seconds=5)
-    assert ac.writes[-1] == 5 and st['phase'] == 'normal'
+    miner.points = fa.points_for(STOCK['2/L4'], 140)
+    r = started(miner, ac, level=5)
+    assert miner.clock_sets == []                      # Zieltakt = Takt laut Miner: kein Befehl
+    assert r.events('takt')[0]['details']['kein_befehl']
 
 
-def test_protection_uses_latest_reading(miner):
+def test_old_state_starts_without_learned_values(miner):
+    ac = FakeAC(level=2)
+    old = {'learned': {'2/L4': {'2': {'mhz': 241}}}, 'seen_at': 'x', 'phase': 'normal', 'clock_set': 231}
+    r = Run(miner, ac, level=2, state=old).go(10)
+    assert r.st['v'] == fa.STATE_VERSION and r.st['learned'] == {}
+    assert [round(x) for x in miner.clock_sets] == [110]                 # neue Regelung startet ohne Lernwerte: Stufe 2 = 110
+
+
+def test_click_on_level_starts_again(miner):
     ac = FakeAC(level=5)
-    miner.tmax = 82.0
-    st, now = run({}, miner, ac, 60)
-    miner.tmax = 89.0                                # one hot reading is enough for the protection
-    st = fa.step(row(st), now, ac)
-    assert st['t_now'] == 89.0 and st['boost'] == 2 and ac.writes[-1] == 7
+    r = started(miner, ac, level=5)
+    r.level = 3
+    r.go(10, level_at='neu')
+    assert miner.clock() == 120 and r.st['fan_target'] == 3 and ac.level == 3
 
 
-def test_learns_clock_after_10_quiet_minutes(miner):
-    ac = FakeAC(level=3)
-    miner.tmax = 82.0
-    miner.points = [234, 234, 234]
-    st, _ = run({}, miner, ac, 11 * 60, level=3)
-    assert st['learned']['2/L4']['3'] == {'mhz': 234.0, 'at': st['learned']['2/L4']['3']['at'], 'source': 'laut Miner'}
-    assert miner.sets == []                           # not set by the automation: the miner's value
+# ---------------------------------------------------------------- Schritt 1: hohe Chiptemperatur
 
-
-def test_learns_the_set_clock_not_the_drifted_one(miner):
-    ac = FakeAC(level=3)
-    miner.tmax = 86.0
-    st, now = run({}, miner, ac, 20, level=3)
-    assert miner.sets == [330.0]                      # automation set 330 MHz (protection: 20 + 10 MHz)
-    miner.points = [336, 336, 336]                    # the firmware drifts the clock up
-    miner.tmax = 80.0                                 # <= 80 ends the protection, 80-84 is quiet
-    st, _ = run(st, miner, ac, 11 * 60, level=3, start=now)
-    assert st['learned']['2/L4']['3']['mhz'] == 330.0 and st['learned']['2/L4']['3']['source'] == 'gesetzt'
-
-
-def test_lowering_uses_learned_clock(miner):
+def test_high_temperature_fan_and_clock_at_once(miner):
     ac = FakeAC(level=5)
-    miner.tmax = 82.0
-    learned = {'2/L4': {'3': {'mhz': 234.0, 'at': 'x'}}}
-    st, now = run({'learned': learned}, miner, ac, 60, level=5)
-    st['learned'] = learned
-    st = fa.step(row(st, level=3), now, ac)
-    assert miner.sets == [234.0] and ac.writes == []           # clock straight to the learned value
-    st, now = run(st, miner, ac, fa.WAIT_S + 10, level=3, start=now + timedelta(seconds=5))
-    assert ac.writes == [3]                                     # fan follows after 3 min
+    r = started(miner, ac, level=5, learned={'5': {'mhz': 300, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    r.go(5, temp=86)
+    assert ac.level == 6 and r.st['phase'] == 'korrektur'        # Basisstufe + 1
+    assert miner.clock() == 280                                   # 300 − 20 sofort
+    r.go(25, temp=86)
+    assert miner.clock() == 280                                   # Beobachtungsfenster 30 s
+    r.go(10, temp=86)
+    assert miner.clock() == 260                                   # noch über der Schwelle, nicht fallend: erneut
+    r.go(40, temp=lambda r: 86 if r.now < T0 + timedelta(seconds=105) else 85)
+    assert miner.clock() in (250, 240)                            # fallend → keine weitere Korrektur in diesem Fenster
 
 
-def test_raising_uses_learned_clock_after_fan(miner):
+def test_fan_correction_relative_to_base_not_added(miner):
     ac = FakeAC(level=3)
-    miner.tmax = 82.0
-    miner.points = [234, 234, 234]
-    learned = {'2/L4': {'5': {'mhz': 300.0, 'at': 'x'}}}
-    st, now = run({'learned': learned}, miner, ac, 60, level=3)
-    st['learned'] = learned
-    st = fa.step(row(st, level=5), now, ac)
-    assert ac.writes == [5] and miner.sets == []               # fan at once
-    st, now = run(st, miner, ac, fa.RAISE_DELAY_S + 10, level=5, start=now + timedelta(seconds=5))
-    assert miner.sets == [300.0]                               # learned clock 60 s later
+    r = started(miner, ac, level=3, learned={'3': {'mhz': 300, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    r.go(5, temp=85)
+    assert ac.level == 4
+    r.go(5, temp=90)
+    assert ac.level == 5                                          # Basisstufe + 2, nicht 4 + 2
+    r.go(5, temp=94)
+    assert ac.level == 5
 
 
-def test_fan_read_back_after_10_s_no_double_write(miner):
-    class LaggingAC(FakeAC):
-        """The controller reports a new level only after > 5 s."""
-        def __init__(self, level):
-            super().__init__(level)
-            self.reported = level
-            self.changed = None
-
-        def set_fan_level(self, dev_id, port, level):
-            super().set_fan_level(dev_id, port, level)
-            self.changed = self.now
-
-        def speed_of(self, dev_id, port):
-            if self.changed is not None and (self.now - self.changed).total_seconds() > 5:
-                self.reported = self.level
-            return self.reported
-
-    ac = LaggingAC(level=3)
-    miner.tmax = 82.0
-    st, now = run({}, miner, ac, 30, level=3)
-    for i in range(30):                                       # level 5 chosen, 150 s of rounds
-        ac.now = now + timedelta(seconds=5 * i)
-        st = fa.step(row(st, level=5), ac.now, ac)
-    assert ac.writes == [5]                                   # no second write because of a stale read
-    assert st['fan_read'] == 5
+def test_lower_correction_level_only_after_30_s(miner):
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, learned={'5': {'mhz': 300, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    r.go(5, temp=88)
+    assert ac.level == 7
+    r.go(25, temp=87)
+    assert ac.level == 7                                          # 87 verlangt + 1: erst nach 30 s
+    r.go(10, temp=87)
+    assert ac.level == 6
 
 
-def test_calibration_fan_down_at_78_after_60_s(miner):
-    ac = FakeAC(level=3)
-    miner.tmax = 83.0
-    st, now = run({}, miner, ac, 30, cal=True)
-    assert ac.writes == [4]                                   # > 81 degC: +1 at once
-    miner.tmax = 78.0
-    st, now = run(st, miner, ac, 30, cal=True, start=now)
-    assert ac.writes == [4]                                   # within 60 s: no change
-    st, now = run(st, miner, ac, 40, cal=True, start=now)
-    assert ac.writes == [4, 3]                                # <= 78 degC after 60 s: -1
-    miner.tmax = 80.0
-    st, now = run(st, miner, ac, 300, cal=True, start=now)
-    assert ac.writes == [4, 3]                                # 78-81 degC: no change
+def test_clock_below_100_is_an_error_and_not_sent(miner):
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, learned={'5': {'mhz': 120, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    sends = len(miner.clock_sets)
+    r.go(5, temp=86)                                              # 120 − 20 = 100: erlaubt
+    assert miner.clock() == 100
+    r.go(35, temp=87)                                             # 100 − 20 = 80: Fehler, nicht senden
+    assert len(miner.clock_sets) == sends + 1 and r.st['clock_set'] == 100
+    assert r.events('fehler')[0]['details']['grund'] == 'takt_unter_100'
 
 
-def test_after_run_learned_clock_at_once(miner):
-    ac = FakeAC(level=3)
-    miner.tmax = 79.0
-    miner.points = [120, 120, 120]                            # run ended at a low clock
-    learned = {'2/L4': {'3': {'mhz': 231.0, 'at': 'x'}}}
-    st, now = run({}, miner, ac, 30, level=3, cal=True)
-    st['learned'] = learned
-    st, now = run(st, miner, ac, fa.RAISE_DELAY_S + 20, level=3, start=now)   # run over
-    assert miner.sets and miner.sets[0] == 231.0              # learned clock, not 10-MHz steps
+def test_high_temperature_with_mode_change_clock_first_then_mode_then_clock(miner):
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, learned={'5': {'mhz': 400, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    assert miner.level == 2 and miner.clock() == 400
+    miner.clock_sets.clear()
+    r.go(15, temp=88)                                             # 400 − 30 = 370 → mode 03 (Spielraum: bei 370 runter)
+    assert miner.mode_sets[-1] == 3 and miner.level == 3
+    assert miner.clock_sets[0] == pytest.approx(370, abs=1) and miner.clock() == 370
+    assert len(miner.clock_sets) == 2                             # Takt, Modus, Takt erneut
 
 
-def test_calibration_protection_at_90_at_once(miner):
-    ac = FakeAC(level=1)
-    miner.tmax = 79.0
-    st, now = run({}, miner, ac, 30, cal=True)
-    miner.tmax = 95.0                                         # firmware stock clocks at a low fan level
-    st = fa.step(row(st, cal=True), now, ac)
-    st = fa.step(row(st, cal=True), now + timedelta(seconds=5), ac)
-    assert ac.writes and ac.writes[-1] >= 3                   # +2 at once, no 60 s wait
+# ---------------------------------------------------------------- Schritt 2: Korrekturphase und Rückkehr
+
+def test_return_after_one_minute_in_band(miner):
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, learned={'5': {'mhz': 300, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    r.go(5, temp=85)
+    assert ac.level == 6
+    r.go(55, temp=83)
+    assert ac.level == 6
+    r.go(15, temp=83)
+    assert ac.level == 5 and r.st['phase'] == 'normal'
+    assert r.events('rueckkehr')
 
 
-def test_start_clock_bounds():
-    learned = {'2/L4': {'3': {'mhz': 231.0}, '5': {'mhz': 300.0}}}
-    assert fa._start_clock(learned, '2/L4', 2, 261.0)[0] == 231.0    # lower level: at most level 3's value
-    assert fa._start_clock(learned, '2/L4', 2, 200.0)[0] is None     # already below: keep
-    assert fa._start_clock(learned, '2/L4', 4, 200.0)[0] == 231.0    # higher level: at least level 3's value
-    assert fa._start_clock(learned, '2/L4', 4, 260.0)[0] is None     # between 3 and 5: keep
-    bad = {'2/L4': {'2': {'mhz': 280.0}, '3': {'mhz': 231.0}}}
-    assert fa._start_clock(bad, '2/L4', 2, 250.0)[0] == 231.0        # own value above level 3's: capped
+def test_return_at_once_below_80(miner):
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, learned={'5': {'mhz': 300, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    r.go(5, temp=85)
+    r.go(5, temp=79)
+    assert r.st['phase'] == 'normal' and r.st['fan_target'] == 5
 
 
-def test_lowering_without_own_value_caps_at_higher_level(miner):
-    ac = FakeAC(level=3)
-    miner.tmax = 82.0
-    miner.points = [261, 261, 261]
-    learned = {'2/L4': {'3': {'mhz': 231.0, 'at': 'x'}}}
-    st, now = run({}, miner, ac, 30, level=3)
-    st['learned'] = learned
-    st = fa.step(row(st, level=2), now, ac)
-    assert miner.sets == [231.0] and ac.writes == []          # clock first, never above level 3's value
-    miner.tmax = 79.0
-    st, now = run(st, miner, ac, fa.WAIT_S + 10, level=2, start=now + timedelta(seconds=5))
-    assert ac.writes == [2]                                    # fan after 3 min
+def test_no_plus_steps_in_correction_phase(miner):
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, learned={'5': {'mhz': 300, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    r.go(5, temp=86)
+    clock = miner.clock()
+    r.go(50, temp=82)                                             # in 80-84, noch keine Minute: keine Plus-Schritte
+    assert miner.clock() == clock and r.st['phase'] == 'korrektur'
 
 
-def test_no_clock_raise_right_after_fan_change():
-    old = (T0 - timedelta(seconds=600)).isoformat()
-    st = {'changed_at': old, 'fan_set_at': (T0 - timedelta(seconds=60)).isoformat()}
-    assert fa._clock_step(st, T0, 78.0, 78.0, 300.0, 360.0, fa.T_HIGH, False) is None   # fan changed 60 s ago
-    st['fan_set_at'] = old
-    assert fa._clock_step(st, T0, 78.0, 78.0, 300.0, 360.0, fa.T_HIGH, False) == 302.0   # 78 degC: +2 MHz
-    st['fan_set_at'] = (T0 - timedelta(seconds=60)).isoformat()
-    assert fa._clock_step(st, T0, 86.0, 86.0, 300.0, 360.0, fa.T_HIGH, False) == 280.0  # lowering stays at once
+# ---------------------------------------------------------------- Schritt 3: Feintuning (Kapitel 6)
+
+def test_fine_minus_by_tendency(miner):
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, learned={'5': {'mhz': 300, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    r.go(40, temp=82)
+    assert miner.clock() == 300                                  # stabil: keine Änderung
+    r.go(5, temp=83)
+    assert miner.clock() == 299                                  # Tendenz +1 → −1
+    r.go(25, temp=83)
+    r.go(15, temp=84)
+    assert miner.clock() == 297                                  # nach −1 im nächsten Fenster weiter steigend → −2
 
 
-def test_drifting_firmware_protection_settles(miner):
-    """21.10.: the firmware drifts a set clock up ~11 MHz; regulating from the reported clock ate every -10 MHz
-    step, so the protection lifted the fan 40 times in 5 h. Now the steps add up and the fan stays at level 2."""
-    ac = FakeAC(level=2)
-    state = {'set': 225.0, 'rep': 225.0}
-
-    def set_frequency(ip, port, points):
-        miner.sets.append(sum(points) / len(points))
-        state['set'] = miner.sets[-1]
-
-    miner.set_frequency = set_frequency
-    calibration.set_frequency = set_frequency
-    st, now = {}, T0
-    for i in range(int(2 * 3600 / 5)):
-        state['rep'] = min(state['set'] + 11, state['rep'] + 0.2) if state['rep'] < state['set'] + 11 \
-            else state['set'] + 11
-        miner.points = [state['rep']] * 3
-        miner.tmax = 82 + (state['rep'] - 210) * 0.15 - 3 * (ac.level - 2)
-        st = fa.step(row(st, level=2), now, ac)
-        now += timedelta(seconds=5)
-    assert ac.writes.count(3) <= 2, (ac.writes, [round(x) for x in miner.sets], st['log'][-6:])
-    assert ac.level == 2 and st['boost'] == 0, (ac.writes, [round(x) for x in miner.sets], st['log'][-6:])
+def test_fine_plus_steps_by_temperature(miner):
+    for temp, step in ((79, 1), (77, 2), (72, 5), (65, 20), (55, 40)):
+        miner.clock_sets.clear()
+        ac = FakeAC(level=5)
+        r = started(miner, ac, level=5, tmax=temp, learned={'5': {'mhz': 200, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+        r.go(40, temp=temp)
+        assert miner.clock() == 200 + step, temp
 
 
-def test_click_on_level_sets_learned_clock_at_once(miner):
-    ac = FakeAC(level=1)
-    miner.tmax = 82.0
-    miner.points = [150, 150, 150]
-    learned = {'2/L4': {'2': {'mhz': 196.0, 'at': 'x'}}}
-    st, now = run({}, miner, ac, 30, level=1)
-    st['learned'] = learned
-    r = row(st, level=2)
-    r['level_at'] = '2026-10-21T12:00:30+00:00'
-    st = fa.step(r, now, ac)
-    assert miner.sets == [196.0] and ac.writes == [2]          # higher level: clock and fan at once
-    st = fa.step(dict(r, state=st), now + timedelta(seconds=5), ac)
-    assert miner.sets == [196.0]                               # the same click only once
-    miner.points = [207, 207, 207]                             # the firmware drifted
-    st['clock_set'], st['clock_own'] = 215.0, True             # the automation had gone up meanwhile
-    r2 = dict(r, state=st, level_at='2026-10-21T12:10:00+00:00')
-    st = fa.step(r2, now + timedelta(seconds=10), ac)
-    assert miner.sets[-1] == 196.0                             # clicking the same level again: back to 196
+def test_no_plus_step_while_rising(miner):
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, tmax=70, learned={'5': {'mhz': 200, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    r.go(40, temp=lambda r: 70 + int((r.now - T0).total_seconds() // 10))
+    assert miner.clock() == 200
 
 
-def test_raise_steps_fine_from_below():
-    assert [fa._raise_step(t) for t in (79.5, 78.0, 77.0, 75.0, 74.0)] == [2, 2, 5, 5, 10]
+def test_plus_step_smaller_after_strong_effect(miner):
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, tmax=72, learned={'5': {'mhz': 200, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    r.go(35, temp=72)
+    assert miner.clock() == 205                                  # 70-75 → +5
+    r.go(30, temp=lambda r: 74 if r.now < T0 + timedelta(seconds=75) else 73)   # +2 °C nach dem Schritt
+    r.go(10, temp=73)
+    assert miner.clock() == 207                                  # nächster Schritt eine Größe kleiner: +2
 
 
-def test_ceiling_blocks_raising_to_a_clock_that_needed_protection():
-    old = (T0 - timedelta(seconds=1200)).isoformat()
-    st = {'changed_at': old, 'fan_set_at': old,
-          'ceiling': {'2/L4': {'2': {'mhz': 174.0, 'at': (T0 - timedelta(seconds=600)).isoformat()}}}}
-    ceil = fa._ceiling(st, '2/L4', 2, T0)
-    assert ceil == 174.0
-    assert fa._clock_step(st, T0, 74.0, 74.0, 164.0, 360.0, fa.T_HIGH, False, ceil) == 172.0     # below 174
-    assert fa._clock_step(st, T0, 74.0, 74.0, 172.0, 360.0, fa.T_HIGH, False, ceil) is None      # at the ceiling
-    assert fa._ceiling(st, '2/L4', 2, T0 + timedelta(seconds=fa.CEILING_S)) is None              # expires
+# ---------------------------------------------------------------- Modus (Kapitel 8)
+
+def test_mode_up_at_361_and_down_only_at_350(miner):
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, tmax=79, learned={'5': {'mhz': 360, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    assert miner.level == 4
+    r.go(40, temp=79)                                            # +1 → 361 → mode 03 zuerst
+    assert miner.level == 3 and miner.clock() == 361
+    st = r.st
+    st['clock_set'] = 352
+    assert fa.required_level(352, 3) == 3 and fa.required_level(350, 3) == 4
+    assert fa.required_level(361, 4) == 3 and fa.required_level(360, 4) == 4
+    assert fa.required_level(370, 2) == 3 and fa.required_level(371, 2) == 2
+    assert fa.table_level(360) == 4 and fa.table_level(361) == 3 and fa.table_level(440) == 0
 
 
-def _power_model_run(start_set, T_start, hours=3.0, seed=1):
-    """Thermal model calibrated on 21.10.: set 164 MHz = 1774 W ~ 80 degC, +226 W jump at set ~174 MHz,
-    0.03 degC/W, fan level ~3 degC, tau 95 s, firmware drift +11 MHz, TMax integer + noise."""
-    import math
-    import random
-    random.seed(seed)
-    ac = FakeAC(level=2)
-    sim = {'set': start_set, 'rep': start_set + 11, 'T': T_start, 'age': 999.0, 'reading': round(T_start)}
-    cuts = []
-
-    def setf(ip, port, points):
-        sim['set'], sim['age'] = sum(points) / len(points), 0.0
-
-    def read(ip, port, fresh=False):
-        return {'fields': {'TMax': str(sim['reading'])}, 'points': [sim['rep']] * 4, 'mode_key': '2/L4',
-                'status': 'Work: In Work', 'elapsed': 1000}
-
-    orig = (calibration.set_frequency, calibration.read_miner, fa._note)
-    calibration.set_frequency, calibration.read_miner = setf, read
-    fa._note = lambda st, now, text: (cuts.append(text) if 'dauerhaft' in text else None, orig[2](st, now, text))
-    try:
-        st, now, last_boost, protections, worst = {}, T0, 0, 0, 0
-        for i in range(int(hours * 3600 / 5)):
-            sim['age'] += 5
-            sim['rep'] = sim['set'] + 11 * (1 - math.exp(-sim['age'] / 120))
-            p = 1774 + 4.0 * (sim['rep'] - 175) + ((226 + 2.5 * (sim['rep'] - 182)) if sim['rep'] >= 182 else 0)
-            T_eq = 80.0 + 0.03 * (p - 1774) - 3 * (ac.level - 2)
-            sim['T'] += (T_eq - sim['T']) * (1 - math.exp(-5 / 95))
-            if i % 2 == 0:
-                sim['reading'] = round(sim['T'] + random.uniform(-0.7, 0.7))
-            st = fa.step(row(st, level=2), now, ac)
-            boost = int(st.get('boost') or 0)
-            protections += 1 if boost and not last_boost else 0
-            last_boost, worst = boost, max(worst, sim['reading'])
-            now += timedelta(seconds=5)
-        return protections, len(cuts), worst, ac.level
-    finally:
-        calibration.set_frequency, calibration.read_miner, fa._note = orig
+def test_clock_capped_at_440(miner):
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, tmax=55, learned={'5': {'mhz': 430, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    r.go(40, temp=55)
+    assert r.st['clock_set'] == 440 and miner.level == 0
 
 
-def test_power_jump_no_protection_loop():
-    """21.10. 09:24/09:45: 164 -> 174 MHz added 226 W, protection, back to 164, again and again."""
-    protections, cuts, worst, level = _power_model_run(164, 80.0)
-    assert protections <= 1 and cuts <= 1 and worst < 88 and level == 2
+# ---------------------------------------------------------------- Schritt 5: Ausnahme
+
+def test_exception_lowers_fan_stepwise_after_3_minutes(miner):
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, tmax=60, learned={'5': {'mhz': 440, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    r.go(170, temp=60)
+    assert ac.level == 5
+    r.go(15, temp=60)
+    assert ac.level == 4 and r.st['phase'] == 'ausnahme'
+    r.go(185, temp=60)
+    assert ac.level == 3
+    r.go(10, temp=72)                                            # über 70: Ende, Stufe bleibt reduziert
+    assert r.st['phase'] == 'normal' and ac.level == 3 and r.events('ausnahme_ende')
+    r.go(5, temp=85)                                             # zurück nur über „Hohe Chiptemperaturen“
+    assert ac.level == 6
 
 
-def test_protection_cuts_not_too_fast():
-    """21.10. 08:14-08:35: five permanent cuts within 21 min (204 -> 164 MHz)."""
-    protections, cuts, worst, level = _power_model_run(204, 84.0)
-    assert cuts <= 2 and level == 2
+# ---------------------------------------------------------------- Lernen (Kapitel 7)
+
+def test_learns_after_15_minutes_unchanged(miner):
+    ac = FakeAC(level=4)
+    r = started(miner, ac, level=4, learned={'4': {'mhz': 280, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    r.go(15 * 60 + 30, temp=82)
+    lw = r.st['learned']['4']
+    assert lw['mhz'] == 280 and lw['count'] == 2 and lw['temp_avg'] == 82.0
+    assert r.events('lernwert')
 
 
-def test_after_reboot_start_clock_at_once(miner):
-    """21.10.: after switching the A15 off and on it ran its full stock clocks at fan level 2 (simulated: 93 degC)."""
-    ac = FakeAC(level=2)
-    miner.tmax = 82.0
-    miner.points = [175, 175, 175]
-    learned = {'2/L4': {'2': {'mhz': 164.0, 'at': 'x', 'source': 'gesetzt'}}}
-    st, now = run({'learned': learned}, miner, ac, 30, level=2)
-    st['learned'] = learned
-    boot = {'fields': {'TMax': '-273'}, 'points': [], 'mode_key': '2/L4', 'status': 'Init', 'elapsed': 5}
-    calibration.read_miner = lambda ip, port, fresh=False: boot              # booting: no clocks yet
-    st = fa.step(row(st, level=2), now, ac)
-    assert st.get('exit_learned') and miner.sets == []                       # kept until clocks are reported
-    boot.update(points=[360, 360, 360], elapsed=40)                          # firmware stock clocks, TMax still -273
-    st = fa.step(row(st, level=2), now + timedelta(seconds=5), ac)
-    assert miner.sets == [164.0]                                             # start clock at once
+def test_clock_step_restarts_learning_noted_in_the_step(miner):
+    ac = FakeAC(level=4)
+    r = started(miner, ac, level=4, learned={'4': {'mhz': 280, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    r.go(300, temp=82)
+    r.go(5, temp=83)
+    step = [e for e in r.events('takt') if (e.get('details') or {}).get('schritt') == -1][0]
+    assert step['details']['lernperiode_neu_gestartet'] is True
 
 
-def test_firmware_override_set_again(miner):
-    ac = FakeAC(level=2)
-    miner.tmax = 82.0
-    st, now = run({}, miner, ac, 30, level=2)
-    st.update(clock_set=164.0, clock_own=True, changed_at=(now - timedelta(seconds=120)).isoformat())
-    miner.points = [360, 360, 360]                                           # firmware applied its stock clocks
-    st = fa.step(row(st, level=2), now, ac)
-    assert miner.sets[-1] == 164.0
+# ---------------------------------------------------------------- Situationen
+
+def test_firmware_clock_change_is_sent_again(miner):
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, learned={'5': {'mhz': 250, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    miner.points = list(STOCK['2/L4'])                           # Miner fährt wieder seinen Standardtakt
+    r.go(10, temp=82)
+    assert miner.clock() == 250 and r.events('firmware_takt')
 
 
-class PowerAC(FakeAC):
-    def __init__(self, level):
-        super().__init__(level)
-        self.events = []
+def test_restart_of_the_miner_starts_again(miner):
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, learned={'5': {'mhz': 250, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    r.go(60, temp=82)
+    miner.elapsed = 10
+    miner.points = list(STOCK['2/L4'])
+    r.go(10, temp=82)
+    assert r.events('neustart') and r.events('start')[-1]['trigger'] == 'Neustart des Miners'
+    assert miner.clock() == 250
 
-    def set_fan_power(self, dev_id, port, on, level=None):
-        self.events.append(('an' if on else 'aus', level))
-        if on and level is not None:
-            self.level = level
+
+def test_restart_caused_by_own_mode_switch_is_not_a_restart(miner):
+    ac = FakeAC(level=4)
+    r = started(miner, ac, level=4, learned={'4': {'mhz': 390, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    assert not r.events('neustart')
+
+
+def test_calibration_run_no_clock_fan_only_for_high_temperature(miner):
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, learned={'5': {'mhz': 250, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    sends = len(miner.clock_sets)
+    r.go(60, temp=70, cal=True)
+    assert len(miner.clock_sets) == sends and r.st['phase'] != 'korrektur'
+    r.go(5, temp=88)
+    assert ac.level == 7 and len(miner.clock_sets) == sends      # Lüfter reagiert, kein Takt
+    r.go(10, temp=82, cal=False)
+    assert r.events('messung_ende') and r.events('start')[-1]['trigger'] == 'nach Takt-Messung'
+
+
+def test_over_hot_no_decision_then_start(miner):
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, learned={'5': {'mhz': 250, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    miner.status = 'Over Hot'
+    sends = len(miner.clock_sets)
+    r.go(30, temp=95)
+    assert len(miner.clock_sets) == sends and r.events('over_hot')
+    miner.status = 'Work: In Work'
+    r.go(10, temp=80)
+    assert r.events('start')[-1]['trigger'] == 'nach Over Hot'
+
+
+def test_miner_offline_fan_unchanged(miner):
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5)
+    miner.offline = True
+    writes = list(ac.writes)
+    r.go(30)
+    assert ac.writes == writes and len(r.events('miner_offline')) == 1
+    assert r.j.cycles[-1]['decision'] == 'Miner antwortet nicht'
+
+
+def test_automation_off_sends_no_clock(miner):
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5)
+    sends = len(miner.clock_sets)
+    r.go(30, enabled=False)
+    assert len(miner.clock_sets) == sends and r.st['phase'] == 'aus' and r.st['off']
+
+
+def test_fan_error_retried_until_it_works(miner):
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, learned={'5': {'mhz': 250, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    ac.fail = True
+    r.go(5, temp=86)
+    assert ac.level == 5 and r.st['ac_error']
+    r.go(25, temp=86)
+    ac.fail = False
+    r.go(25, temp=86)
+    assert ac.level == 6
+    tries = r.events('luefter')
+    assert [t['ok'] for t in tries][-2:] == [False, True] or tries[-1]['ok']
 
 
 def test_maintenance_fan_off_and_back(miner):
-    import miner_cache
     ip = '10.0.0.15'
-    ac = PowerAC(level=2)
-    miner.tmax = 82.0
+    ac = FakeAC(level=2)
+    r = started(miner, ac, level=2)
     miner_cache.put(ip, 'estats', 'x')
-    st, now = run({}, miner, ac, 30, level=2)
-    maint = (now - timedelta(seconds=1)).isoformat()
-    r = dict(row(st, level=2), maintenance_at=maint)
-    st = fa.step(r, now, ac)
-    assert ac.events == [] and st['maint']['since'] == maint          # still on: no fan command yet
-    miner_cache.clear(ip)                                              # switched off: no central reading
-    st = fa.step(dict(r, state=st), now + timedelta(seconds=20), ac)
-    assert ac.events == [('aus', None)] and st['phase'] == 'wartung'
-    st = fa.step(dict(r, state=st), now + timedelta(seconds=25), ac)
-    assert ac.events == [('aus', None)]                                # only once
-    miner_cache.put(ip, 'estats', 'x')                                 # on again
-    st = fa.step(dict(r, state=st), now + timedelta(seconds=600), ac)
-    assert ac.events[-1] == ('an', 2) and st.get('maint_end') and 'maint' not in st
+    maint = (r.now - timedelta(seconds=1)).isoformat()
+    r.go(5, maintenance_at=maint)
+    assert ac.power == []
     miner_cache.clear(ip)
+    r.go(10)
+    assert ac.power == [('aus', None)] and r.st['phase'] == 'wartung'
+    miner_cache.put(ip, 'estats', 'x')
+    r.go(5)
+    assert ac.power[-1] == ('an', 2) and r.st.get('maint_end') and r.st.get('maint_ended_at')
+    miner_cache.clear(ip)
+
+
+# ---------------------------------------------------------------- Protokoll
+
+def test_every_round_is_recorded(miner):
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5)
+    r.go(60, temp=82)
+    assert len(r.j.cycles) == 14
+    c = r.j.cycles[-1]
+    assert c['chip_temp'] == 82 and c['clock_set'] == 140 and c['base_level'] == 5 and c['mode_key'] == '2/L4'
+
+
+def test_thermal_response_10_values_every_30_s(miner):
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5)
+    r.go(310, temp=82)
+    takt = r.events('takt')[0]
+    assert len(takt['thermal']) == 10 and takt['takeover_state'] == 'gemessen'
+    assert takt['api_ms'] is not None and takt['request'].startswith('ascset 0,frequency,')
+
+
+def test_mode_command_never_logs_pool_credentials(miner):
+    ac = FakeAC(level=4)
+    r = started(miner, ac, level=4, learned={'4': {'mhz': 390, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    modus = r.events('modus')[0]
+    assert 'passwd' not in modus['request'] and modus['request'].startswith('mode=2, power_level=02')
+
+
+# ---------------------------------------------------------------- Simulation (Schätzmodell, keine Messwerte)
+
+def _sim(level, room=0.0, hours=2.0, start_clock=200):
+    """Annahmen: Gleichgewicht 60 °C + 2 °C je 10 MHz über 200 − 10 °C je Lüfterstufe über 5 + Raum,
+    Zeitkonstante 120 s, Messwert ganzzahlig."""
+    import math
+    mn = Miner(tmax=70, points=fa.points_for(STOCK['2/L4'], start_clock))
+    ac = FakeAC(level=level)
+    calibration.read_miner, calibration.set_frequency, calibration.a15_set_mode = mn.read, mn.set_frequency, mn.set_mode
+    r = Run(mn, ac, level)
+    temp = [75.0]
+    peak = [0]
+
+    def model(run):
+        eq = 60 + 2 * (mn.clock() - 200) / 10 - 10 * (ac.level - 5) + room(run) if callable(room) else \
+            60 + 2 * (mn.clock() - 200) / 10 - 10 * (ac.level - 5) + room
+        temp[0] += (eq - temp[0]) * (1 - math.exp(-5 / 120))
+        peak[0] = max(peak[0], temp[0])
+        return int(round(temp[0]))
+    r.go(hours * 3600, temp=model)
+    return r, peak[0], mn
+
+
+def test_simulation_reaches_band_and_stays_safe(miner):
+    r, peak, mn = _sim(5)
+    assert peak < 86
+    band = [c for c in r.j.cycles[-360:] if 80 <= (c['chip_temp'] or 0) <= 84]
+    assert len(band) > 300                                       # letzte 30 min fast nur im Zielbereich
+    assert r.st['learned'].get('5')
+
+
+def test_simulation_room_plus_15_corrects(miner):
+    r, peak, mn = _sim(5, room=lambda run: 15 if run.now >= T0 + timedelta(hours=1) else 0)
+    assert peak < 88 and r.st['fan_target'] == 5
+
+
+# ---------------------------------------------------------------- Befunde der Prüfung (25.10.)
+
+def test_start_after_restart_even_with_invalid_temperature(miner):
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, learned={'5': {'mhz': 250, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    r.go(30, temp=82)
+    miner.elapsed = 10
+    miner.points = list(STOCK['2/L4'])
+    r.go(5, temp=-273)                                            # booting: TMax noch ungültig
+    assert r.events('start')[-1]['trigger'] == 'Neustart des Miners' and miner.clock() == 250
+
+
+def test_alternating_84_85_corrects_at_most_once_per_window(miner):
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, learned={'5': {'mhz': 300, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    r.go(30, temp=lambda r: 85 if int((r.now - T0).total_seconds() // 5) % 2 else 84)
+    assert miner.clock() == 290                                   # nur die erste Korrektur, danach Fenster/Tendenz
+
+
+def test_entering_band_from_below_is_no_minus_step(miner):
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, tmax=79, learned={'5': {'mhz': 250, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    r.go(35, temp=79)
+    assert miner.clock() == 251
+    r.go(40, temp=80)
+    assert miner.clock() == 251                                   # 79 → 80 ist das Erreichen des Ziels, kein −1
+
+
+def test_minus_two_only_right_after_a_minus_one(miner):
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, learned={'5': {'mhz': 300, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    r.go(40, temp=82)
+    r.go(5, temp=83)
+    assert miner.clock() == 299
+    r.go(600, temp=83)                                            # lange stabil
+    r.go(5, temp=84)
+    assert miner.clock() == 298                                   # wieder −1, nicht −2
+
+
+def test_phase_messung_during_calibration(miner):
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5)
+    r.go(10, temp=82, cal=True)
+    assert r.st['phase'] == 'messung' and r.j.cycles[-1]['phase'] == 'messung'
+
+
+def test_plus_steps_shrink_from_the_last_step(miner):
+    assert fa.smaller_plus(5) == 2 and fa.smaller_plus(2) == 1 and fa.smaller_plus(1) == 1
+
+
+def test_superseded_command_is_not_measured(miner):
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, learned={'5': {'mhz': 300, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    miner.ignore_clock = True
+    r.go(40, temp=82)
+    r.go(5, temp=83)                                              # −1 gesendet, Miner übernimmt nicht
+    r.go(25, temp=83)                                             # nach 20 s erneut gesendet
+    takt = [e for e in r.events('takt') if e.get('clock_new') == 299]
+    assert len(takt) >= 2 and takt[0]['takeover_state'] == 'nicht gemessen' and takt[-1]['attempt'] == 2
+
+
+def test_switch_to_new_logic_keeps_maintenance_and_does_not_loop(miner):
+    ip = '10.0.0.15'
+    ac = FakeAC(level=2)
+    maint = (T0 - timedelta(hours=1)).isoformat()
+    old = {'maint': {'since': maint, 'seen_off': True, 'fan_off': True, 'fan_before': 2}, 'fan_set': 2,
+           'phase': 'wartung', 'learned': {'2/L4': {'2': {'mhz': 241}}}}
+    miner_cache.clear(ip)
+    r = Run(miner, ac, level=2, state=old)
+    r.go(30, maintenance_at=maint)                                # A15 aus
+    assert ac.power == [] and r.st['v'] == fa.STATE_VERSION       # Lüfter war schon aus: kein neuer Befehl
+    assert len([n for n in r.st['log'] if 'Automatik ein' in n[1]]) == 1
+    miner_cache.put(ip, 'estats', 'x')
+    r.go(5)
+    assert ac.power[-1] == ('an', 2) and r.st.get('maint_end')
+    miner_cache.clear(ip)
+
+
+def test_missing_stock_clock_is_estimated_and_never_blocks(miner):
+    ac = FakeAC(level=5)
+    miner.level, miner.points = 1, list(STOCK['2/L1'])           # mode 01: kein Profil, kein gemerkter Standardtakt
+    r = started(miner, ac, level=5, learned={'5': {'mhz': 410, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    assert miner.clock() == 410
+    r.go(5, temp=86)
+    assert miner.clock() == 390 and r.events('fehler')[0]['details']['grund'] == 'standardtakt_fehlt'
+
+
+def test_stock_is_taken_only_after_the_firmware_applied_it(miner, monkeypatch):
+    ac = FakeAC(level=4)
+
+    def slow_mode(ip, conf, mode, level):                         # Webseite meldet den Modus, SF0 noch alt
+        miner.mode_sets.append(level)
+        miner.level = level
+    monkeypatch.setattr(calibration, 'a15_set_mode', slow_mode)
+    r = started(miner, ac, level=4, learned={'4': {'mhz': 390, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    assert '2/L2' not in (r.st.get('stock') or {}) and miner.clock_sets == []   # wartet auf den Standardtakt
+    miner.points = list(STOCK['2/L2'])                            # jetzt hat die Firmware ihn eingestellt
+    r.go(10, temp=82)
+    assert r.st['stock']['2/L2'] == STOCK['2/L2'] and miner.clock() == 390
+
+
+def test_fan_read_error_retried_only_after_60_s(miner):
+    calls = []
+    ac = FakeAC(level=5)
+
+    def broken(dev_id, port):
+        calls.append(1)
+        raise ac.ACError('Timeout')
+    ac.speed_of = broken
+    r = started(miner, ac, level=5)
+    r.go(55, temp=82)
+    assert len(calls) == 1

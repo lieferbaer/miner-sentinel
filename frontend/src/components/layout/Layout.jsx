@@ -24,6 +24,7 @@ import {
   LogOut,
   Menu,
   Moon,
+  ScrollText,
   Settings,
   Sun,
   Table,
@@ -88,6 +89,12 @@ const NAV_SECTIONS = [
         icon: Fan,
         match: (p) => p === '/luefter',
       },
+      {
+        path: '/protokoll',
+        label: 'Protokoll',
+        icon: ScrollText,
+        match: (p) => p === '/protokoll',
+      },
     ],
   },
   {
@@ -128,6 +135,10 @@ const PAGE_META = {
   '/luefter': {
     title: 'Lüfter',
     description: 'AC Infinity: Controller, Ports und Test der Lüftersteuerung',
+  },
+  '/protokoll': {
+    title: 'Protokoll',
+    description: 'Temperatur-Automatik: Ereignisse, Befehle, Reaktionszeiten und Verlauf',
   },
   '/settings': {
     title: 'Settings',

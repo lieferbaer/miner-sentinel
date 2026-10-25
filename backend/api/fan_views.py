@@ -1,18 +1,30 @@
 """Lüfter (AC Infinity) test page: show controllers/ports, back up settings, test which write variant works."""
 import json
+import logging
 import time
-from datetime import timedelta
 
+from django.db import DatabaseError, transaction
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from . import acinfinity as ac
-from .models import Device, DeviceSystemInfo, FanAutomation
+from .models import AutomationLog, Device, DeviceSystemInfo, FanAutomation
+
+logger = logging.getLogger(__name__)
 
 READ_BACK_S = 5       # user choice (was 10); measured: the controller reports a new speed only after > 5 s
+# fan_automation.state as written by the data-service (data-service/fan_automation.py) that the page reads
+STATE_KEYS = ('phase', 't', 'tendency', 'boards', 'clock_set', 'clock_changed_at', 'clock_now', 'mode_key',
+              'stock_mhz', 'fan_target', 'fan_set', 'fan_read', 'fan_read_at', 'fan_set_at', 'window_until',
+              'window_active', 'learn_since', 'cal', 'over_hot', 'offline', 'ac_error', 'last_error', 'seen_at',
+              'exc_active')
+PENDING_KEYS = ('kind', 'value', 'sent_at', 'attempt')
+STATE_FRESH_S = 15    # the data-service writes the state every 5 s (only while it reads the miner)
+TMAX_FRESH_S = 30     # the collector writes the chip temperatures every 10 s
 
 
 def _a15():
@@ -32,24 +44,33 @@ def _automation():
     return dev, auto
 
 
+def _latest_tmax(dev):
+    """(hottest chip, MTmax per board, time) as the overview shows it (latest MTmax of the collector, every 10 s)."""
+    row = DeviceSystemInfo.objects.filter(device=dev).order_by('-recorded_at').values('details', 'recorded_at').first()
+    boards = ((row or {}).get('details') or {}).get('chip_temp_boards') or []
+    valid = [b for b in boards if isinstance(b, (int, float)) and -50 < b < 200]
+    return (max(valid) if valid else None), boards, (row or {}).get('recorded_at')
+
+
 def automation_payload():
     dev, auto = _automation()
     if not auto:
         return None
     st = auto.state or {}
-    # the same value as the overview (latest MTmax of the collector, every 10 s)
-    row = DeviceSystemInfo.objects.filter(device=dev).order_by('-recorded_at').values('details', 'recorded_at').first()
-    boards = ((row or {}).get('details') or {}).get('chip_temp_boards') or []
-    valid = [b for b in boards if isinstance(b, (int, float)) and -50 < b < 200]
+    tmax, boards, at = _latest_tmax(dev)
+    pending = st.get('pending') if isinstance(st.get('pending'), dict) else None
+    state = {k: st.get(k) for k in STATE_KEYS}
+    state['base'] = auto.level
+    state['pending'] = {k: pending.get(k) for k in PENDING_KEYS} if pending else None
     return {
-        'now': {'tmax': max(valid) if valid else None, 'boards': boards, 'at': (row or {}).get('recorded_at')},
+        'now': {'tmax': tmax, 'boards': boards, 'at': at},
         'device': {'id': dev.id, 'name': dev.name}, 'enabled': auto.enabled, 'dev_id': auto.ac_dev_id,
         'maintenance_at': auto.maintenance_at, 'maintenance': st.get('maint') or None,
         'port': auto.ac_port, 'level': auto.level,
-        'state': {k: st.get(k) for k in ('t', 'phase', 'base', 'boost', 'fan_set', 'fan_read', 'fan_read_at',
-                                         'fan_set_at', 'clock_set', 'clock_now', 'stock_mhz', 'changed_at', 'cal', 'cal_fan', 'ac_error',
-                                         'last_error', 'seen_at', 'throttled', 'mode_key', 'raise_to')},
-        'learned': st.get('learned') or {},
+        'state': state,
+        # learned values per fan level ({"<stufe>": {mhz, temp_avg, at, count}}); the former per-mode values
+        # of the old regulation are not shown
+        'learned': {k: v for k, v in (st.get('learned') or {}).items() if isinstance(v, dict) and 'mhz' in v},
         'log': (st.get('log') or [])[-15:][::-1],
     }
 
@@ -59,33 +80,9 @@ def automation_on(dev_id, port):
     return FanAutomation.objects.filter(enabled=True, ac_dev_id=str(dev_id), ac_port=port).exists()
 
 
-def _keep_clock_as_throttle(dev, auto):
-    """Automatik aus: the clock the automation set stays and becomes a manual throttle (Drosselung card), so
-    switching off never applies the firmware's stock clocks at a low fan level (21.10.: 3.670 W, 111 degC)."""
-    from .views import DeviceViewSet
-    st = auto.state or {}
-    clock = st.get('clock_set')
-    if not st.get('clock_own') or not clock:
-        return                                      # the firmware's own clocks are in effect: nothing to keep
-    tst = json.loads(json.dumps((dev.connection_config or {}).get('throttle') or {}))
-    if tst.get('active'):
-        return
-    mode = st.get('mode_key')
-    stock = ((tst.get('profiles') or {}).get(mode) or {}).get('points') or st.get('stock_points')
-    if not stock:
-        return
-    factor = clock / (sum(stock) / len(stock))
-    points = [min(max(int(round(p * factor)), int(p * DeviceViewSet.THROTTLE_FLOOR)), p) for p in stock]
-    now = timezone.now()
-    tst['active'] = {'clock_mhz': round(float(clock), 1), 'profile': mode, 'applied_points': points,
-                     'set_at': now.isoformat(), 'last_change_at': now.isoformat(), 'status': 'manual', 'steps': 0,
-                     'pending_until': (now + timedelta(seconds=60)).isoformat(), 'from_automation': True}
-    tst['last_event'] = None
-    DeviceViewSet()._throttle_save(dev, tst)
-
-
 def _lift_throttle(dev):
-    """A manual clock of the A15 is lifted when the automation takes over the clocks."""
+    """A manual clock of the A15 left from before 24.10. (the Drosselung of the A15 is abolished) is lifted
+    when the automation is switched on."""
     from .views import DeviceViewSet
     st = json.loads(json.dumps((dev.connection_config or {}).get('throttle') or {}))
     active = st.get('active')
@@ -97,6 +94,38 @@ def _lift_throttle(dev):
                         'clock_mhz': active.get('clock_mhz')}
     st['stable_since'] = None
     DeviceViewSet()._throttle_save(dev, st)
+
+
+def _chip_temp_now(dev, st, now):
+    """(chip temperature, tendency) at the time of the user's action: the data-service's values only while it
+    reads the miner (automation on, miner answers) and they are valid (no Over Hot); otherwise the collector's
+    latest value without tendency (null if older than TMAX_FRESH_S)."""
+    try:
+        seen = parse_datetime(st.get('seen_at') or '')
+    except (TypeError, ValueError):
+        seen = None
+    if seen and (now - seen).total_seconds() <= STATE_FRESH_S:
+        if st.get('over_hot'):
+            return None, None                    # readings during Over Hot are not used
+        tendency = st.get('tendency')
+        return st.get('t'), tendency if isinstance(tendency, int) else None
+    tmax, _, at = _latest_tmax(dev)
+    return (tmax if at and (now - at).total_seconds() <= TMAX_FRESH_S else None), None
+
+
+def _user_event(dev, auto, kind, trigger, **fields):
+    """User event in the protocol of the automation (automation_log, source 'nutzer'); phase as the data-service
+    last wrote it. A missing table never blocks the user's action."""
+    st = auto.state or {}
+    now = timezone.now()
+    chip_temp, tendency = _chip_temp_now(dev, st, now)
+    try:
+        with transaction.atomic():
+            AutomationLog.objects.create(
+                device=dev, recorded_at=now, kind=kind, source='nutzer', trigger=trigger,
+                phase=str(st.get('phase') or '')[:16], chip_temp=chip_temp, tendency=tendency, **fields)
+    except DatabaseError as exc:
+        logger.warning('Protokoll: Nutzer-Ereignis %s nicht gespeichert: %s', kind, exc)
 
 
 def _error(exc):
@@ -155,23 +184,32 @@ def fans_automation(request):
             _lift_throttle(dev)
             auto.enabled, auto.ac_dev_id, auto.ac_port, auto.level = True, dev_id, port, level
             auto.level_at = timezone.now()
+            event = ('automatik_ein', 'Nutzer: Automatik eingeschaltet (Basisstufe %d)' % level, {'base_new': level})
         elif action == 'level' and auto.enabled:
-            auto.level, auto.level_at = level, timezone.now()     # the data-service applies the learned clock
+            event = ('basisstufe', 'Nutzer: Basisstufe %d gewählt' % level,
+                     {'base_old': auto.level, 'base_new': level})
+            auto.level, auto.level_at = level, timezone.now()     # the data-service starts with this level
         elif action == 'disable':
+            # Automatik aus: no clock is sent, the clock stays as it is; already off: no entry
+            event = (('automatik_aus', 'Nutzer: Automatik beendet (Takt bleibt, wie er ist)', {})
+                     if auto.enabled else None)
             auto.enabled = False
-            _keep_clock_as_throttle(dev, auto)
         elif action == 'maintenance_start' and not auto.maintenance_at:
             # Wartung: the A15 is switched off by hand; a running Takt-Messung is paused
             from .models import CalibrationRun
             auto.maintenance_at = timezone.now()
             CalibrationRun.objects.filter(device=dev, status='running').update(
                 status='paused', pause_reason='wartung', message='Pausiert (Wartung).', updated_at=timezone.now())
+            event = ('wartung_start', 'Nutzer: Wartung gestartet', {})
         elif action == 'maintenance_end':
+            event = ('wartung_ende', 'Nutzer: Wartung beendet', {}) if auto.maintenance_at else None
             auto.maintenance_at = None
         else:
             return Response({'error': 'Diese Aktion ist gerade nicht möglich.'}, status=status.HTTP_400_BAD_REQUEST)
         auto.updated_at = timezone.now()
         auto.save(update_fields=['enabled', 'ac_dev_id', 'ac_port', 'level', 'level_at', 'maintenance_at', 'updated_at'])
+        if event:
+            _user_event(dev, auto, event[0], event[1], **event[2])
     return Response(automation_payload())
 
 

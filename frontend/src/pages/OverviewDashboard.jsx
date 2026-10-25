@@ -56,8 +56,9 @@ const CHIP_DANGER_C = 110
 const SERIES_REFRESH_MS = 60000
 const EFFECTIVE_CLOCK_INFO =
   'Effektiver Takt: der Durchschnittstakt, den der Miner selbst meldet (Freq, aktualisiert etwa alle 130 s). ' +
-  'Er hängt davon ab, wie viele Chips auf welcher der 4 Takt-Stufen laufen. Drosselung und Lüfter-Automatik ' +
-  'setzen die 4 Takt-Stufen und zeigen deren Mittel – deshalb weichen die Zahlen voneinander ab.'
+  'Er hängt davon ab, wie viele Chips auf welcher der 4 Takt-Stufen laufen. Drosselung (Nano 3S, Avalon Q) sowie ' +
+  'Temperatur-Automatik und Takt-Messung (A15) setzen die 4 Takt-Stufen und zeigen deren Mittel – deshalb weichen ' +
+  'die Zahlen voneinander ab.'
 const FAMILY_MODE_LABELS = { nano: ['Low', 'Medium', 'High'], q: ['Eco', 'Standard', 'Super'] }
 function deviceFamily(device) {
   const text = [device.device_id, device.device_name, device.model].filter(Boolean).join(' ').toLowerCase()

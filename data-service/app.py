@@ -14,6 +14,7 @@ from datetime import datetime, timedelta
 
 import psycopg2
 from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from collectors.avalon_collector import AvalonCollector
 from collectors.bitaxe_collector import BitAxeCollector
@@ -28,6 +29,7 @@ import miner_cache
 from throttle_controller import run_throttle_controller
 from calibration import run_calibration
 from live_reader import READ_S as LIVE_READ_S, run_live_cycle
+import automation_journal
 from decouple import config
 from flask import Flask, jsonify, request
 from notifications.emitter import emit_alert, resolve_open_alerts
@@ -608,6 +610,15 @@ def reschedule_jobs():
         id='check_settings',
         name='Check for settings changes',
         replace_existing=True
+    )
+
+    # Protokoll der Temperatur-Automatik: Einträge älter als 360 Tage löschen, jede Nacht um 03:30
+    scheduler.add_job(
+        func=lambda: automation_journal.prune(DATABASE_URL),
+        trigger=CronTrigger(hour=3, minute=30),
+        id='prune_automation_journal',
+        name='Protokoll der Automatik aufräumen (360 Tage)',
+        replace_existing=True,
     )
 
     # Daily retention prune (metrics / optional alert history)

@@ -3,6 +3,8 @@
  * MinerSentinel sets the PLL clock, then regulates with the measured 15-min
  * hashrate. Reboots and work-mode changes on the miner lift the throttle;
  * it is not re-applied automatically.
+ * A15: no throttle since 24.10. (the Temperatur-Automatik sets the clock) - only the clock status and the mode
+ * buttons.
  */
 import MetricCard from '@/components/metrics/MetricCard'
 import { Button } from '@/components/ui/button'
@@ -53,7 +55,7 @@ function maxText(state) {
   return state.max_ths ? fmt(state.max_ths) + ' TH/s (gemessen)' : 'noch nicht gemessen'
 }
 
-/** A15: manual clock (MHz) instead of a target hashrate. */
+/** A15: clock status and mode buttons only. */
 function isA15(state) {
   return state.family === 'a15'
 }
@@ -93,14 +95,6 @@ function throttleView(state) {
   }
 }
 
-/** A15: when the measured point of the manual clock is (or was) stored. */
-function manualPointText(active) {
-  if (!active || active.clock_mhz == null) return null
-  if (active.manual_measured_at) return 'Messpunkt gespeichert ' + clock(active.manual_measured_at) + ' (Takt-Tabellen › Manuell).'
-  const at = new Date(new Date(active.last_change_at).getTime() + 15 * 60 * 1000).toISOString()
-  return 'Messpunkt wird nach 15 min unverändertem Takt gespeichert (ca. ' + clock(at) + ').'
-}
-
 /** Shared throttle state for one device (status card + control card), from the live poll of the UI. */
 export function useThrottle(deviceId, enabled) {
   const live = useLive()
@@ -117,13 +111,13 @@ export function ThrottleStatusCard({ throttle }) {
   const state = throttle?.state
   if (!state || !state.supported) return null
   const view = throttleView(state)
-  const lifted = !state.active && liftedEvent(state)
+  const lifted = !state.active && !isA15(state) && liftedEvent(state)
   return (
     <MetricCard
       variant="hero"
       layout="icon-left"
       icon={Gauge}
-      label="Drosselung"
+      label={isA15(state) ? 'Takt' : 'Drosselung'}
       value={view.value}
       subtitle={staleText(state) || (lifted ? 'Aufgehoben ' + clock(lifted.at) + ': ' + lifted.detail : view.sub)}
       tone={view.tone === 'warn' || lifted || state.stale ? 'warning' : undefined}
@@ -214,7 +208,7 @@ function ModeSwitch({ deviceId, state, ip, onChanged }) {
   )
 }
 
-/** Control card: enter a target TH/s or lift the throttle. */
+/** Control card: enter a target TH/s or lift the throttle (A15: status and mode buttons only). */
 export default function ThrottleCard({ deviceId, throttle, ip }) {
   const { state, setState, loadError, reload } = throttle
   const [target, setTarget] = useState('')
@@ -232,9 +226,7 @@ export default function ThrottleCard({ deviceId, throttle, ip }) {
         tone: 'ok',
         text: body.reset
           ? 'Drosselung aufgehoben.'
-          : body.clock_mhz != null
-            ? 'Takt ' + fmt(body.clock_mhz, 0) + ' MHz gesetzt.'
-            : 'Ziel ' + fmt(body.target_ths) + ' TH/s gesetzt. Der Miner ist in 1–3 Minuten dort.',
+          : 'Ziel ' + fmt(body.target_ths) + ' TH/s gesetzt. Der Miner ist in 1–3 Minuten dort.',
       })
     } catch (error) {
       setMessage({ tone: 'error', text: error?.response?.data?.error || 'Setzen fehlgeschlagen.' })
@@ -246,25 +238,22 @@ export default function ThrottleCard({ deviceId, throttle, ip }) {
   if (!state || !state.supported) return null
 
   const active = state.active
-  const lifted = liftedEvent(state)
-  const view = throttleView(state)
   const a15 = isA15(state)
-  const unit = a15 ? 'MHz' : 'TH/s'
-  const digits = a15 ? 0 : 1
-  const min = a15 ? state.min_mhz : state.min_ths
-  const max = a15 ? state.max_mhz : state.max_ths
+  const lifted = !a15 && liftedEvent(state)
+  const view = throttleView(state)
+  const min = state.min_ths
+  const max = state.max_ths
   const raw = String(target).trim()
   const targetNumber = parseFloat(raw.replace(',', '.'))
   const inRange = Number.isFinite(targetNumber) && min != null && max != null && targetNumber >= min && targetNumber <= max
-  const hint = raw && !inRange ? 'Bitte einen Wert zwischen ' + fmt(min, digits) + ' und ' + fmt(max, digits) + ' ' + unit + ' eingeben.' : null
-  const pointText = a15 ? manualPointText(active) : null
+  const hint = raw && !inRange ? 'Bitte einen Wert zwischen ' + fmt(min) + ' und ' + fmt(max) + ' TH/s eingeben.' : null
 
   return (
     <Card className="col-span-2">
       <CardHeader className="pb-2">
         <CardTitle className="flex flex-wrap items-center gap-2 text-base font-semibold">
           <Gauge className="h-4 w-4 text-muted-foreground" />
-          Drosselung einstellen
+          {a15 ? 'Takt und Modus' : 'Drosselung einstellen'}
           <span
             className={
               'rounded px-1.5 py-0.5 text-xs font-medium ' +
@@ -284,7 +273,7 @@ export default function ThrottleCard({ deviceId, throttle, ip }) {
       </CardHeader>
       <CardContent className="space-y-2 pt-0">
         {state.stale && <p className="text-xs text-destructive">{staleText(state)}</p>}
-        {state.calibration_active && !state.calibration_paused && (
+        {!a15 && state.calibration_active && !state.calibration_paused && (
           <p className="text-xs text-amber-600">Takt-Messung läuft – Drosseln ist gesperrt (Menü „Takt-Tabellen“).</p>
         )}
         {lifted && !active && (
@@ -294,37 +283,38 @@ export default function ThrottleCard({ deviceId, throttle, ip }) {
             am {clock(lifted.at)}: {lifted.detail}.
           </p>
         )}
-        <form
-          className="flex flex-wrap items-center gap-2"
-          onSubmit={(e) => {
-            e.preventDefault()
-            if (inRange && !busy) apply(a15 ? { clock_mhz: targetNumber } : { target_ths: targetNumber })
-          }}
-        >
-          <Input
-            className="h-9 w-28"
-            inputMode="decimal"
-            placeholder={max ? fmt(min, digits) + '–' + fmt(max, digits) : '—'}
-            value={target}
-            onChange={(e) => setTarget(e.target.value)}
-          />
-          <span className="text-sm text-muted-foreground">{unit}</span>
-          <Button type="submit" size="sm"
-            disabled={busy || !inRange || !max || (state.calibration_active && !state.calibration_paused)}>
-            {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Setzen'}
-          </Button>
-          <Button
-            type="button"
-            size="sm"
-            variant="secondary"
-            disabled={busy || !active}
-            onClick={() => apply({ reset: true })}
+        {!a15 && (
+          <form
+            className="flex flex-wrap items-center gap-2"
+            onSubmit={(e) => {
+              e.preventDefault()
+              if (inRange && !busy) apply({ target_ths: targetNumber })
+            }}
           >
-            Drosselung aufheben
-          </Button>
-        </form>
+            <Input
+              className="h-9 w-28"
+              inputMode="decimal"
+              placeholder={max ? fmt(min) + '–' + fmt(max) : '—'}
+              value={target}
+              onChange={(e) => setTarget(e.target.value)}
+            />
+            <span className="text-sm text-muted-foreground">TH/s</span>
+            <Button type="submit" size="sm"
+              disabled={busy || !inRange || !max || (state.calibration_active && !state.calibration_paused)}>
+              {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Setzen'}
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant="secondary"
+              disabled={busy || !active}
+              onClick={() => apply({ reset: true })}
+            >
+              Drosselung aufheben
+            </Button>
+          </form>
+        )}
         {hint && <p className="text-xs text-amber-600">{hint}</p>}
-        {pointText && <p className="text-xs text-muted-foreground">{pointText}</p>}
         {!a15 && !active && !max && (
           <p className="text-xs text-amber-600">
             Dieser Modus ist noch nicht gemessen. Drosseln ist möglich, sobald das Gerät 15 Minuten ungedrosselt in
@@ -349,11 +339,12 @@ export default function ThrottleCard({ deviceId, throttle, ip }) {
           onChanged={reload}
         />
         <ModesTable state={state} />
-        <p className="text-xs text-muted-foreground">
-          {max && a15 ? 'Erlaubt ' + fmt(min, 0) + '–' + fmt(max, 0) + ' MHz (15–100 % des Standardtakts im aktuellen Modus). ' : ''}
-          {max && !a15 ? 'Erlaubt ' + fmt(min) + '–' + fmt(max) + ' TH/s (20–100 % des gemessenen Maximums im aktuellen Modus). ' : ''}
-          Neustart oder Moduswechsel heben eine Drosselung auf.
-        </p>
+        {!a15 && (
+          <p className="text-xs text-muted-foreground">
+            {max ? 'Erlaubt ' + fmt(min) + '–' + fmt(max) + ' TH/s (20–100 % des gemessenen Maximums im aktuellen Modus). ' : ''}
+            Neustart oder Moduswechsel heben eine Drosselung auf.
+          </p>
+        )}
       </CardContent>
     </Card>
   )
