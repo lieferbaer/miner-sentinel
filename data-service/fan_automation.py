@@ -49,6 +49,7 @@ FAN_DOWN_DELAY_S = 30         # niedrigere Korrekturstufe erst, wenn die Tabelle
 EXC_BELOW = 70                # Ausnahme: unter 70 °C ...
 EXC_STABLE_S = 180            # ... 3 min stabil (Nutzer 24.10.: 3 min für die Ausnahme)
 LEARN_S = 15 * 60             # Lernperiode
+LEARN_OUT_S = 60              # Ausflug aus 80-84 °C bis 60 s bricht die Lernperiode nicht ab (Nutzer 25.10.)
 FAN_MIN, FAN_MAX = 1, 10
 # --- bestehende Technik (unverändert übernommen) ---
 RESEND_S = 20                 # Modus-/Taktbefehl ohne Übernahme: erneut senden (wie Takt-Tabellen)
@@ -459,8 +460,6 @@ class Round:
             ok, err = False, str(exc)
         ms = int((time.monotonic() - t0) * 1000)
         details = dict(cmd.get('details') or {}, punkte=pts)
-        if cmd.get('learn_restart') and attempt == 1:
-            details['lernperiode_neu_gestartet'] = True
         log_id = self.base_event(kind='takt', trigger=cmd.get('why') or '', target='miner-takt',
                                  endpoint='cgminer %s:%s ascset frequency' % (self.row['ip_address'], self.row['port'] or 4028),
                                  request=request, response=reply if ok else '', status='set OK' if ok else 'Fehler',
@@ -539,16 +538,14 @@ class Round:
         value = min(value, CLOCK_MAX)
         current = level_of(m['mode_key'])
         level = required_level(value, current)
-        learn_restart = bool(st.get('learn_since'))
-        common = {'from': old, 'why': why, 'step': step, 't0': self.t, 'learn_restart': learn_restart,
+        common = {'from': old, 'why': why, 'step': step, 't0': self.t,
                   'details': {'schritt': step} if step is not None else {}}
         queue = []
         if hot:
             queue.append(dict(common, kind='takt', value=value))
             if level != current:
                 queue.append({'kind': 'modus', 'value': level, 'why': why + ' (Modus danach)'})
-                queue.append(dict(common, kind='takt', value=value, why=why + ' (erneut nach Moduswechsel)',
-                                  learn_restart=False))
+                queue.append(dict(common, kind='takt', value=value, why=why + ' (erneut nach Moduswechsel)'))
         else:
             if level != current:
                 queue.append({'kind': 'modus', 'value': level, 'why': why + ' (Modus zuerst)'})
@@ -559,8 +556,6 @@ class Round:
         st['clock_changed_at'] = _iso(self.now)
         st['clock_changed_t'] = self.t
         st['window_until'] = None
-        if learn_restart:
-            st['learn_since'] = None                     # Vermerk steht im Eintrag des Taktschritts
         return True
 
     # --- fan (Lüftersteuerung)
@@ -649,40 +644,63 @@ class Round:
             self.base_event(kind='lernen_ende', trigger=reason, details={'ergebnis': 'abgebrochen', 'grund': reason,
                                                                          'seit': st['learn_since']})
         st['learn_since'] = None
-        st['learn_sum'], st['learn_n'] = 0, 0
+        st['learn_sum'], st['learn_n'], st['learn_clock_sum'] = 0, 0, 0.0
 
     def learn(self):
-        st, t = self.st, self.t
-        key = [st.get('clock_set'), st.get('fan_target')]
-        busy = st.get('pending') or st.get('queue') or st.get('fan_target') != st.get('fan_set')
-        if not (T_LOW <= t <= T_HIGH) or busy:
-            if st.get('learn_since'):
-                self.end_learning('Chiptemperatur %d °C außerhalb 80–84 °C' % t if not (T_LOW <= t <= T_HIGH)
-                                  else 'Einstellung ändert sich')
+        """Lernperiode 15 min auf derselben Lüfterstufe. Feinschritte (±1/±2 MHz) setzen sie nicht zurück, kurze Ausflüge
+        aus 80-84 °C bis 60 s auch nicht (Nutzer 25.10.: sonst entstand nie ein Lernwert). Neu beginnt sie bei Wechsel der
+        Lüfterstufe, Moduswechsel, hoher Chiptemperatur (ab 85 °C) oder länger als 60 s außerhalb 80-84 °C.
+        Gespeichert: Mittelwert des gesetzten Takts und der Chiptemperatur der 15 min."""
+        st, t, now = self.st, self.t, self.now
+        level = st.get('fan_target')
+        mode_cmd = any(c.get('kind') == 'modus' for c in (st.get('queue') or [])) or \
+            (st.get('pending') or {}).get('kind') == 'modus' or st.get('settle')
+        reason = None
+        if t >= T_HOT:
+            reason = 'Chiptemperatur %d °C (hohe Chiptemperatur)' % t
+        elif st.get('corr'):
+            reason = 'Korrekturphase'
+        elif level != st.get('fan_set'):
+            reason = 'Lüfterstufe ändert sich'
+        elif mode_cmd:
+            reason = 'Moduswechsel'
+        elif st.get('learn_since') and st.get('learn_level') != level:
+            reason = 'Lüfterstufe geändert'
+        if not (T_LOW <= t <= T_HIGH) and not reason:
+            st['learn_out_since'] = st.get('learn_out_since') or _iso(now)
+            if _age(st['learn_out_since'], now) > LEARN_OUT_S:
+                reason = 'Chiptemperatur länger als 60 s außerhalb 80–84 °C (%d °C)' % t
+        elif T_LOW <= t <= T_HIGH:
+            st['learn_out_since'] = None
+        if reason:
+            self.end_learning(reason)
+            st['learn_out_since'] = None
             return
-        if not st.get('learn_since') or st.get('learn_key') != key:
-            if st.get('learn_since'):
-                self.end_learning('Lüfterstufe geändert')
-            st['learn_since'], st['learn_key'], st['learn_sum'], st['learn_n'] = _iso(self.now), key, t, 1
+        if not st.get('learn_since'):
+            if not (T_LOW <= t <= T_HIGH):
+                return                                   # eine Lernperiode beginnt nur im Zielbereich
+            st.update({'learn_since': _iso(now), 'learn_level': level, 'learn_sum': 0, 'learn_n': 0,
+                       'learn_clock_sum': 0.0, 'learn_out_since': None})
             self.base_event(kind='lernen_start', trigger='Chiptemperatur %d °C in 80–84 °C' % t,
-                            details={'takt': key[0], 'luefterstufe': key[1]})
-            return
+                            details={'takt': st.get('clock_set'), 'luefterstufe': level})
         st['learn_sum'] += t
+        st['learn_clock_sum'] = (st.get('learn_clock_sum') or 0.0) + float(st.get('clock_set') or 0)
         st['learn_n'] += 1
-        if _age(st['learn_since'], self.now) >= LEARN_S:
-            level = str(st['fan_target'])
-            avg_t = round(st['learn_sum'] / max(st['learn_n'], 1), 1)
-            prev = (st.get('learned') or {}).get(level)
-            entry = {'mhz': st['clock_set'], 'temp_avg': avg_t, 'at': _iso(self.now),
-                     'count': (prev or {}).get('count', 0) + 1}
-            st.setdefault('learned', {})[level] = entry
-            log_id = self.base_event(kind='lernwert', trigger='15 min stabil in 80–84 °C',
-                                     details={'luefterstufe': int(level), 'takt': entry['mhz'], 'temp_mittel': avg_t,
+        if _age(st['learn_since'], now) >= LEARN_S:
+            n = max(st['learn_n'], 1)
+            avg_t = round(st['learn_sum'] / n, 1)
+            mhz = round(st['learn_clock_sum'] / n, 1)
+            key = str(level)
+            prev = (st.get('learned') or {}).get(key)
+            entry = {'mhz': mhz, 'temp_avg': avg_t, 'at': _iso(now), 'count': (prev or {}).get('count', 0) + 1}
+            st.setdefault('learned', {})[key] = entry
+            log_id = self.base_event(kind='lernwert', trigger='15 min auf Stufe %s, Ø %.1f °C' % (key, avg_t),
+                                     details={'luefterstufe': level, 'takt': mhz, 'temp_mittel': avg_t,
                                               'anzahl': entry['count'], 'vorher': prev})
             self.base_event(kind='lernen_ende', trigger='15 min erreicht', details={'ergebnis': 'gespeichert'})
-            self.note('Lernwert Stufe %s: %s MHz, Ø %.1f °C (%d. Mal).' % (level, entry['mhz'], avg_t, entry['count']))
+            self.note('Lernwert Stufe %s: %.1f MHz (Mittel), Ø %.1f °C (%d. Mal).' % (key, mhz, avg_t, entry['count']))
             self.decide('Lernwert gespeichert', log_id)
-            st['learn_since'], st['learn_sum'], st['learn_n'] = _iso(self.now), 0, 0
+            st.update({'learn_since': _iso(now), 'learn_sum': 0, 'learn_n': 0, 'learn_clock_sum': 0.0})
 
     # --- the rules (Kapitel 5)
     def window_over(self):

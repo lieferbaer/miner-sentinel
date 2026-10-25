@@ -1,6 +1,6 @@
 # MinerSentinel – Übergabe an Claude Code
 
-Stand: 21.10.2026, Branch `vps-stand` (Commit `f627a85`), deployt auf dem VPS lb-db.de.
+Stand: 25.10.2026, Branch `vps-stand`, Version **v2.0.0** (neue Lüfter-/Taktregelung + Protokoll), deployt auf dem VPS lb-db.de.
 
 Dieses Dokument enthält alles, was in der Cowork-Session „MinerSentinel Docker setup“ (bis 20.10.) und in der
 Claude-Code-Session ab 20.10. gebaut, entschieden und gelernt wurde – mit Gründen. Lies es komplett, bevor du
@@ -17,8 +17,9 @@ etwas änderst. Wenn etwas unklar ist oder diesem Dokument widerspricht: **frag*
 5. Deploy, Tests, Rollback
 6. Die MinerGeräte und ihre Schnittstellen (gemessene Fakten)
 7. Eigene Funktionen im Detail (mit Gründen)
-   7.1 Datenerfassung · 7.2 Übersicht · 7.3 Drosselung · 7.4 Takt-Tabellen (A15) · 7.5 Over-Hot ·
-   7.6 Lüfter (AC Infinity) · 7.7 Pools/f2pool · 7.8 Temperatur-Automatik · 7.9 Zentrale Abfrage & Live-API
+   7.1 Datenerfassung · 7.2 Übersicht · 7.3 Drosselung (nur Nano/Q) · 7.4 Takt-Tabellen (A15) · 7.5 Over-Hot ·
+   7.6 Lüfter (AC Infinity) · 7.7 Pools/f2pool · 7.8 Temperatur-Automatik (Regelung v2) · 7.9 Zentrale Abfrage & Live-API ·
+   7.10 Protokoll
 8. Integration des Originals 1.2.0 (Entscheidungen)
 9. Datenbank und Migrationen
 10. Fehlerhistorie und Lehren (wichtig – nicht wiederholen)
@@ -35,6 +36,9 @@ etwas änderst. Wenn etwas unklar ist oder diesem Dokument widerspricht: **frag*
 | Regel | Grund / Hintergrund |
 |---|---|
 | Antworten **auf Deutsch, sehr kurz**, ohne Einleitung, ohne Zusammenfassung am Ende, ohne Füllsätze. | Ausdrücklicher Wunsch. |
+| **Jede Antwort beginnt mit Datum und Uhrzeit** (`TT.MM.JJJJ, HH:MM`, vorher `date` ausführen, nicht schätzen). | Nutzer 21.10., gilt für alle Chats/Sessions. |
+| **Pläne/Logik:** Abschnitte mit Überschrift und kurzer Inhaltsangabe (nicht nur Nummern), **keine Abkürzungen**, nichts Erfundenes hineinschreiben; eigene Vorschläge ausdrücklich als Vorschlag kennzeichnen; Fragen konkret mit Beispiel und mit der wörtlichen Stelle des Nutzertexts. Frühere Messungen nur als Bezug, wenn der Nutzer es erlaubt. Vor dem Abgeben jeden Satz gegen den Text des Nutzers prüfen. | Nutzer 23./24.10.: falsche Verknüpfungen und erfundene Annahmen kosteten mehrere Runden. |
+| „erst X, dann Freigabe“ ist **keine** Freigabe. Bei Unklarheit fragen. | Vorfall 21.10. |
 | Begriff **„MinerGerät“** statt „Worker“ verwenden. | Ausdrücklicher Wunsch. |
 | **Vor größeren Änderungen** erst den Plan kurz und verständlich erklären, dann auf Freigabe warten, erst danach umsetzen. | Mehrfach eingefordert. Kleine, klar beauftragte Fixes dürfen direkt erfolgen. |
 | **Erst prüfen, dann behaupten.** Keine Vermutung als Tatsache. Zahlen aus echten Daten (DB, Logs, API) belegen; Unbelegtes als „nicht belegt“ kennzeichnen. | Falsche Aussagen haben Vertrauen gekostet. |
@@ -101,6 +105,7 @@ etwas änderst. Wenn etwas unklar ist oder diesem Dokument widerspricht: **frag*
 |---|---|---|
 | **`live_cycle`** | **5 s** | **Zentrale Abfrage** aller Avalons (`live_reader.py`), danach sofort **Temperatur-Automatik**; jede 3. Runde (15 s) **Drosselung + Takt-Tabellen** in eigenem Worker (7.9) |
 | `poll_all_sources` | 10 s (env) | Datenerfassung: **speichert** die zentralen Werte in die DB (fragt Avalons nicht selbst), Pools, andere Geräte |
+| **`prune_automation_journal`** | **täglich 03:30** (CronTrigger) | Protokoll-Tabellen: Einträge älter als **360 Tage** löschen (in Blöcken, 7.10) |
 | `check_devices`, `network_data` (30 min), `check_settings` (2 min), `prune_retention` (24 h) | – | Original |
 
 Die früheren Einzel-Jobs `throttle_controller`, `calibration` (je 15 s) und `fan_automation` gibt es nicht mehr.
@@ -114,14 +119,17 @@ solange die Seite offen ist. Steuerung läuft immer auf dem Server, unabhängig 
 
 ### 5.1 Arbeitsablauf
 1. Auf dem iMac in `vps-stand` ändern, Tests (5.3), Nutzer sagt „committen“ → Claude committet und pusht (`git push origin vps-stand`).
-   **Vor jedem Push die eigene Versionsnummer `frontend/src/lbVersion.js` um 1 erhöhen** (letzte Stelle; Anzeige „v1.0.x“ neben
-   „MinerSentinel“ oben links). Start 1.0.0 am 21.10.
+   **Vor jedem Push die eigene Versionsnummer `frontend/src/lbVersion.js` um 1 erhöhen** (letzte Stelle; Anzeige neben
+   „MinerSentinel“ oben links). Start 1.0.0 am 21.10.; **seit 25.10. Zählung 2.0.x** (Nutzer: „ab sofort Version 2.0.0“).
 2. Nutzer sagt „VPS auf Stand bringen“ (oft zusammen mit „committen“).
 3. VPS: `git ls-remote origin vps-stand` (iMac) prüfen, dann auf dem VPS
    `cd /opt/minersentinel && git status --short && git fetch -q fork vps-stand && git checkout -q -f vps-stand && git reset -q --hard fork/vps-stand`
    – vorher sicherstellen, dass `git status` nur `?? docker-compose.yml.imac` zeigt.
 4. Je nach Teil: Backend (Autoreload; Migration → `migrate`), Data-Service (`podman restart -t 5 …`; Compose → `ms-recreate.sh`),
-   Frontend (`rm -f /root/fe-build7.status; (nohup ./ms-build-frontend.sh > /root/fe-build7.status 2>&1 &)`, fertig bei `BUILT`+`FIN`).
+   Frontend (`rm -f /root/fe-build7.status; (nohup ./ms-build-frontend.sh > /root/fe-build7.status 2>&1 &)`, fertig bei `BUILT`+`FIN`;
+   „build try 1 failed“ ist das bekannte virtfs-Problem, das Skript wiederholt selbst).
+   **Reihenfolge bei neuen Tabellen: erst `migrate`, dann Data-Service neu starten** (der Data-Service schreibt per SQL in die Tabellen).
+   Vor Migrationen/Datenänderungen betroffene Tabellen sichern (`pg_dump -t …` nach `/root/ms-bak-…`).
 5. Prüfen: `podman ps` (alle 4 Container!), Data-Service-Log auf `ERROR`/`Traceback`, `curl https://miners.lb-db.de/` = 200.
    Ein Data-Service-Neustart unterbricht einen laufenden Takt-Lauf nur ~10 s (Zustand in der DB).
 
@@ -131,6 +139,9 @@ solange die Seite offen ist. Steuerung läuft immer auf dem Server, unabhängig 
 - **`/root/ms-fan-auto-bak-20261021-0047/`** – vor der Temperatur-Automatik: `docker-compose.yml`, `podman inspect` von
   Data-Service/Backend, `db.dump`, `git-head.txt`; Images `localhost/minersentinel_{backend,data-service,frontend}:pre-fan-automation`.
   Rückweg: Compose zurückkopieren, Images verwenden, `migrate api 0020`.
+- `/root/ms-caltab-bak-20261021-1757.sql` – Takt-Tabellen (`calibration_points`, `calibration_runs`) vor dem Leeren am 21.10.
+- **`/root/ms-bak-v107-20261025-1053/`** – vor v1.0.7 (neue Regelung): `fan_devices.sql` (`fan_automation`, `devices`), `git-head.txt`.
+  Rückweg: Commit aus `git-head.txt` auschecken, Tabellen zurückspielen, `migrate api 0023` (entfernt die Protokoll-Tabellen).
 - `/root/thr6/bak21 … bak42` – alte Einzel-Patches der Cowork-Zeit.
 
 ### 5.3 Tests (wie CI)
@@ -138,7 +149,9 @@ solange die Seite offen ist. Steuerung läuft immer auf dem Server, unabhängig 
 - Data-Service: `PYTHONPATH=data-service python -m pytest data-service/tests -c pyproject.toml -m "not integration"`
 - Frontend: `cd frontend && npm ci && npm run lint && npm run test:run && npm run build`
 - Python ≥ 3.10 nötig (System-Python 3.9 reicht nicht): `/opt/homebrew/bin/python3.10 -m venv <dir>` + requirements von backend und data-service + pytest, pytest-django.
-- Stand: **Backend 170 ✓, Data-Service 119 ✓ (5 übersprungen), Frontend 144 ✓**, Lint 0 Fehler (15 Warnungen aus dem Original).
+- pytest mit `-p no:cacheprovider -q -o addopts=""` aufrufen, sonst fehlt die Zusammenfassung (pyproject-Einstellungen).
+  Das venv im Scratchpad kann von macOS teilweise gelöscht werden (25.10.: `pytest` fehlte) → in jeder Session neu anlegen.
+- Stand 25.10.: **Backend 191 ✓, Data-Service 156 ✓ (5 übersprungen), Frontend 153 ✓**, Lint 0 Fehler (15 Warnungen aus dem Original).
   Achtung: `npm run lint` meldet zusätzlich Fehler aus `frontend/dist-local/` (lokaler Build-Ordner, nicht im Repo) – ignorieren.
 
 ---
@@ -162,8 +175,11 @@ solange die Seite offen ist. Steuerung läuft immer auf dem Server, unabhängig 
 - **`Freq`** = vom Miner berechneter **effektiver Durchschnittstakt** (je nach Verteilung der Chips auf die 4 Stufen),
   aktualisiert ~alle 130 s. Weicht vom Mittel der Stufen in beide Richtungen ab (Standard 04: 360 vs. 333; Messreihe 286 vs. 304;
   Automatik 231 vs. 253). Übersicht zeigt ihn als „effektiver Takt“ mit ⓘ-Erklärung.
-- Die Firmware **zieht gesetzte Takt-Stufen langsam nach oben** (280 → 286, 228 → 237, 220 → 228 MHz). Regelungen rechnen deshalb
-  immer mit dem **gemeldeten** Takt, nicht mit dem gesetzten.
+- Die Firmware **zieht gesetzte Takt-Stufen langsam nach oben** (280 → 286, 228 → 237, 220 → 228 MHz; 25.10. auch +13…+20).
+  Die Regelung v2 rechnet mit dem **gesetzten** Takt (Nutzerentscheidung 23.10.); der gemeldete dient nur der Übernahme-Prüfung und
+  der Erkennung „Miner ändert den Takt selbst“ (7.8).
+- Ein neuer Takt wird von der Firmware **in Schritten über einige Sekunden** eingestellt (25.10.: 183 → 152 → 123 → 100 MHz).
+- Ein Moduswechsel (Webinterface) stellt den **Standardtakt des Modus** ein (Mode 04 ≈ 360, 03 ≈ 380, 02 ≈ 400, 01 ≈ 420, 00 ≈ 440 MHz).
 - `GHSspd` = gemessene Hashrate, aktualisiert ~alle 130 s, mittelt diese Zeit. `GHSmm` ≈ 481,5 × Freq. `DH` = Fehlerrate %.
 - Leistung: `WALLPOWER` (A15), sonst `PS[6]`. `MPO` ist nur ein Limit.
 - **`TMax` = heißester Chip = max(`MTmax[a b c]`)**, alle 10 s neu, schwankt ±1 °C. Heißestes Board ist immer **Board 1**
@@ -199,24 +215,22 @@ solange die Seite offen ist. Steuerung läuft immer auf dem Server, unabhängig 
 - A15: Kachel „Working mode“, „Chip temperature“ mit allen drei MTmax groß („98 / 90 / 82 °C“).
 - Efficiency: „effektiver Takt X MHz“ + ⓘ (Erklärung nach 1 s Mouse-over / Antippen, `components/ui/info-tip.jsx`).
 - Fan speed (A15): „rpm / S2“ – S = **zurückgelesene** AC-Lüfterstufe (nicht die gesetzte), nur bei eingeschalteter Automatik.
-- Hashrate-Karte: „… GH/s · Fehlerrate x %“ (aktuelle `DH` des Miners, `details.error_rate_pct`, alle 10 s); auch auf der
-  Lüfter-Seite in der Karte „Takt laut Miner“.
-- Darüber Problem-/Highlight-Leiste des Originals (`FleetAlertsBar`), darunter je Avalon die Drosselungs-Karte.
+- Hashrate-Karte: „… GH/s · Fehlerrate x %“ (aktuelle `DH` des Miners, `details.error_rate_pct`, alle 10 s); dieselbe Karte ist
+  seit v2.0.0 die **erste Karte auf der Lüfter-Seite** (dort steht die Fehlerrate nicht mehr in „Takt laut Miner“).
+- Darüber Problem-/Highlight-Leiste des Originals (`FleetAlertsBar`), darunter je Avalon die Takt-/Drosselungs-Karte
+  (A15: „Takt und Modus“ ohne Eingabe, 7.3).
 
-### 7.3 Drosselung (`throttle_controller.py`, Backend `DeviceViewSet.throttle`, `components/devices/ThrottleCard.jsx`)
-- **A15: manueller Takt in MHz** (15–100 % des Standardtakts im aktuellen Modus). Nach **15 min unverändert** speichert der
-  Data-Service beim nächsten frischen GHSspd **einmal** einen Messpunkt `kind='manual'` (Takt-Tabellen › „Manuell“) – nicht bei
-  Over Hot oder Moduswechsel. Die frühere TH/s-Regelung gibt es beim A15 nicht mehr.
-- **Nano 3S / Avalon Q: unverändert** (Ziel-Hashrate, Geraden-Methode, Totband ±2 %, max. 20 % Schritt).
-- Sperren: nur während ein Takt-Lauf **läuft** (409). **Mit Automatik erlaubt**: der manuelle Takt übersteuert die Automatik
-  (letzte Eingabe gilt), die Automatik regelt dann den **Lüfter** auf ~80 °C (7.8), bis die Drosselung aufgehoben wird.
-- „Drosselung aufheben“: ohne Automatik → Standardtakt wird gesendet; **mit Automatik → kein Takt** (Automatik regelt vom aktuellen
-  Takt weiter). Grund: Sprung auf Standardtakt brachte TMax auf 95 °C (Fehler 12).
-- Anzeige A15: groß der **Wert laut Miner** (statt „Ungedrosselt“), darunter „laut Miner · gesetzt X MHz (Drosselung|Takt-Messung|
-  Automatik) · Standard Y MHz“ – „gesetzt“ = der **zuletzt** gesetzte Takt (`_last_set_clock`), „—“ = Firmware-Takte; keine
-  Beschreibungszeile und kein Modusname in der Kachel (Nutzerwunsch).
-- Während Takt-Lauf oder Automatik liest der Controller nur (Beobachtungsmodus) – lernt dann keine „Standardtakte“; eine manuelle
-  Drosselung in der Pause wird trotzdem überwacht und gemessen.
+### 7.3 Drosselung – nur Nano 3S / Avalon Q (`throttle_controller.py`, Backend `DeviceViewSet.throttle`, `components/devices/ThrottleCard.jsx`)
+- **A15: Drosselung abgeschafft (v1.0.7, Nutzer 24.10.).** `POST /api/devices/<A15>/throttle/` → 400 („Die Drosselung des A15 ist
+  abgeschafft; den Takt regelt die Temperatur-Automatik.“). Die A15-Karte heißt „Takt und Modus“: groß der **Takt laut Miner**,
+  darunter „gesetzt X MHz (Automatik|Takt-Messung) · Standard Y MHz“, Modus-Buttons und Modus-Tabelle; keine Eingabe.
+  „gesetzt“ = `_last_set_clock` (nur noch Takt-Messung und Automatik; bei ausgeschalteter Automatik nur, solange der Miner den Takt
+  noch fährt – sonst „—“). Migration 0024 entfernt eine noch vorhandene alte A15-Drosselung (ohne Taktbefehl).
+- **Nano 3S / Avalon Q: unverändert** (Ziel-Hashrate, Geraden-Methode, Totband ±2 %, max. 20 % Schritt; „Aufheben“ sendet Standardtakt).
+- Sperren: nur während ein Takt-Lauf **läuft** (409).
+- Während Takt-Lauf oder Automatik liest der Controller nur (Beobachtungsmodus) – lernt dann keine „Standardtakte“.
+- **A15-Standardtakte (`profiles`) werden nie mehr überschrieben**, sobald bekannt, und nicht gelernt, nachdem die Automatik Takte
+  gesetzt hat (`auto_clock_set`): sonst würde der Takt nach „Automatik aus“ als Standardtakt gelernt.
 - Zustand: `devices.connection_config -> 'throttle'` (mit `rev`; Controller schreibt nur bei unverändertem `rev`, sonst Rollback).
 
 ### 7.4 Takt-Tabellen – nur A15 (`calibration.py`, `pages/CalibrationPage.jsx`)
@@ -232,15 +246,17 @@ Start/Pause/Fortsetzen/Abbrechen **nur durch den Nutzer**.
 | **Stabilität: Leistung 3 min innerhalb ±3 %** (`STABLE_BAND = 0.03`, Nutzerentscheidung 21.10.). Die **tatsächliche Schwankung** wird je Punkt gespeichert (`data.power_spread_pct`, Spalte „Schwankung“). Ggf. zurück auf ±2 %, wenn die Werte zeigen, dass ±3 % zu viel ist. | Lüfter regelt im Lauf stufig auf 80 °C (7.8). Vorher ±1 %. |
 | Jeder Punkt speichert alle Rohwerte **und die AC-Lüfterstufe** (`data.fan_level`, Spalte „Lüfter (AC)“). | – |
 | **Messreihe endet ab dem 10. Punkt, sobald ein gespeicherter Punkt DH ≥ 10 % hat** (`DH_STOP_PCT`, `DH_STOP_FROM`); der Punkt wird noch gespeichert, dann normales Ende. | Nutzer 21.10.: tiefere Takte lohnen nicht. Lauf 7: Punkt 0 (Standardtakt) hatte 18,9 %, Punkt 22 (150 MHz) 10,4 %. |
-| **Start und Fortsetzen schalten die Temperatur-Automatik ein**; ohne eingerichteten Lüfter kein Start (409). | Lüfter hält im Lauf 80 °C. |
-| **Fortsetzen:** erst Drosselung aufheben (ohne Takt), dann letzten Punkt neu messen; **Max-Messung schaltet dabei kurz weg und zurück**. | In der Pause können Drosselung/Automatik Takte gesetzt haben. |
+| **Start und Fortsetzen schalten die Temperatur-Automatik ein**; ohne eingerichteten Lüfter kein Start (409). | Während des Laufs pausiert die Taktregelung, der Lüfter reagiert nur nach „Hohe Chiptemperaturen“ (7.8). |
+| **Fortsetzen:** letzten Punkt neu messen; **Max-Messung schaltet dabei kurz weg und zurück**. | In der Pause kann die Automatik Takte gesetzt haben. |
 | Abbrechen lässt den aktuellen Modus stehen. Normales Ende: zurück zum Startmodus. Messreihe **ohne** Automatik: kurz weg/zurück für Firmware-Takte; **mit Automatik nicht** – Takt bleibt, die Automatik übernimmt sofort (Lernwert). | 21.10.: Weg/zurück holte bei Lüfter Stufe 1–2 die Firmware-Takte → 100 °C. |
 | Umschaltbefehl alle 20 s wiederholen bis Rückmeldung, Abbruch nach 300 s. | Fehler 2. |
 | Over Hot → automatische Pause. | – |
 | Anzeige: Modusname, zwei Countdowns (Modus/gesamt); Status kommt aus `/api/live/`, Tabellen laden bei Fortschritt bzw. jede Minute. | – |
 
 Typische Dauer Messreihe: **~4,5 min pro Punkt** bei stabilen Bedingungen (Lauf 7 Punkte 6–9), anfangs 11–13 min.
-**Stand 21.10. ~01:20:** Lauf 7 (Messreihe Power Mode 04) **läuft**, Punkt 11 bei 260 MHz.
+**Stand 25.10.:** Takt-Tabellen am 21.10. 17:57 geleert (Sicherung 5.2). „Max-Werte je Modus“ enthält zwei vom Nutzer beauftragte
+Punkte (je 15 min bei 250 MHz, Endwert): Mode 04 252 MHz laut Miner, 121,8 TH/s, 1.961 W, 16,1 J/TH, DH 3,18 %; Mode 00 262 MHz,
+140,3 TH/s, 3.062 W, 21,8 J/TH, DH 0,14 %. Karte „Manuell“ zeigt nur noch alte Punkte der früheren Drosselung (falls vorhanden).
 
 ### 7.5 Over Hot (`components/devices/OverHotBanner.jsx`)
 - Banner auf jeder Seite (Daten aus `/api/live/`), Neustart mit Rückfrage (`POST /api/devices/<id>/restart/`). Messenger: später.
@@ -257,44 +273,65 @@ Typische Dauer Messreihe: **~4,5 min pro Punkt** bei stabilen Bedingungen (Lauf 
   **An/Aus** neben dem Gerätenamen, **Port 1–4 als Buttons** (Auswahl in `localStorage`), **Stufe 0–10 als Buttons: ein Klick setzt**
   (Rücklesen nach `READ_BACK_S = 5` s); markiert ist die vom Controller gemeldete Stufe. Bei aktiver Automatik wählen die Buttons
   die Automatik-Stufe; An/Aus und Port gesperrt.
-- Automatik-Bereich: 4 Karten wie in der Übersicht (Heißester Chip, Takt laut Miner, Lüfter läuft auf, Status – kleine Zeile
-  wiederholt den großen Wert nicht), darunter Lernwerte und letzte Aktionen. Während einer Takt-Messung Hinweis, dass die
-  Automatik den Lüfter regelt und die markierte Stufe danach gilt.
+- Automatik-Bereich: **5 Karten** (Hashrate mit Fehlerrate wie Übersicht – erste Karte seit v2.0.0; Heißester Chip mit Regelwert
+  und Tendenz; Takt laut Miner mit gesetzt · Modus · Standard; Lüfter läuft auf (aktive Stufe vs. Basisstufe, Korrektur/Ausnahme);
+  Status mit Phase, laufendem Befehl, Beobachtungsfenster, Lernperiode). Kleine Zeile wiederholt den großen Wert nicht. Auf dem Handy
+  untereinander. Darunter Lernwerte **je Lüfterstufe** und letzte Aktionen. Rückfrage „Automatik wirklich beenden? Der Takt bleibt,
+  wie er ist.“
 
 ### 7.7 Pools / f2pool
 - Pool-Einstellung je MinerGerät (`connection_config.pool_stats`) + globaler Fallback; Typen ckpool, publicpool, f2pool, btcpowlab, parasite.
 
-### 7.8 Temperatur-Automatik – nur A15 (`data-service/fan_automation.py`, Tabelle `fan_automation`)
-Läuft **nach jeder zentralen Abfrage (5 s)**, nur auf Live. Einschalten auf der Lüfter-Seite (Port + Stufe; braucht Sicherung;
-hebt eine manuelle Drosselung auf). Der Data-Service ist der einzige, der dann Lüfterbefehle sendet.
+### 7.8 Temperatur-Automatik v2 – nur A15 (`data-service/fan_automation.py`, Tabelle `fan_automation`)
+Seit **v1.0.7 (25.10.)** nach dem Plan des Nutzers vom 23./24.10. Diagramm: **`docs/claude/Regelungslogik-Luefter-Takt.drawio`**
+(8 Seiten, vom Nutzer freigegeben). Läuft **nach jeder zentralen Abfrage (5 s)**, nur auf Live. Einschalten auf der Lüfter-Seite
+(Port + Stufe; braucht Sicherung). Der Data-Service ist dann der einzige, der Lüfter-, Takt- und Modusbefehle sendet.
+**Bei Änderungen an der Regelung: Plan/Diagramm zuerst mit dem Nutzer abstimmen** (Regeln 1).
 
-| Situation | Verhalten |
+**Grundprinzip:** Der Nutzer wählt die Lüfterstufe = **Basisstufe** (gewählt werden 1–7; 8–10 „nie als Basisstufe“). Die Automatik
+regelt den **Takt** (gesetzter Takt, 100–440 MHz), damit die **Chiptemperatur** (TMax, heißester Chip, Einzelwert) bei **80–84 °C**
+liegt. Der **Modus folgt dem Takt**. Der Lüfter weicht nur vorübergehend ab (Korrekturphase nach oben, Ausnahme nach unten).
+
+| Regel | Vorgabe des Nutzers |
 |---|---|
-| Normal | Lüfter **fest auf der gewählten Stufe (nie darunter)**; Takt hält **TMax 80–84 °C** (Median 30 s): > 84 → −10 MHz je 1,5 °C (max. 30), < 80 → +10 MHz (max. Standardtakt); nach jedem Schritt **3 min warten**. |
-| Klick auf eine Stufe | **Takt sofort auf den Ausgangspunkt/Lernwert dieser Stufe, in beide Richtungen**, auch beim erneuten Klick auf dieselbe Stufe (`fan_automation.level_at`, Migration 0022). Lüfter: höher sofort, tiefer nach 3 min. |
-| Stufe senken | Mit Lernwert: Takt sofort auf den Lernwert, Lüfter nach 3 min. Ohne: Takt senken bis TMax ≤ 80, 3 min warten, dann Lüfter. |
-| Stufe erhöhen | Lüfter sofort; mit Lernwert Takt **60 s später** auf den Lernwert. |
-| Schutz | Aktueller Wert: **> 84 °C** Lüfter **+1**, **≥ 88 °C** Lüfter **+2** und −30 MHz (höchstens alle 60 s), **≥ 90 °C** Lüfter **+3**; zurück auf die gewählte Stufe erst bei **≤ 80 °C** (Nutzer 21.10.; vorher +1 erst ab 88, zurück bei 84 → Pendeln). Max. Stufe 10. Im Lüfter-Regelmodus (Messung/manueller Takt) wirkt eine höhere Schutzstufe **sofort**, bleibt es heiß, nach 60 s erneut. |
-| Nach Lauf / manuellem Takt | Sofort auf den **Ausgangspunkt** der gewählten Stufe (tiefer: Takt sofort; höher: Takt 60 s nach dem Lüfter); sonst 10-MHz-Schritte. |
-| Ausgangspunkt einer Stufe | Eigener Lernwert, aber **nie über dem Lernwert einer höheren Stufe und nie unter dem einer niedrigeren** (Nutzer 21.10.: Stufe 2 darf nicht mit mehr Takt starten als Stufe 3). Ohne eigenen Lernwert: höchstens Lernwert der höheren bzw. mindestens der niedrigeren Stufe. Gilt bei Stufenwechsel, nach Lauf/manuellem Takt und nach dem Senken. |
-| Takt anheben | Erst **3 min nach der letzten Takt- UND Lüfteränderung** (21.10.: direkt nach dem Senken des Lüfters wurde +10 MHz gesetzt) und **15 min nach dem letzten Schutz-Eingriff**. Absenken und Schutz bleiben sofort. |
-| Bezug der Schritte | Vom **zuletzt gesetzten** Takt (nicht vom gemeldeten): die Firmware zieht gesetzte Takte in Minuten um ~+11 MHz nach oben; gerechnet vom gemeldeten Wert wurden alle −10-MHz-Schritte aufgefressen (21.10.: 40 Schutz-Eingriffe in 5 h, gesetzte Werte stiegen 218 → 224). |
-| Schutz-Eingriff = Takt zu hoch | Beim Einsetzen des Schutzes: Takt **dauerhaft** um den üblichen Schritt **+10 MHz** senken und den Lernwert der Stufe auf diesen Takt setzen (`source: Schutz`) – **höchstens alle 10 min** (`PROTECT_CUT_GAP_S`; 21.10. 08:14–08:35 sonst 5 Senkungen in 21 min, 204 → 164 MHz). Ziel: nach 1–2 Eingriffen bleibt der Lüfter auf der gewählten Stufe. |
-| Obergrenze je Stufe | Der Takt, bei dem der Schutz einsetzte, wird für diese Stufe **4 h** nicht wieder erreicht (Anheben höchstens bis 2 MHz darunter, `state.ceiling`, `CEILING_S`). |
-| Anheben fein von unten | +2 MHz bei 78–80 °C, +5 bei 75–78, +10 darunter (`_raise_step`). Grund: bei niedrigem Takt ändert die Firmware die Leistung sprunghaft (21.10.: 164 → 174 MHz = +226 W, +6 °C; Lauf 7: 160 → 150 −151 W, 150 → 140 −270 W). |
-| Simulation | Vor Änderungen an der Regelung simulieren (Modell in `tests/test_fan_automation.py::_power_model_run`, kalibriert auf 21.10.: 1.774 W ≈ 80 °C bei 164 MHz, Sprung +226 W, 0,03 °C/W, τ 95 s, Drift +11 MHz). |
-| Takt-Tabellen-Lauf **oder manueller Takt (Drosselung)** | **Kein Takt-Eingriff**; Lüfter hält **~80 °C**: +1 bei **> 81 °C**, −1 bei **≤ 78 °C**, mindestens **60 s** zwischen zwei Änderungen, Stufen **1–10** (auch unter der gewählten), Schutz sofort. Danach zurück zur gewählten Stufe (höher: Senken-Regel, tiefer: sofort). Status „Takt-Messung“ bzw. „Manueller Takt“. |
-| Lauf pausiert | Normalbetrieb (ohne Drosselung). |
-| Lernwerte | Takt je **Modus + Lüfterstufe**, wenn TMax **10 min ruhig** bei 80–84 °C (kein Schutz, keine Drosselung, kein Wechsel); spätere ruhige Phasen überschreiben. Gespeichert wird der **von der Automatik gesetzte** Takt (`source: gesetzt`; die Firmware zieht den gemeldeten nach oben), nur wenn sie selbst nichts gesetzt hat der Wert laut Miner (`source: laut Miner`). Tabelle auf der Lüfter-Seite. Stand: **Power Mode 04, Stufe 3 → 231 MHz** (21.10. 00:54, noch laut Miner gespeichert). |
-| Lüfter-Rückmeldung | Lesen alle 60 s; nach einem Schreibbefehl erst **10 s später** zurücklesen (Controller meldet nach > 5 s); Abweichung erzwingt nur bei bestätigtem Wert ein erneutes Senden. |
-| Fehler | AC-Cloud weg → Lüfter bleibt, Takt regelt weiter. A15 aus (Wartung) → keine Werte, Automatik regelt nicht, Lüfter bleibt auf seiner Stufe. **„Automatik beenden“** (mit Rückfrage) → **kein Takt wird gesendet**; der zuletzt gesetzte Takt bleibt und wird als manuelle Drosselung übernommen (Drosselungs-Karte). |
-| Neustart / Moduswechsel | **Sofort der Ausgangspunkt der gewählten Stufe**, sobald der Miner wieder Takte meldet (auch wenn `TMax` noch −273 ist). Vorher (21.10.) blieb der A15 nach dem Einschalten auf den vollen Standardtakten bei Lüfter Stufe 2 (Simulation: 93 °C, 5 min ≥ 88 °C; neu: max 85 °C). |
-| Wartung | Button „Wartung starten (A15 ausschalten)“ auf der Lüfter-Seite (`fan_automation.maintenance_at`, Migration 0023; ein laufender Takt-Lauf wird pausiert). Solange der A15 noch antwortet, regelt die Automatik normal; antwortet er nicht mehr (keine zentrale Abfrage > 15 s), geht der Lüfter **aus** (`atType` 1, wie Button „Aus“); antwortet er wieder, geht der Lüfter sofort **an auf die Stufe von vorher**, die Wartung endet automatisch, und der Neustart wird wie üblich behandelt (Ausgangspunkt der Stufe). Keine offline/online-Meldungen während der Wartung und 15 min danach; Übersicht zeigt „Wartung seit HH:MM“. Button „Wartung beenden“ zum Abbrechen. |
-| Firmware überschreibt | Meldet der Miner > 25 MHz mehr als gesetzt (normales Nachziehen ~+11), wird der gesetzte Takt erneut gesendet (frühestens 60 s nach der letzten Taktänderung), z. B. wenn die Firmware beim Hochfahren ihre Standardtakte nachträglich setzt. |
-| Anmeldung weg | Live wartet 5 min (Test-Umgebung aktiv), Takt regelt weiter. |
+| Start (Basisstufe gewählt, Automatik ein, Neustart des Miners, nach Wartung, nach Takt-Messung, nach Over Hot) | Starttakt = **Lernwert der Basisstufe**, sonst **Initialwert** (Stufe 1 = 100 … 10 = 190 MHz, je +10); Modus nach Tabelle ohne Spielraum; Lüfter = Basisstufe. Braucht keine gültige Temperatur. |
+| Hohe Chiptemperatur | ab 85 °C: Lüfter Basis +1, Takt −10 · ab 86: +1, −20 · ab 88: +2, −30 · ab 90: +2, −50 · ab 92: +2, −80 · ab 94: +2, −100. Lüfter **sofort**, relativ zur Basisstufe, nie addieren; **niedrigere Korrekturstufe erst nach 30 s** Bedarf. Takt beim Eintritt in die Korrekturphase sofort, danach erst nach dem 30-s-Beobachtungsfenster und nur bei nicht fallender Tendenz, jeweils vom dann gesetzten Takt. |
+| Korrekturphase | aktive Stufe > Basisstufe. **Keine Plus-Schritte.** Rückkehr zur Basisstufe nach **1 min stabil in 80–84 °C** oder **sofort unter 80 °C**. |
+| Feintuning | 80–84 °C mit Tendenz nach oben (Anstieg *innerhalb* 80–84): +1 °C → −1 MHz, ≥ +2 °C → −2; nach −1 im nächsten Fenster weiter steigend → −2. 79 °C → +1 · 76–78 → +2 · 70–75 → +5 · 60–69 → +20 · < 60 → +40; Plus nur bei nicht steigender Tendenz; brachte der letzte Plus-Schritt ≥ 2 °C Anstieg → eine Größe kleiner (+5 → +2 → +1). Feinschritte hat Claude entwickelt (Auftrag des Nutzers). |
+| Beobachtungsfenster / Tendenz | **30 s** nach jeder bestätigten Taktänderung. Tendenz = jetzt gegen den Wert von vor höchstens 30 s (bei jüngerer Taktänderung gegen deren Wert). |
+| Grenzen | 100–440 MHz; ein berechneter Takt unter 100 → **nicht senden**, Eintrag `fehler`, Takt bleibt. |
+| Modus | 0–360 mode 04 · 361–380 03 · 381–400 02 · 401–420 01 · 421–440 00. **Spielraum 10 MHz nur nach unten** (abwärts erst bei 350/370/390/410). Normal: erst Modus, Übernahme, dann Takt. **Bei hoher Chiptemperatur: Takt sofort, dann Modus, dann Takt erneut** (der Moduswechsel stellt den Standardtakt ein). Moduswechsel durch den Nutzer: Automatik arbeitet weiter. |
+| Senden / Übernahme | Vor jedem Taktbefehl Zielpunkte mit den gemeldeten SF0-Punkten vergleichen: **gleich → kein Befehl**. Übernommen: Modus = Miner meldet ihn; Takt = Miner meldet den gesetzten Wert **oder** einen anderen Wert als vorher. Ohne Übernahme **nach 20 s erneut, bis es klappt** (jeder Versuch im Protokoll). |
+| Ausnahme | Takt = 440 MHz und **3 min** stabil unter 70 °C → aktive Stufe −1 (nicht unter 1), danach erneut 3 min; Ende über 70 °C, **Stufe bleibt reduziert**; zurück nach oben nur über „Hohe Chiptemperatur“. |
+| Lernen | **15 min** auf derselben Lüfterstufe → Lernwert der **aktiven Stufe** = **Mittelwert des gesetzten Takts** der 15 min, Temperaturmittel, Zeit, Anzahl; jede weitere Periode ersetzt ihn. **Feinschritte (±1/±2 MHz) setzen die Lernzeit nicht zurück, Ausflüge aus 80–84 °C bis 60 s auch nicht** (Nutzer 25.10., v2.0.1: vorher entstand in 2 h kein Lernwert – 65 von 71 Schritten starteten die Periode neu, dazu 33 kurze Ausflüge auf 79 °C). Neu beginnt sie bei Lüfterwechsel, Moduswechsel, ab 85 °C oder > 60 s außerhalb 80–84 °C. Keine Übertragung zwischen Stufen, keine Jahreszeiten-Logik. Start ohne Lernwerte (alte Lernwerte je Modus beim Umstieg verworfen). |
+| Situationen | Neustart → Start · Miner ändert den Takt selbst → erneut senden · Over Hot → keine Entscheidung bis gültige Werte, danach Start · Miner antwortet nicht → Lüfter unverändert, warten · Lüftersteuerung antwortet nicht/andere Stufe → erneut senden, bis es klappt · Takt-Messung → Taktregelung pausiert, Lüfter nur nach „Hohe Chiptemperatur“, danach Start · Wartung → wie bisher (unten) · Automatik aus → **kein Takt gesendet, Takt bleibt** · Drosselung abgeschafft. |
 
-Zustand in `fan_automation.state` (nur der Data-Service schreibt), Einstellungen (`enabled`, `ac_dev_id`, `ac_port`, `level`) schreibt das Backend.
-Endpunkt `GET/POST /api/fans/automation/` (`enable`, `level`, `disable`).
+**Technische Festlegungen (vom Nutzer bestätigt bzw. aus v1.0.2 übernommen):**
+- „Miner ändert den Takt selbst“ = Takt laut Miner **> gesetzt + 25 MHz**, frühestens **60 s** nach der letzten Taktänderung
+  (`OVERRIDE_MHZ`, `OVERRIDE_AFTER_S`; v1.0.8 – vorher hielt v1.0.7 die Rampe der Firmware für eine Änderung, Fehler 20).
+- Hohe Chiptemperatur während eines laufenden Befehls → die Taktsenkung **ersetzt** ihn (Priorität Sicherheit).
+- Neustart durch den **eigenen** Moduswechsel (bis 120 s danach) ist kein „Neustart des Miners“ (`OWN_SWITCH_S`).
+- Nach einem Moduswechsel wartet der nächste Taktbefehl, bis die Firmware den Standardtakt eingestellt hat (Punkte geändert,
+  Neustart oder 120 s; `settle`). Standardtakt eines Modus: beim eigenen Wechsel gemerkt (`state.stock`), sonst Throttle-Profil –
+  nur wenn ±15 MHz am Tabellenwert; fehlt er, aus den gemeldeten Punkten geschätzt (Eintrag `fehler`, Grund `standardtakt_fehlt`).
+- Lüfter: neue Stufe sofort; erneut senden frühestens 20 s nach dem letzten Versuch; Rücklesen alle 60 s bzw. 10 s nach dem Setzen,
+  nach Lesefehler erst wieder nach 60 s. Lüfter wird vor den (langsamen) Miner-Befehlen gesetzt.
+- Bekannt, nicht gelöst: Antwortet nur die **Einstellungsseite** des A15 nicht, gilt das als „Miner antwortet nicht“ (eine Umgehung
+  hätte die Pool-Zugangsdaten im Umschaltbefehl gefährdet).
+
+**Wartung** (unverändert): Button „Wartung starten (A15 ausschalten)“ (`maintenance_at`, Migration 0023; ein laufender Takt-Lauf
+wird pausiert). Antwortet der A15 nicht mehr → Lüfter **aus** (`atType` 1); antwortet er wieder → Lüfter **an auf die Stufe von
+vorher**, Wartung endet, dann Start. Keine offline/online-Meldungen während der Wartung und 15 min danach (`maint_ended_at`).
+
+**Zustand** `fan_automation.state` (nur der Data-Service schreibt; `v` = 2): `phase` wird je Runde abgeleitet (messung > korrektur >
+ausnahme > normal; wartung, aus), Flags `corr`, `exc_active`, `cal`, `start_reason`, dazu `t`, `tendency`, `clock_set`,
+`clock_changed_at`, `clock_now`, `mode_key`, `stock_mhz`, `fan_target`, `fan_set`, `fan_read`, `pending`, `queue`, `settle`,
+`window_until`, `learn_since`, `learned` (je Stufe), `log`. Einstellungen (`enabled`, `ac_dev_id`, `ac_port`, `level`, `level_at`,
+`maintenance_at`) schreibt das Backend. Endpunkt `GET/POST /api/fans/automation/` (`enable`, `level`, `disable`,
+`maintenance_start`, `maintenance_end`).
+
+**Simulation:** `data-service/tests/test_fan_automation.py` enthält zwei Simulationen mit einem **Schätzmodell** (keine Messwerte;
+Nutzerentscheidung 24.10.). 51 Regel-Tests, je einer pro Regel/Befund.
 
 ### 7.9 Zentrale Abfrage & Live-API (`data-service/live_reader.py`, `miner_cache.py`, `backend/api/live_views.py`, `frontend/src/lib/LiveContext.jsx`)
 - **Ein Leser alle 5 s**: `estats` + `summary` je Avalon (parallel, ein ausgeschaltetes Gerät bremst nichts), A15-Webinterface alle 30 s
@@ -305,6 +342,27 @@ Endpunkt `GET/POST /api/fans/automation/` (`enable`, `level`, `disable`).
 - Last am A15 (gemessen 21.10., 60 s): **24 cgminer + 1 Web** pro Minute (ursprünglich 32 + 10, kurz vor dem Umbau ~38 + 6).
 - **`GET /api/live/`** (nur DB, ~120 ms, ~15 KB): Geräte, mining/hardware/system latest, Drosselung je Avalon, Automatik,
   Takt-Lauf. Browser fragt alle 5 s einmal für die ganze Oberfläche.
+
+
+### 7.10 Protokoll (`data-service/automation_journal.py`, `backend/api/automation_log_views.py`, `pages/ProtocolPage.jsx`)
+Nutzer 24.10.: **alles sammeln**, 360 Tage behalten.
+- Tabelle **`automation_cycle`**: ein Eintrag **je 5-s-Zyklus** (Phase, Chiptemperatur, Boards, Tendenz, gesetzter Takt, Takt laut
+  Miner, Punkte, Modus, Basis-/aktive/gelesene Lüfterstufe, Leistung, GHSspd, DH, Status, Fenster, Lernperiode, laufender Befehl,
+  Entscheidung, Verweis auf den Ereignis-Eintrag). ~17.000 Zeilen/Tag, ~1,5 GB/Jahr.
+- Tabelle **`automation_log`**: ein Eintrag je **Entscheidung, Befehl und Versuch** (Arten siehe `kind`: start, takt, modus, luefter,
+  hohe_temperatur, rueckkehr, ausnahme(_ende), stabilitaet_start/_ende, lernen_start/_ende, lernwert, neustart, over_hot,
+  miner_offline/_online, firmware_takt, messung_start/_ende, fehler; Nutzer: basisstufe, automatik_ein/_aus, wartung_start/_ende).
+  Mit Auslöser, Chiptemperatur, alt → neu, Befehl/Endpunkt, Antwort (**nie Zugangsdaten**: Modusbefehl ohne Pool-Felder),
+  Ergebnis, **API-Zeit**, **Übernahmezeit** (erste Meldung des Miners/der Lüftersteuerung; abgelöste Befehle „nicht gemessen“) und
+  **thermischem Verlauf** (10 Werte, alle 30 s ab der Übernahme).
+- Schreiben: eigene dauerhafte DB-Verbindung (autocommit); fehlt eine Tabelle → eine Warnung, 10 min Pause; Fehler stoppen nie die
+  Regelung. Aufräumen jede Nacht 03:30 (> 360 Tage, in Blöcken).
+- API (angemeldet): `GET /api/automation/log/` (Filter `kind`, `ok=true|false|null`, `from`, `to`, 100 je Seite),
+  `/api/automation/log/<id>/`, `/api/automation/log/stats/` (Moduswechsel, Taktwerte, Lüfterstufen: Anzahl, API-/Übernahmezeit
+  Mittel/Median, Δ Temperatur 1/3/5 min), `/api/automation/cycles/` (> 6 h je Minute verdichtet), `/api/automation/export.csv?table=log|cycle`.
+- Seite **„Protokoll“** (Menü nach „Lüfter“): Reiter **Ereignisse** (Karten/Tabelle, Filter Art/Ergebnis/Zeitraum, Detailansicht,
+  alle 10 s), **Reaktionszeiten**, **Verlauf** (Kurven Chiptemperatur, Takt gesetzt/laut Miner, Lüfterstufe; Zustand als Hintergrund,
+  Ereignisse als Linien; alle 30 s; „frei“ höchstens 7 Tage) und **CSV-Export**.
 
 ---
 
@@ -318,9 +376,11 @@ Original + „Activity“ + „Takt-Tabellen“ + „Lüfter“; Dockerfiles/Com
 ## 9. Datenbank und Migrationen
 
 - Eigene Tabellen: `calibration_runs`, `calibration_points` (0020), **`fan_automation`** (**0021**, handgeschrieben, hängt an 0020;
-  **0022** `level_at`).
-- `calibration_points.kind`: `max`, `step`, **`manual`**; `data` enthält u. a. `fields`, `summary`, `web`, `estats_raw`,
-  **`fan_level`**, **`power_spread_pct`**.
+  **0022** `level_at`, **0023** `maintenance_at`), **`automation_log`, `automation_cycle`** (**0024**, mit Datenmigration: alte
+  A15-Drosselung entfernen). Der Device-FK der beiden Protokoll-Tabellen hat keinen eigenen Index (`db_index=False`, der
+  Verbundindex device + Zeit deckt ihn ab).
+- `calibration_points.kind`: `max`, `step`, `manual` (nur noch alte Punkte); `data` enthält u. a. `fields`, `summary`, `web`,
+  `estats_raw`, **`fan_level`**, **`power_spread_pct`**.
 - `makemigrations --check` meldet eine ausstehende Migration des **Originals** (Index-Umbenennungen) – nicht ungefragt erzeugen.
   Eigene Migrationen deshalb von Hand schreiben.
 
@@ -333,14 +393,18 @@ Original + „Activity“ + „Takt-Tabellen“ + „Lüfter“; Dockerfiles/Com
 3. Abbrechen sendete alle 15 s erneut → `state.restoring`.
 4. 2. Max-Messung ohne Wartezeit. 5. Stabilitätsband halb so groß. 6. Drosselungs-Karte falscher Modus. 7. Falscher „Tipp“.
 8. Schaukeln der Drosselung. 9. Selbst Messungen gestartet (verboten). 10. Testskript auf dem Server vergessen. 11. Shell-Quoting.
-12. **„Drosselung aufheben“ bei aktiver Automatik sprang auf Standardtakt** (297 → 369 MHz) → TMax 95 °C. Jetzt kein Takt beim Aufheben mit Automatik.
+12. **„Drosselung aufheben“ bei aktiver Automatik sprang auf Standardtakt** (297 → 369 MHz) → TMax 95 °C. Damals: kein Takt beim Aufheben mit Automatik; seit v1.0.7 gibt es die A15-Drosselung nicht mehr.
 13. **Lüfter-Rückmeldung zu früh gelesen** (5 s statt > 5 s) → Anzeige hing bis ~1 min, Stufe doppelt gesendet. Jetzt Rücklesen nach 10 s.
 14. Automatik-Seite zeigte „Standardtakt“, obwohl ein anderer Takt lief (zeigte nur den selbst gesetzten). Jetzt immer Wert laut Miner.
 15. Automatik/Lüfter-Seite hinkten der Übersicht hinterher (60-s-Median, eigene Timer) → zentrale Abfrage + Live-API.
 16. **Frontend-Deploy hinterließ hängenden Web-Container** (virtfs) → Seite ~2 min 503. Nach jedem Deploy `podman ps` prüfen; Lösung Abschnitt 13.
 17. Lokale Entwicklungsserver wurden von der App beendet → bei „lokal nicht erreichbar“ neu starten (Abschnitt 14).
 18. **Abbruch der Messreihe holte Firmware-Takte bei Lüfter Stufe 1–2** (weg/zurück 04→03→04) → 3.355 W, TMax 100 °C. Mit Automatik kein Weg/zurück mehr, Lernwert sofort, Schutz im Regelmodus sofort.
-19. **„Ausschalten“ (Automatik) mit „A15 ausschalten“ verwechselt** → Automatik aus setzte den Standardtakt bei Lüfter Stufe 2 → 3.670 W, 111 °C, Over Hot (21.10. 13:24). Jetzt: Button „Automatik beenden“ mit Rückfrage, Takt bleibt als Drosselung, „Wartung starten“ oben daneben.
+19. **„Ausschalten“ (Automatik) mit „A15 ausschalten“ verwechselt** → Automatik aus setzte den Standardtakt bei Lüfter Stufe 2 → 3.670 W, 111 °C, Over Hot (21.10. 13:24). Jetzt: Button „Automatik beenden“ mit Rückfrage, Takt bleibt, wie er ist, „Wartung starten“ oben daneben.
+20. **v1.0.7 hielt die Rampe der Firmware für „Miner ändert den Takt selbst“** (25.10.: 183 → 152 → 100 MHz, Takt doppelt gesendet). Die 60-s-Sperre aus v1.0.2 war beim Neuschreiben verloren gegangen → v1.0.8. Lehre: beim Neuschreiben alle bisherigen Festlegungen (dieser Abschnitt, 7.8) abhaken.
+21. Plan der Regelung: falsche Verknüpfungen, Abkürzungen und eigene Annahmen im Plan kosteten mehrere Runden (23./24.10.) → Regel „Pläne/Logik“ in Abschnitt 1.
+22. Hintergrund-Agenten brachen am Sitzungslimit ab (25.10.): Teilergebnisse und „widerlegte“ Befunde ohne Stimmen selbst prüfen – 12 von 16 waren echt.
+23. **Kein Lernwert in 2 h** (25.10.): Die Chiptemperatur stand an der Grenze 80 °C, das ±1-°C-Rauschen löste alle 1,2 min einen ±1-MHz-Schritt aus, jeder startete die Lernzeit neu. Lösung v2.0.1 (7.8 Lernen). Offen zur Besprechung: Unruhe durch Rauschen an der 80-°C-Grenze (11).
 
 ---
 
@@ -348,9 +412,13 @@ Original + „Activity“ + „Takt-Tabellen“ + „Lüfter“; Dockerfiles/Com
 
 1. **Over-Hot-Benachrichtigung per Messenger** (Telegram/Discord/ntfy des Originals prüfen).
 2. **±3 % oder ±2 %**: nach einigen Punkten Spalte „Schwankung“ auswerten.
-3. Lernwerte hängen von der Raumtemperatur ab (bewusst nicht erfasst) – beobachten.
-4. Lauf 7 läuft – Nutzer entscheidet.
-5. Ausstehende Original-Migration – nur nach Rücksprache.
+3. Regelung v2 beobachten (Protokoll-Seite): Feinschritte, Korrekturphase, erste Lernwerte; Stabilitätszeit 1 min (Rückkehr) anhand der
+   gemessenen Reaktionszeiten prüfen (Nutzerwunsch aus dem Plan).
+4. **Unruhe an der 80-°C-Grenze:** 71 Taktbefehle in 126 min (±1 MHz, ausgelöst vom ±1-°C-Rauschen). Möglich: „Tendenz zur oberen Grenze“ erst ab 82 °C, +1 bei 79 °C erst nach 30 s – mit dem Nutzer besprechen.
+5. Takt laut Miner liegt 13–20 MHz über dem gesetzten (Nachziehen der Firmware); ab > 25 MHz sendet die Regelung neu – beobachten.
+6. Einstellungsseite des A15 nicht erreichbar = „Miner antwortet nicht“ (7.8, bekannt).
+7. Allgemeine Zeitraumauswahl („Last 30 days“) erscheint auch auf Protokoll- und Lüfter-Seite, ohne Wirkung dort.
+8. Ausstehende Original-Migration – nur nach Rücksprache.
 
 ---
 
@@ -359,8 +427,9 @@ Original + „Activity“ + „Takt-Tabellen“ + „Lüfter“; Dockerfiles/Com
 ```
 backend/api/
   views.py           DeviceViewSet: system-latest, calibration (+Automatik beim Start/Fortsetzen), restart, workmode,
-                     throttle (A15 MHz, set_mhz/set_by), Sperren
-  models.py          CalibrationRun, CalibrationPoint, FanAutomation   migrations/0020_calibration.py, 0021_fan_automation.py
+                     throttle (Nano/Q; A15 nur Anzeige, set_mhz/set_by), Sperren
+  models.py          CalibrationRun, CalibrationPoint, FanAutomation, AutomationLog, AutomationCycle   migrations/0020 … 0024
+  automation_log_views.py  /api/automation/log/, …/stats/, /api/automation/cycles/, /api/automation/export.csv
   acinfinity.py      AC-Infinity-Client (Login, Test-Sitzung, Live-Pause, set_fan_level, Sicherungen) – auch vom Data-Service geladen
   fan_views.py       /api/fans/* (status, credentials, backup, restore, test, session, automation)
   live_views.py      /api/live/
@@ -368,14 +437,16 @@ data-service/
   app.py             Jobs (live_cycle, poll_all_sources …)
   live_reader.py     zentrale Abfrage 5 s
   miner_cache.py     Zwischenspeicher + Sperre je Gerät
-  fan_automation.py  Temperatur-Automatik + Lernwerte
+  fan_automation.py  Temperatur-Automatik v2 (Regelung nach Plan, Lernwerte je Stufe)
+  automation_journal.py   Protokoll (automation_log, automation_cycle, Aufräumen 360 Tage)
   calibration.py     Takt-Tabellen
-  throttle_controller.py  Drosselung (A15 manuell, Nano/Q TH/s)
+  throttle_controller.py  Drosselung Nano/Q (TH/s); A15 nur Profile/Beobachtung
   collectors/avalon_collector.py   Erfassung aus der zentralen Abfrage
 frontend/src/
   lib/LiveContext.jsx              gemeinsame Live-Abfrage 5 s
-  pages/OverviewDashboard.jsx, CalibrationPage.jsx, FansPage.jsx
+  pages/OverviewDashboard.jsx, CalibrationPage.jsx, FansPage.jsx, ProtocolPage.jsx
   components/devices/ThrottleCard.jsx, OverHotBanner.jsx   components/ui/info-tip.jsx
+docs/claude/Regelungslogik-Luefter-Takt.drawio   freigegebenes Diagramm der Regelung (8 Seiten)
 docker-compose.yml   Data-Service-Mounts acinfinity_data + backend/api (ro)
 ms-build-frontend.sh, ms-recreate.sh   VPS-Hilfsskripte (virtfs)
 ```
@@ -391,6 +462,9 @@ podman logs --since 5m minersentinel-data-service 2>&1 | grep -E " - ERROR - |Tr
 podman logs --since 30m minersentinel-data-service 2>&1 | grep "Temperatur-Automatik:"   # Aktionen der Automatik
 podman exec minersentinel-postgres psql -U minersentinel -d minersentinel -tAc "select id,status,step_index,message from calibration_runs order by id desc limit 3"
 podman exec minersentinel-postgres psql -U minersentinel -d minersentinel -tAc "select enabled, level, state - 'temps' - 'log' from fan_automation"
+# Protokoll der Regelung: letzte Ereignisse / Zyklen
+podman exec minersentinel-postgres psql -U minersentinel -d minersentinel -tAc "select recorded_at, kind, ok, trigger, clock_old, clock_new, fan_new, takeover_state, takeover_s, api_ms from automation_log order by id desc limit 20"
+podman exec minersentinel-postgres psql -U minersentinel -d minersentinel -tAc "select recorded_at, phase, chip_temp, clock_set, clock_reported, fan_level, decision from automation_cycle order by id desc limit 12"
 podman restart -t 5 minersentinel-data-service
 rm -f /root/fe-build7.status; (nohup ./ms-build-frontend.sh > /root/fe-build7.status 2>&1 &)
 # Anfragen an den A15 zählen (60 s)
@@ -421,8 +495,9 @@ meldet „name … already in use“): virtfs-Spiegel der Container-ID und des O
   Ordner `frontend/dist-local`, ebenfalls ausgeschlossen). Die Python-Umgebung liegt im Session-Scratchpad – in einer neuen
   Session neu anlegen (3.10).
 - **Kein lokaler Data-Service** (würde die echten Geräte abfragen und eine zweite Regelung betreiben). Folge: lokal sind alle
-  MinerGeräte „offline“, Drosselungs-Karte ausgeblendet. **Lokal nichts setzen, was auf echte Geräte wirkt** (Drosselung, Neustart,
+  MinerGeräte „offline“, Takt-Karte ausgeblendet. **Lokal nichts setzen, was auf echte Geräte wirkt** (Drosselung Nano/Q, Neustart,
   Workmode schicken das lokale Backend direkt an die Miner).
+- Im Browser prüfen: die Live-Seite im Browser-Panel, wenn der Nutzer sich dort angemeldet hat (nie selbst Passwörter eingeben).
 - AC Infinity lokal: Zugangsdaten trägt der Nutzer selbst ein; „Test aktivieren (5 min)“, Live übernimmt danach (7.6).
 
 ---

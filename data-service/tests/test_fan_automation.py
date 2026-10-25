@@ -360,13 +360,37 @@ def test_learns_after_15_minutes_unchanged(miner):
     assert r.events('lernwert')
 
 
-def test_clock_step_restarts_learning_noted_in_the_step(miner):
+def test_fine_steps_do_not_restart_learning_mean_clock_is_stored(miner):
+    """25.10. live: jeder ±1-Schritt startete die 15 min neu – in 2 h kein Lernwert."""
     ac = FakeAC(level=4)
     r = started(miner, ac, level=4, learned={'4': {'mhz': 280, 'temp_avg': 82, 'at': 'x', 'count': 1}})
     r.go(300, temp=82)
-    r.go(5, temp=83)
-    step = [e for e in r.events('takt') if (e.get('details') or {}).get('schritt') == -1][0]
-    assert step['details']['lernperiode_neu_gestartet'] is True
+    r.go(5, temp=83)                                              # −1 MHz (279)
+    assert miner.clock() == 279
+    r.go(620, temp=83)
+    lw = r.st['learned']['4']
+    assert lw['count'] == 2 and 279 < lw['mhz'] < 280             # Mittel des gesetzten Takts der 15 min
+    assert not any((e.get('details') or {}).get('lernperiode_neu_gestartet') for e in r.events('takt'))
+
+
+def test_short_dip_below_80_keeps_learning_long_one_restarts(miner):
+    ac = FakeAC(level=4)
+    r = started(miner, ac, level=4, learned={'4': {'mhz': 280, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    r.go(60, temp=82)
+    since = r.st['learn_since']
+    r.go(30, temp=79)                                             # 30 s Ausflug: Lernperiode läuft weiter
+    r.go(30, temp=82)
+    assert r.st['learn_since'] == since
+    r.go(70, temp=79)                                             # länger als 60 s: neu
+    assert r.st['learn_since'] is None and r.events('lernen_ende')[-1]['details']['ergebnis'] == 'abgebrochen'
+
+
+def test_fan_change_restarts_learning(miner):
+    ac = FakeAC(level=4)
+    r = started(miner, ac, level=4, learned={'4': {'mhz': 280, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    r.go(60, temp=82)
+    r.go(5, temp=85)                                              # hohe Chiptemperatur → Lüfter + 1
+    assert r.st['learn_since'] is None
 
 
 # ---------------------------------------------------------------- Situationen
