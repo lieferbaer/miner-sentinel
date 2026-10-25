@@ -151,7 +151,7 @@ solange die Seite offen ist. Steuerung läuft immer auf dem Server, unabhängig 
 - Python ≥ 3.10 nötig (System-Python 3.9 reicht nicht): `/opt/homebrew/bin/python3.10 -m venv <dir>` + requirements von backend und data-service + pytest, pytest-django.
 - pytest mit `-p no:cacheprovider -q -o addopts=""` aufrufen, sonst fehlt die Zusammenfassung (pyproject-Einstellungen).
   Das venv im Scratchpad kann von macOS teilweise gelöscht werden (25.10.: `pytest` fehlte) → in jeder Session neu anlegen.
-- Stand 25.10.: **Backend 191 ✓, Data-Service 156 ✓ (5 übersprungen), Frontend 153 ✓**, Lint 0 Fehler (15 Warnungen aus dem Original).
+- Stand 25.10.: **Backend 191 ✓, Data-Service 158 ✓ (5 übersprungen), Frontend 153 ✓**, Lint 0 Fehler (15 Warnungen aus dem Original).
   Achtung: `npm run lint` meldet zusätzlich Fehler aus `frontend/dist-local/` (lokaler Build-Ordner, nicht im Repo) – ignorieren.
 
 ---
@@ -297,7 +297,7 @@ liegt. Der **Modus folgt dem Takt**. Der Lüfter weicht nur vorübergehend ab (K
 | Start (Basisstufe gewählt, Automatik ein, Neustart des Miners, nach Wartung, nach Takt-Messung, nach Over Hot) | Starttakt = **Lernwert der Basisstufe**, sonst **Initialwert** (Stufe 1 = 100 … 10 = 190 MHz, je +10); Modus nach Tabelle ohne Spielraum; Lüfter = Basisstufe. Braucht keine gültige Temperatur. |
 | Hohe Chiptemperatur | ab 85 °C: Lüfter Basis +1, Takt −10 · ab 86: +1, −20 · ab 88: +2, −30 · ab 90: +2, −50 · ab 92: +2, −80 · ab 94: +2, −100. Lüfter **sofort**, relativ zur Basisstufe, nie addieren; **niedrigere Korrekturstufe erst nach 30 s** Bedarf. Takt beim Eintritt in die Korrekturphase sofort, danach erst nach dem 30-s-Beobachtungsfenster und nur bei nicht fallender Tendenz, jeweils vom dann gesetzten Takt. |
 | Korrekturphase | aktive Stufe > Basisstufe. **Keine Plus-Schritte.** Rückkehr zur Basisstufe nach **1 min stabil in 80–84 °C** oder **sofort unter 80 °C**. |
-| Feintuning | 80–84 °C mit Tendenz nach oben (Anstieg *innerhalb* 80–84): +1 °C → −1 MHz, ≥ +2 °C → −2; nach −1 im nächsten Fenster weiter steigend → −2. 79 °C → +1 · 76–78 → +2 · 70–75 → +5 · 60–69 → +20 · < 60 → +40; Plus nur bei nicht steigender Tendenz; brachte der letzte Plus-Schritt ≥ 2 °C Anstieg → eine Größe kleiner (+5 → +2 → +1). Feinschritte hat Claude entwickelt (Auftrag des Nutzers). |
+| Feintuning | 80–84 °C mit **Tendenz zur oberen Grenze erst ab 82 °C** (Anstieg 82 → 83 → 84; v2.0.2, Nutzer 25.10.: 80 → 81 war Rauschen und löste alle 1,2 min −1 aus): +1 °C → −1 MHz, ≥ +2 °C → −2; nach −1 im nächsten Fenster weiter steigend → −2. **79 °C → +1 erst, wenn die 79 °C 30 s anhalten** (v2.0.2) · 76–78 → +2 · 70–75 → +5 · 60–69 → +20 · < 60 → +40; Plus nur bei nicht steigender Tendenz; brachte der letzte Plus-Schritt ≥ 2 °C Anstieg → eine Größe kleiner (+5 → +2 → +1). Feinschritte hat Claude entwickelt (Auftrag des Nutzers). |
 | Beobachtungsfenster / Tendenz | **30 s** nach jeder bestätigten Taktänderung. Tendenz = jetzt gegen den Wert von vor höchstens 30 s (bei jüngerer Taktänderung gegen deren Wert). |
 | Grenzen | 100–440 MHz; ein berechneter Takt unter 100 → **nicht senden**, Eintrag `fehler`, Takt bleibt. |
 | Modus | 0–360 mode 04 · 361–380 03 · 381–400 02 · 401–420 01 · 421–440 00. **Spielraum 10 MHz nur nach unten** (abwärts erst bei 350/370/390/410). Normal: erst Modus, Übernahme, dann Takt. **Bei hoher Chiptemperatur: Takt sofort, dann Modus, dann Takt erneut** (der Moduswechsel stellt den Standardtakt ein). Moduswechsel durch den Nutzer: Automatik arbeitet weiter. |
@@ -331,7 +331,7 @@ ausnahme > normal; wartung, aus), Flags `corr`, `exc_active`, `cal`, `start_reas
 `maintenance_start`, `maintenance_end`).
 
 **Simulation:** `data-service/tests/test_fan_automation.py` enthält zwei Simulationen mit einem **Schätzmodell** (keine Messwerte;
-Nutzerentscheidung 24.10.). 51 Regel-Tests, je einer pro Regel/Befund.
+Nutzerentscheidung 24.10.). 53 Regel-Tests, je einer pro Regel/Befund.
 
 ### 7.9 Zentrale Abfrage & Live-API (`data-service/live_reader.py`, `miner_cache.py`, `backend/api/live_views.py`, `frontend/src/lib/LiveContext.jsx`)
 - **Ein Leser alle 5 s**: `estats` + `summary` je Avalon (parallel, ein ausgeschaltetes Gerät bremst nichts), A15-Webinterface alle 30 s
@@ -404,7 +404,7 @@ Original + „Activity“ + „Takt-Tabellen“ + „Lüfter“; Dockerfiles/Com
 20. **v1.0.7 hielt die Rampe der Firmware für „Miner ändert den Takt selbst“** (25.10.: 183 → 152 → 100 MHz, Takt doppelt gesendet). Die 60-s-Sperre aus v1.0.2 war beim Neuschreiben verloren gegangen → v1.0.8. Lehre: beim Neuschreiben alle bisherigen Festlegungen (dieser Abschnitt, 7.8) abhaken.
 21. Plan der Regelung: falsche Verknüpfungen, Abkürzungen und eigene Annahmen im Plan kosteten mehrere Runden (23./24.10.) → Regel „Pläne/Logik“ in Abschnitt 1.
 22. Hintergrund-Agenten brachen am Sitzungslimit ab (25.10.): Teilergebnisse und „widerlegte“ Befunde ohne Stimmen selbst prüfen – 12 von 16 waren echt.
-23. **Kein Lernwert in 2 h** (25.10.): Die Chiptemperatur stand an der Grenze 80 °C, das ±1-°C-Rauschen löste alle 1,2 min einen ±1-MHz-Schritt aus, jeder startete die Lernzeit neu. Lösung v2.0.1 (7.8 Lernen). Offen zur Besprechung: Unruhe durch Rauschen an der 80-°C-Grenze (11).
+23. **Kein Lernwert in 2 h** (25.10.): Die Chiptemperatur stand an der Grenze 80 °C, das ±1-°C-Rauschen löste alle 1,2 min einen ±1-MHz-Schritt aus, jeder startete die Lernzeit neu. Lösung v2.0.1 (7.8 Lernen); die Unruhe an der 80-°C-Grenze ab v2.0.2 (7.8 Feintuning).
 
 ---
 
@@ -414,7 +414,7 @@ Original + „Activity“ + „Takt-Tabellen“ + „Lüfter“; Dockerfiles/Com
 2. **±3 % oder ±2 %**: nach einigen Punkten Spalte „Schwankung“ auswerten.
 3. Regelung v2 beobachten (Protokoll-Seite): Feinschritte, Korrekturphase, erste Lernwerte; Stabilitätszeit 1 min (Rückkehr) anhand der
    gemessenen Reaktionszeiten prüfen (Nutzerwunsch aus dem Plan).
-4. **Unruhe an der 80-°C-Grenze:** 71 Taktbefehle in 126 min (±1 MHz, ausgelöst vom ±1-°C-Rauschen). Möglich: „Tendenz zur oberen Grenze“ erst ab 82 °C, +1 bei 79 °C erst nach 30 s – mit dem Nutzer besprechen.
+4. **Unruhe an der 80-°C-Grenze** ab v2.0.2 behoben (Tendenz ab 82 °C, +1 bei 79 °C nach 30 s) – live beobachten (Schätzmodell mit ±1 °C Rauschen: 240 → 16 Taktbefehle in 3 h).
 5. Takt laut Miner liegt 13–20 MHz über dem gesetzten (Nachziehen der Firmware); ab > 25 MHz sendet die Regelung neu – beobachten.
 6. Einstellungsseite des A15 nicht erreichbar = „Miner antwortet nicht“ (7.8, bekannt).
 7. Allgemeine Zeitraumauswahl („Last 30 days“) erscheint auch auf Protokoll- und Lüfter-Seite, ohne Wirkung dort.

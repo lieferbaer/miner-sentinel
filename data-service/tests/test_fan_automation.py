@@ -692,3 +692,32 @@ def test_firmware_ramp_after_a_clock_change_is_no_override(miner, monkeypatch):
     r = started(miner, ac, level=1)
     r.go(30, temp=70)
     assert [round(x) for x in miner.clock_sets].count(100) == 1 and not r.events('firmware_takt')
+
+
+
+# ---------------------------------------------------------------- Unruhe an der 80-°C-Grenze (25.10.)
+
+def test_rise_80_to_81_is_no_tendency_82_to_83_is(miner):
+    """25.10. live: 80 → 81 °C (Rauschen) löste alle 1,2 min −1 MHz aus. Tendenz zur oberen Grenze erst ab 82 °C."""
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, tmax=80, learned={'5': {'mhz': 300, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    r.go(40, temp=80)
+    r.go(40, temp=81)
+    assert miner.clock() == 300                                   # 80 → 81: kein Minus-Schritt
+    r.go(40, temp=82)
+    assert miner.clock() == 300                                   # 81 → 82: auch nicht
+    r.go(5, temp=83)
+    assert miner.clock() == 299                                   # 82 → 83: −1
+
+
+def test_plus_one_at_79_only_after_30_s(miner):
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, tmax=80, learned={'5': {'mhz': 200, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    r.go(40, temp=80)
+    r.go(20, temp=79)
+    r.go(20, temp=80)
+    assert miner.clock() == 200                                   # 79 °C nur 20 s: kein +1
+    r.go(25, temp=79)
+    assert miner.clock() == 200
+    r.go(10, temp=79)
+    assert miner.clock() == 201                                   # 79 °C 30 s: +1

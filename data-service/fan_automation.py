@@ -44,6 +44,8 @@ MODE_TOP = {4: 360, 3: 380, 2: 400, 1: 420, 0: 440}   # oberer Takt je Modus (mo
 MODE_DOWN_MARGIN = 10         # Spielraum nach unten: Wechsel in den tieferen Modus erst 10 MHz unter dessen Obergrenze
 WINDOW_S = 30                 # Beobachtungsfenster nach jeder Taktänderung
 TENDENCY_S = 30               # Tendenz: gegen den Wert von vor höchstens 30 s (bzw. bei der letzten Taktänderung)
+TENDENCY_FROM = 82            # Tendenz zur oberen Grenze erst ab 82 °C (82 → 83 → 84; Nutzer 25.10.)
+PLUS_ONE_AFTER_S = 30         # +1 MHz bei 79 °C erst, wenn die Chiptemperatur 30 s unter 80 °C liegt (Nutzer 25.10.)
 RETURN_STABLE_S = 60          # Rückkehr zur Basisstufe nach 1 min stabil in 80-84 °C
 FAN_DOWN_DELAY_S = 30         # niedrigere Korrekturstufe erst, wenn die Tabelle sie 30 s lang verlangt
 EXC_BELOW = 70                # Ausnahme: unter 70 °C ...
@@ -790,8 +792,9 @@ class Round:
             return
         old = int(round(old))
         last = st.get('last_step') or {}
-        # Tendenz zur oberen Grenze: die Chiptemperatur steigt IM Bereich 80-84 (Bezugswert auch im Bereich)
-        if T_LOW <= t <= T_HIGH and d > 0 and ref is not None and T_LOW <= ref <= T_HIGH:
+        # Tendenz zur oberen Grenze: die Chiptemperatur steigt ab 82 °C Richtung 84 (82 → 83 → 84; Nutzer 25.10.:
+        # 80 → 81 ist das Rauschen an der Untergrenze und löste alle 1,2 min einen −1-Schritt aus)
+        if T_LOW <= t <= T_HIGH and d > 0 and ref is not None and TENDENCY_FROM <= ref <= T_HIGH:
             size = 1 if d == 1 else 2
             if (last.get('size') == -1 and (last.get('effect') or 0) > 0
                     and _age(last.get('window_end'), self.now) <= 2 * RUN_S):
@@ -800,6 +803,8 @@ class Round:
                              step=-size)
             return
         if not st.get('corr') and t < T_LOW and d <= 0 and old < CLOCK_MAX:
+            if plus_size(t) == 1 and _age(st.get('below_since'), self.now) < PLUS_ONE_AFTER_S:
+                return                                   # +1 bei 79 °C erst, wenn sie 30 s anhalten (Nutzer 25.10.)
             size = plus_size(t)
             last_size = last.get('size') or 0
             if last_size > 0 and (last.get('effect') or 0) >= 2 and smaller_plus(last_size):
@@ -959,6 +964,7 @@ class Round:
             st['t'] = self.t
             st['tendency'], self.ref = self.tendency()
             temps.append([_iso(now), self.t])
+            st['below_since'] = (st.get('below_since') or _iso(now)) if self.t < T_LOW else None
             self.update_thermal()
         if st.get('fan_target') is None:
             st['fan_target'] = st.get('fan_set') or self.base
