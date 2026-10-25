@@ -23,6 +23,9 @@ export const KIND_LABEL = {
   lernen_ende: 'Lernperiode endet',
   lernwert: 'Lernwert gespeichert',
   neustart: 'Neustart des Miners',
+  neustart_nutzer: 'Neustart (Nutzer)',
+  taktsperre: 'Taktsperre (5 min)',
+  taktsperre_ende: 'Taktsperre beendet',
   over_hot: 'Over Hot',
   miner_offline: 'Miner antwortet nicht',
   miner_online: 'Miner antwortet wieder',
@@ -33,6 +36,8 @@ export const KIND_LABEL = {
   test_start: 'Temperatur-Test gestartet',
   test_stufe: 'Temperatur-Test: neue Stufe',
   test_ziel: 'Temperatur-Test: Ziel erreicht',
+  test_schritt: 'Temperatur-Test: neuer Schritt',
+  test_messung: 'Temperatur-Test: Messung',
   test_ende: 'Temperatur-Test beendet',
   fehler: 'Fehler',
 }

@@ -21,7 +21,7 @@ READ_BACK_S = 5       # user choice (was 10); measured: the controller reports a
 STATE_KEYS = ('phase', 't', 'tendency', 'boards', 'clock_set', 'clock_changed_at', 'clock_now', 'mode_key',
               'stock_mhz', 'fan_target', 'fan_set', 'fan_read', 'fan_read_at', 'fan_set_at', 'window_until',
               'window_active', 'learn_since', 'cal', 'over_hot', 'offline', 'ac_error', 'last_error', 'seen_at',
-              'exc_active')
+              'exc_active', 'calm')
 PENDING_KEYS = ('kind', 'value', 'sent_at', 'attempt')
 STATE_FRESH_S = 15    # the data-service writes the state every 5 s (only while it reads the miner)
 TMAX_FRESH_S = 30     # the collector writes the chip temperatures every 10 s
@@ -64,7 +64,7 @@ def automation_payload():
     state = {k: st.get(k) for k in STATE_KEYS}
     state['base'] = auto.level
     state['pending'] = {k: pending.get(k) for k in PENDING_KEYS} if pending else None
-    # Temperatur-Test: stage, band, ends as the data-service wrote them; only for the test that is set now (an aborted
+    # Temperatur-Test: step, clock, phase, times as the data-service wrote them; only for the test that is set now (an aborted
     # or older test keeps its state until the next full round of the data-service)
     test = st.get('test')
     started = parse_datetime(test.get('started') or '') if isinstance(test, dict) else None

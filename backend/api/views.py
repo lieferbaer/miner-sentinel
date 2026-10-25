@@ -375,6 +375,13 @@ class DeviceViewSet(viewsets.ModelViewSet):
             reply = _cgminer_command(device.ip_address, device.port, 'ascset|0,reboot,0', timeout=8)
         except OSError as exc:
             return Response({'error': 'Miner nicht erreichbar: {}'.format(exc)}, status=status.HTTP_502_BAD_GATEWAY)
+        # the A15 of the Temperatur-Automatik: user event in its protocol (Nutzer 25.10.)
+        from .fan_views import _automation, _user_event
+        dev, auto = _automation()
+        if dev and dev.id == device.id:
+            _user_event(dev, auto, 'neustart_nutzer', 'Nutzer: A15-Neustart gesendet', target='miner',
+                        endpoint='cgminer %s:%s' % (device.ip_address, device.port or 4028),
+                        request='ascset|0,reboot,0', response=reply[:300], ok=True)
         return Response({'status': 'ok', 'device_reply': reply[:300]})
 
     # ---- Throttle: scale the Avalon PLL frequencies to a target hashrate ----

@@ -152,7 +152,7 @@ solange die Seite offen ist. Steuerung läuft immer auf dem Server, unabhängig 
 - Python ≥ 3.10 nötig (System-Python 3.9 reicht nicht): `/opt/homebrew/bin/python3.10 -m venv <dir>` + requirements von backend und data-service + pytest, pytest-django.
 - pytest mit `-p no:cacheprovider -q -o addopts=""` aufrufen, sonst fehlt die Zusammenfassung (pyproject-Einstellungen).
   Das venv im Scratchpad kann von macOS teilweise gelöscht werden (25.10.: `pytest` fehlte) → in jeder Session neu anlegen.
-- Stand 25.10.: **Backend 197 ✓, Data-Service 165 ✓ (5 übersprungen), Frontend 153 ✓**, Lint 0 Fehler (15 Warnungen aus dem Original).
+- Stand 25.10. (v2.0.6): **Backend 198 ✓, Data-Service 174 ✓ (5 übersprungen), Frontend 153 ✓**, Lint 0 Fehler (15 Warnungen aus dem Original).
   Achtung: `npm run lint` meldet zusätzlich Fehler aus `frontend/dist-local/` (lokaler Build-Ordner, nicht im Repo) – ignorieren.
 
 ---
@@ -297,21 +297,21 @@ Seit **v1.0.7 (25.10.)** nach dem Plan des Nutzers vom 23./24.10. Diagramm: **`d
 **Bei Änderungen an der Regelung: Plan/Diagramm zuerst mit dem Nutzer abstimmen** (Regeln 1).
 
 **Grundprinzip:** Der Nutzer wählt die Lüfterstufe = **Basisstufe** (gewählt werden 1–7; 8–10 „nie als Basisstufe“). Die Automatik
-regelt den **Takt** (gesetzter Takt, 100–440 MHz), damit die **Chiptemperatur** (TMax, heißester Chip, Einzelwert) bei **80–84 °C**
-liegt. Der **Modus folgt dem Takt**. Der Lüfter weicht nur vorübergehend ab (Korrekturphase nach oben, Ausnahme nach unten).
+regelt den **Takt** (gesetzter Takt, 100–440 MHz), damit die **Chiptemperatur** (TMax, heißester Chip, Einzelwert) bei **79–84 °C**
+liegt; **dort keine Taktänderung** (v2.0.6, Nutzer 25.10.). Der **Modus folgt dem Takt**. Der Lüfter weicht nur vorübergehend ab (Korrekturphase nach oben, Ausnahme nach unten).
 
 | Regel | Vorgabe des Nutzers |
 |---|---|
 | Start (Basisstufe gewählt, Automatik ein, Neustart des Miners, nach Wartung, nach Takt-Messung, nach Over Hot) | Starttakt = **Lernwert der Basisstufe**, sonst **Initialwert** (Stufe 1 = 100 … 10 = 190 MHz, je +10); Modus nach Tabelle ohne Spielraum; Lüfter = Basisstufe. Braucht keine gültige Temperatur. |
-| Hohe Chiptemperatur | ab 85 °C: Lüfter Basis +1, Takt −10 · ab 86: +1, −20 · ab 88: +2, −30 · ab 90: +2, −50 · ab 92: +2, −80 · ab 94: +2, −100. Lüfter **sofort**, relativ zur Basisstufe, nie addieren; **niedrigere Korrekturstufe erst nach 30 s** Bedarf. Takt beim Eintritt in die Korrekturphase sofort, danach erst nach dem 30-s-Beobachtungsfenster und nur bei nicht fallender Tendenz, jeweils vom dann gesetzten Takt. |
+| Hohe Chiptemperatur | ab 85 °C: Lüfter Basis +1 · ab 86: +1 · **Takt bei 85–87 °C nach dem Aufenthalt in 79–84 °C davor** (v2.0.6, Nutzer 25.10.: gemessen ab dem letzten Eintritt in 79–84 °C, von unten oder oben, bis zum ersten Wert über 84 °C; ohne Aufenthalt 0): **unter 10 min −10 MHz, sonst −5 MHz**; der Wert gilt für alle Absenkungen bei 85–87 °C bis zum Ende der Korrekturphase (`band_in`, `band_dwell_s`, `corr_dwell_s`; Protokoll „Chiptemperatur 85 °C nach 6 min in 79–84 °C: Takt −10 MHz“) · ab 88: +2, −30 · ab 90: +2, −50 · ab 92: +2, −80 · ab 94: +2, −100. Lüfter **sofort**, relativ zur Basisstufe, nie addieren; **niedrigere Korrekturstufe erst nach 30 s** Bedarf. Takt beim Eintritt in die Korrekturphase sofort, danach erst nach dem 30-s-Beobachtungsfenster und nur bei nicht fallender Tendenz, jeweils vom dann gesetzten Takt. |
 | Korrekturphase | aktive Stufe > Basisstufe. **Keine Plus-Schritte.** Rückkehr zur Basisstufe nach **1 min stabil in 80–84 °C** oder **sofort unter 80 °C**. |
-| Feintuning | 80–84 °C mit **Tendenz zur oberen Grenze erst ab 82 °C** (Anstieg 82 → 83 → 84; v2.0.2, Nutzer 25.10.: 80 → 81 war Rauschen und löste alle 1,2 min −1 aus): +1 °C → −1 MHz, ≥ +2 °C → −2; nach −1 im nächsten Fenster weiter steigend → −2. **79 °C → +1 erst, wenn die 79 °C 30 s anhalten** (v2.0.2) · 76–78 → +2 · 70–75 → +5 · 60–69 → +20 · < 60 → +40; Plus nur bei nicht steigender Tendenz; brachte der letzte Plus-Schritt ≥ 2 °C Anstieg → eine Größe kleiner (+5 → +2 → +1). Feinschritte hat Claude entwickelt (Auftrag des Nutzers). |
+| Feintuning (v2.0.6, Nutzer 25.10.) | **79–84 °C: keine Taktänderung** (die früheren −1/−2 bei steigender Tendenz und +1 bei 79 °C entfallen). **Kleinster Taktschritt 5 MHz**: unter 79 °C 70–78 → **+5** · 60–69 → +20 · < 60 → +40; Plus nur bei nicht steigender Tendenz, nicht in der Korrekturphase; „eine Größe kleiner“ entfällt. **Taktsperre:** war die letzte Taktänderung bei über 84 °C (Absenkung ab 85 °C) und fällt die Chiptemperatur unter 79 °C → **5 min keine Taktänderung**, gezählt ab dem ersten Unterschreiten, **einmal je Taktänderung** (`calm`, `calm_for`); über 84 °C endet sie sofort (Ereignisse `taktsperre` „Taktsperre 5 min bis HH:MM“, `taktsperre_ende`; Seite: „Taktsperre bis HH:MM“). Grund (Nutzer): häufige Taktwechsel erhöhen vermutlich die Fehlerrate und senken die Hashrate. |
 | Beobachtungsfenster / Tendenz | **30 s** nach jeder bestätigten Taktänderung. Tendenz = jetzt gegen den Wert von vor höchstens 30 s (bei jüngerer Taktänderung gegen deren Wert). |
 | Grenzen | 100–440 MHz; ein berechneter Takt unter 100 → **nicht senden**, Eintrag `fehler`, Takt bleibt. |
 | Modus | 0–360 mode 04 · 361–380 03 · 381–400 02 · 401–420 01 · 421–440 00. **Spielraum 10 MHz nur nach unten** (abwärts erst bei 350/370/390/410). Normal: erst Modus, Übernahme, dann Takt. **Bei hoher Chiptemperatur: Takt sofort, dann Modus, dann Takt erneut** (der Moduswechsel stellt den Standardtakt ein). Moduswechsel durch den Nutzer: Automatik arbeitet weiter. |
 | Senden / Übernahme | Vor jedem Taktbefehl Zielpunkte mit den gemeldeten SF0-Punkten vergleichen: **gleich → kein Befehl**. Übernommen: Modus = Miner meldet ihn; Takt = Miner meldet den gesetzten Wert **oder** einen anderen Wert als vorher. Ohne Übernahme **nach 20 s erneut, bis es klappt** (jeder Versuch im Protokoll). |
 | Ausnahme | Takt = 440 MHz und **3 min** stabil unter 70 °C → aktive Stufe −1 (nicht unter 1), danach erneut 3 min; Ende über 70 °C, **Stufe bleibt reduziert**; zurück nach oben nur über „Hohe Chiptemperatur“. |
-| Lernen | **15 min** auf derselben Lüfterstufe → Lernwert der **aktiven Stufe** = **Mittelwert des gesetzten Takts** der 15 min, Temperaturmittel, Zeit, Anzahl; jede weitere Periode ersetzt ihn. **Feinschritte (±1/±2 MHz) setzen die Lernzeit nicht zurück, Ausflüge aus 80–84 °C bis 60 s auch nicht** (Nutzer 25.10., v2.0.1: vorher entstand in 2 h kein Lernwert – 65 von 71 Schritten starteten die Periode neu, dazu 33 kurze Ausflüge auf 79 °C). Neu beginnt sie bei Lüfterwechsel, Moduswechsel, ab 85 °C oder > 60 s außerhalb 80–84 °C. Keine Übertragung zwischen Stufen, keine Jahreszeiten-Logik. Start ohne Lernwerte (alte Lernwerte je Modus beim Umstieg verworfen). |
+| Lernen | **15 min** auf derselben Lüfterstufe → Lernwert der **aktiven Stufe** = **Mittelwert des gesetzten Takts** der 15 min, Temperaturmittel, Zeit, Anzahl; jede weitere Periode ersetzt ihn. **Lernbereich 79–84 °C** (v2.0.6, Nutzer 25.10.: wandert mit dem Bereich ohne Taktänderung; vorher 80–84). **Taktschritte setzen die Lernzeit nicht zurück, Ausflüge aus 79–84 °C bis 60 s auch nicht** (Nutzer 25.10., v2.0.1: vorher entstand in 2 h kein Lernwert – 65 von 71 Schritten starteten die Periode neu, dazu 33 kurze Ausflüge auf 79 °C). Neu beginnt sie bei Lüfterwechsel, Moduswechsel, ab 85 °C oder > 60 s außerhalb 79–84 °C. Keine Übertragung zwischen Stufen, keine Jahreszeiten-Logik. Start ohne Lernwerte (alte Lernwerte je Modus beim Umstieg verworfen). |
 | Situationen | Neustart → Start · Miner ändert den Takt selbst → erneut senden · Over Hot → keine Entscheidung bis gültige Werte, danach Start · Miner antwortet nicht → Lüfter unverändert, warten · Lüftersteuerung antwortet nicht/andere Stufe → erneut senden, bis es klappt · Takt-Messung → Taktregelung pausiert, Lüfter nur nach „Hohe Chiptemperatur“, danach Start · Wartung → wie bisher (unten) · Automatik aus → **kein Takt gesendet, Takt bleibt** · Drosselung abgeschafft. |
 
 **Technische Festlegungen (vom Nutzer bestätigt bzw. aus v1.0.2 übernommen):**
@@ -327,23 +327,32 @@ liegt. Der **Modus folgt dem Takt**. Der Lüfter weicht nur vorübergehend ab (K
 - Bekannt, nicht gelöst: Antwortet nur die **Einstellungsseite** des A15 nicht, gilt das als „Miner antwortet nicht“ (eine Umgehung
   hätte die Pool-Zugangsdaten im Umschaltbefehl gefährdet).
 
-**Temperatur-Test** (v2.0.4, Nutzer 25.10.): Button „Temperatur-Test starten“ auf der Lüfter-Seite (`fan_automation.temp_test_at`,
-Migration 0025). **5 Stufen mit festem Ziel TMax 84, 86, 88, 90, 92 °C (je ±1 °C)**, danach Normalbetrieb. Grund (Nutzer):
-mit dem Bereich 80–84 °C lag TMax praktisch immer bei 80–81 °C; ein breiter Bereich ergibt keinen festen Messpunkt.
-Eigene Taktregeln im Test: Ziel + 2 → −1 MHz, ab Ziel + 3 → −2; Ziel ± 1 → nichts; Ziel − 2 °C 30 s lang → +1; Ziel − 3 … − 5 → +2;
-darunter +5; Beobachtungsfenster 30 s. Keine Lüfterkorrektur, kein Lernen. Abbruch bei **Ziel + 4 °C**, Over Hot, Takt-Messung,
-Automatik aus, Wartung oder „Test abbrechen“. Ereignisse `test_start`, `test_stufe`, `test_ziel`, `test_ende`.
-**Stufenzeit (v2.0.5, Nutzer 25.10.):** jede Stufe heizt auf, bis TMax das Ziel zum ersten Mal erreicht (erste 5-s-Messung ≥ Ziel,
-Ereignis `test_ziel` „Ziel … erreicht, Stufe läuft bis HH:MM“); **ab dann 30 min**, auch wenn TMax danach wieder darunter liegt.
-Für „Ziel nie erreicht“ gibt es bewusst keine Regel (Nutzer: nicht möglich). Zustand `state.test`: `stage`, `target`, `band`,
-`reached_at`, `stage_ends` (erst ab Erreichen), `ends` (erst wenn Stufe 5 ihr Ziel erreicht hat; Seite sonst „Testende offen“).
-Ein laufender Test aus v2.0.4 (ohne `reached_at`) wurde übernommen: seine Stufe zählte ab dem nächsten Erreichen des Ziels.
-Auswertung: DH, GHSspd, Leistung, J/TH, Takt, Anteil Zeit in Ziel ± 1 aus `automation_cycle` (je Stufe die 30 min ab `test_ziel`;
-ob davon noch etwas verworfen wird, mit dem Nutzer klären).
+**Temperatur-Test** (v2.0.6, Nutzer 25.10.): Button „Temperatur-Test starten“ auf der Lüfter-Seite (`fan_automation.temp_test_at`,
+Migration 0025). Ablauf: **Takt auf den Lernwert der Basisstufe** (sonst Initialwert wie beim Start), warten bis TMax **≤ 80 °C**;
+dann **zweimal +30 MHz** (z. B. 319 → 349 → 379), je **nach Übernahme des Takts 2 min warten, dann 20 min messen**; danach
+Normalbetrieb (Start „nach Temperatur-Test“ mit dem Lernwert). Modus nach der allgemeinen Regel (379 MHz = mode 03: erst Modus,
+dann Takt; Zieltakt = Standardtakt → kein Taktbefehl); die 2 min beginnen erst nach der Übernahme des Takts nach dem Moduswechsel.
+Während des Tests: Takt fest (keine Taktregelung), Lüfter auf der Basisstufe (keine Korrektur), kein Lernen. Abbruch ab **96 °C**,
+Over Hot, Takt-Messung, **Neustart des Miners**, **Wahl der Basisstufe** (beide nur bei laufendem Test – sonst setzt der Start mitten
+in der Messung den Lernwert; vor dem Beginn setzen Start und Test-Beginn denselben Lernwert),
+Automatik aus, Wartung oder „Test abbrechen“; nach einem Abbruch gelten sofort die normalen Regeln (ab 85 °C Korrekturphase).
+Zustand `state.test`: `step` (0 = Beginn, 1, 2), `clock`, `phase` (`einstellen`, `beginn`, `warten`, `messen`), `wait_ends`,
+`measure_from`, `measure_ends`. Ereignisse `test_start`, `test_schritt` („Schritt 1/2: Takt 349 MHz (+30 MHz)“), `test_messung`
+(„Messung läuft bis HH:MM“, Details `testschritt`, `takt`, `von`, `bis`), `test_ende` (Grund; ein Abbruchgrund geht vor „fertig“). Auswertung je Schritt: `automation_cycle` von `measure_from` bis
+`measure_ends` (DH, GHSspd, Leistung, J/TH, TMax).
+Vorgeschichte: v2.0.4/2.0.5 regelten auf feste Ziele 84–92 °C mit 1-MHz-Schritten. Ergebnis 25.10. (Mittel): vorher 80,5 °C/320 MHz
+DH 13,8 %, 123 TH/s, 18,0 J/TH; 83,1 °C/340 MHz DH 22,3 %, 113 TH/s, 20,5 J/TH; 84,1 °C/352 MHz DH 27,8 %, 100 TH/s, 23,8 J/TH.
+Temperatur und Takt stiegen dabei gemeinsam (Lüfter fest) – nicht trennbar. Nutzer: „diese einzelne Taktänderung ist nicht gesund“
+→ Test abgebrochen, neuer Ablauf v2.0.6.
 
 **Wartung** (unverändert): Button „Wartung starten (A15 ausschalten)“ (`maintenance_at`, Migration 0023; ein laufender Takt-Lauf
 wird pausiert). Antwortet der A15 nicht mehr → Lüfter **aus** (`atType` 1); antwortet er wieder → Lüfter **an auf die Stufe von
 vorher**, Wartung endet, dann Start. Keine offline/online-Meldungen während der Wartung und 15 min danach (`maint_ended_at`).
+
+**A15 neu starten** (v2.0.6, Nutzer 25.10.): Button neben „Wartung starten (A15 aus)“ mit Rückfrage; nutzt den vorhandenen
+`POST /api/devices/<id>/restart/` (`ascset|0,reboot,0`, im Canaan-Quellcode der A15 vorhanden, Verzögerung 0–300 s; die A15 meldet
+„Privileged access OK“). Für die A15 der Automatik Nutzer-Ereignis `neustart_nutzer` „Nutzer: A15-Neustart gesendet“. Danach erkennt
+der Data-Service den Neustart (Laufzeit zurückgesetzt) → Start mit dem Lernwert; ein laufender Temperatur-Test bricht ab.
 
 **Zustand** `fan_automation.state` (nur der Data-Service schreibt; `v` = 2): `phase` wird je Runde abgeleitet (messung > korrektur >
 ausnahme > normal; wartung, aus), Flags `corr`, `exc_active`, `cal`, `start_reason`, dazu `t`, `tendency`, `clock_set`,
@@ -434,9 +443,9 @@ Original + „Activity“ + „Takt-Tabellen“ + „Lüfter“; Dockerfiles/Com
 
 1. **Over-Hot-Benachrichtigung per Messenger** (Telegram/Discord/ntfy des Originals prüfen).
 2. **±3 % oder ±2 %**: nach einigen Punkten Spalte „Schwankung“ auswerten.
-3. Regelung v2 beobachten (Protokoll-Seite): Feinschritte, Korrekturphase, erste Lernwerte; Stabilitätszeit 1 min (Rückkehr) anhand der
+3. Regelung v2 beobachten (Protokoll-Seite): Plus-Schritte, Taktsperre, Korrekturphase, Lernwerte; Stabilitätszeit 1 min (Rückkehr) anhand der
    gemessenen Reaktionszeiten prüfen (Nutzerwunsch aus dem Plan).
-4. **Unruhe an der 80-°C-Grenze** ab v2.0.2 behoben (Tendenz ab 82 °C, +1 bei 79 °C nach 30 s) – live beobachten (Schätzmodell mit ±1 °C Rauschen: 240 → 16 Taktbefehle in 3 h).
+4. **Unruhe an der 80-°C-Grenze**: seit v2.0.6 keine Taktänderung in 79–84 °C, kleinster Schritt 5 MHz, Taktsperre 5 min nach Absenkung – live beobachten (Taktwechsel je Stunde, Fehlerrate).
 5. Takt laut Miner liegt 13–20 MHz über dem gesetzten (Nachziehen der Firmware); ab > 25 MHz sendet die Regelung neu – beobachten.
 6. Einstellungsseite des A15 nicht erreichbar = „Miner antwortet nicht“ (7.8, bekannt).
 7. Allgemeine Zeitraumauswahl („Last 30 days“) erscheint auch auf Protokoll- und Lüfter-Seite, ohne Wirkung dort.

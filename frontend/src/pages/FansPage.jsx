@@ -53,7 +53,7 @@ function errText(err, fallback) {
 
 // state of the regulation (fan_automation.state.phase, Regelung vom 24.10.)
 const PHASE = {
-  normal: { value: 'Normalbetrieb', sub: 'Takt regelt 80–84 °C' },
+  normal: { value: 'Normalbetrieb', sub: 'Takt regelt 79–84 °C' },
   korrektur: { value: 'Korrekturphase', sub: 'Lüfter erhöht, bis 80–84 °C erreicht sind' },
   ausnahme: { value: 'Ausnahme', sub: 'Lüfter reduziert · 440 MHz und unter 70 °C' },
   messung: { value: 'Takt-Messung', sub: 'Taktregelung pausiert, Lüfter nur ab 85 °C' },
@@ -66,12 +66,15 @@ const MODE_LABEL = { '2/L4': 'mode 04', '2/L3': 'mode 03', '2/L2': 'mode 02', '2
   '1/-': 'High Performance' }
 // the regulation in short (plan of 24.10.)
 const LOGIC_TEXT =
-  'Der Lüfter läuft fest auf der gewählten Basisstufe, der Takt hält den heißesten Chip bei 80–84 °C. Ab 85 °C ' +
-  'Lüfter +1 bzw. +2 und Takt runter (Korrekturphase); zurück zur Basisstufe nach 1 min in 80–84 °C oder sobald ' +
-  'unter 80 °C. Bei 440 MHz und 3 min unter 70 °C Lüfter −1 (Ausnahme).'
+  'Der Lüfter läuft fest auf der gewählten Basisstufe, der Takt hält den heißesten Chip bei 79–84 °C; dort keine ' +
+  'Taktänderung. Unter 79 °C Takt +5 / +20 / +40 MHz (kleinster Schritt 5 MHz). Ab 85 °C Lüfter +1 bzw. +2 und Takt ' +
+  'runter (Korrekturphase; bei 85–87 °C −10 MHz, wenn sie vorher unter 10 min in 79–84 °C lag, sonst −5 MHz); ' +
+  'zurück zur Basisstufe nach 1 min in 80–84 °C oder sobald unter 80 °C. War die letzte ' +
+  'Taktänderung über 84 °C und fällt die Temperatur unter 79 °C: 5 min keine Taktänderung (endet über 84 °C). ' +
+  'Bei 440 MHz und 3 min unter 70 °C Lüfter −1 (Ausnahme).'
 const START_TEXT =
   'Start (Stufenwahl, Einschalten, Neustart, nach Wartung oder Takt-Messung): Lernwert der Basisstufe, sonst ' +
-  'Stufe 1 = 100 MHz … Stufe 7 = 160 MHz. Lernwert: 15 min stabil in 80–84 °C bei unverändertem Takt und Lüfter.'
+  'Stufe 1 = 100 MHz … Stufe 7 = 160 MHz. Lernwert: 15 min stabil in 79–84 °C bei unveränderter Lüfterstufe.'
 
 function clockTime(iso, seconds = false) {
   return new Date(iso).toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit', ...(seconds ? { second: '2-digit' } : {}) })
@@ -100,7 +103,7 @@ function LearnedTable({ learned, level }) {
     .filter(([, v]) => v && typeof v.mhz === 'number')
     .sort((a, b) => Number(a[0]) - Number(b[0]))
   if (!rows.length) {
-    return <p className="text-muted-foreground">Lernwerte: noch keine (nach 15 min stabil bei 80–84 °C).</p>
+    return <p className="text-muted-foreground">Lernwerte: noch keine (nach 15 min stabil bei 79–84 °C).</p>
   }
   return (
     <div className="pt-1">
@@ -177,6 +180,7 @@ function AutomationCards({ auto, st }) {
   const statusSub = !regulating ? phase.sub : [
     pending,
     windowOpen ? 'Beobachtungsfenster bis ' + clockTime(st.window_until, true) : null,
+    st.calm && Date.parse(st.calm.until) > Date.now() ? 'Taktsperre bis ' + clockTime(st.calm.until) : null,
     st.learn_since ? 'lernt seit ' + clockTime(st.learn_since) : null,
   ].filter(Boolean).join(' · ') || phase.sub
   return (
@@ -188,7 +192,7 @@ function AutomationCards({ auto, st }) {
         value={fmt(tmax, 0, ' °C')}
         subtitle={[others.length ? 'weitere Boards ' + others.join(' / ') : null,
           st.t != null ? 'Regelwert ' + fmt(st.t, 0, ' °C') : null, tendency ? 'Tendenz ' + tendency : null,
-          'Ziel 80–84 °C'].filter(Boolean).join(' · ')} />
+          'Ziel 79–84 °C'].filter(Boolean).join(' · ')} />
       <MetricCard variant="hero" layout="icon-left" icon={Gauge} label="Takt laut Miner"
         value={fmt(st.clock_now, 0, ' MHz')}
         subtitle={'gesetzt ' + setText + (st.mode_key ? ' · ' + (MODE_LABEL[st.mode_key] || st.mode_key) : '') +
@@ -210,7 +214,8 @@ function AutomationCards({ auto, st }) {
 const RECENT_KINDS = ['takt', 'modus', 'luefter', 'hohe_temperatur', 'rueckkehr', 'ausnahme', 'ausnahme_ende', 'lernwert',
   'start', 'neustart', 'over_hot', 'miner_offline', 'miner_online', 'firmware_takt', 'messung_start',
   'messung_ende', 'fehler', 'basisstufe', 'automatik_ein', 'automatik_aus', 'wartung_start', 'wartung_ende',
-  'test_start', 'test_stufe', 'test_ziel', 'test_ende']
+  'test_start', 'test_stufe', 'test_ziel', 'test_schritt', 'test_messung', 'test_ende', 'neustart_nutzer', 'taktsperre',
+  'taktsperre_ende']
 const RECENT_COUNT = 20
 const RECENT_REFRESH_MS = 10000
 const RECENT_LABEL = { takt: 'Takt', modus: 'Modus', luefter: 'Lüfter', start: 'Start' }
@@ -325,25 +330,27 @@ function RecentEvents() {
   )
 }
 
-// Temperatur-Test (Nutzer 25.10.): the data-service runs the stages, the page starts and aborts it
-const TEST_QUESTION = '5 Stufen mit Ziel 84, 86, 88, 90, 92 °C (je ±1 °C), je 30 min ab Erreichen des Ziels. ' +
-  'Lernen ist währenddessen aus. Abbruch bei Ziel + 4 °C.'
+// Temperatur-Test (Nutzer 25.10., v2.0.6): the data-service runs the steps, the page starts and aborts it
+const TEST_QUESTION = 'Takt ab Lernwert zweimal +30 MHz, je 2 min warten und 20 min messen, danach Normalbetrieb. ' +
+  'Abbruch ab 96 °C.'
+
+// where the test is: Beginn (learned value, waits for ≤ 80 °C), then per step: clock being set, 2 min, measuring
+function testText(test) {
+  if (test.step === 0) return 'Beginn: wartet auf ≤ 80 °C'
+  const head = 'Schritt ' + test.step + '/' + (test.steps || 2) + ' · ' + test.clock + ' MHz · '
+  if (test.phase === 'warten') return head + 'wartet 2 min'
+  if (test.phase === 'messen') return head + 'misst bis ' + (test.measure_ends ? clockTime(test.measure_ends) : '—')
+  return head + 'Takt wird eingestellt'
+}
 
 function TempTest({ auto, st, onCommand, busy, msg }) {
   const [confirm, setConfirm] = useState(false)
   const test = st.test
-  const time = (iso) => (iso ? clockTime(iso) : '—')
   if (test || auto.temp_test_at) {
-    const goal = test?.target != null ? test.target + ' °C (±1 °C)' : '—'
     return (
       <div className="flex flex-wrap items-center gap-2 rounded-md border border-amber-500/60 bg-amber-500/10 p-2">
         <p className="w-full text-sm font-medium text-amber-600 sm:w-auto sm:flex-1">
-          {test
-            ? 'Temperatur-Test läuft: Stufe ' + test.stage + '/' + (test.stages || 5) + ' · Ziel ' + goal + ' · ' +
-              // the 30 min of a stage start when its target is reached first; the end of the test is known in the last
-              (test.stage_ends ? 'Stufe endet ' + time(test.stage_ends) : 'wartet auf ' + test.target + ' °C') + ' · ' +
-              (test.ends ? 'Test endet ' + time(test.ends) : 'Testende offen')
-            : 'Temperatur-Test startet …'}
+          {test ? 'Temperatur-Test läuft: ' + testText(test) : 'Temperatur-Test startet …'}
         </p>
         <Button size="sm" variant="outline" className="h-9 w-full sm:h-8 sm:w-auto" disabled={busy}
           onClick={() => onCommand({ action: 'temp_test_abort' })}>
@@ -379,8 +386,21 @@ function TempTest({ auto, st, onCommand, busy, msg }) {
 
 function AutomationPanel({ auto, here, port, level, locked, onCommand, busy, msg }) {
   const [confirmOff, setConfirmOff] = useState(false)
+  const [confirmRestart, setConfirmRestart] = useState(false)
+  const [restart, setRestart] = useState({ busy: false, msg: null })
   if (!auto) return null
   const st = auto.state || {}
+  // A15 neu starten (Nutzer 25.10.): the existing restart of the Over-Hot banner (ascset 0,reboot,0)
+  const restartA15 = async () => {
+    setConfirmRestart(false)
+    setRestart({ busy: true, msg: null })
+    try {
+      await api.post(`/api/devices/${auto.device.id}/restart/`)
+      setRestart({ busy: false, msg: { tone: 'ok', text: 'Neustart gesendet, die A15 braucht einige Minuten.' } })
+    } catch (err) {
+      setRestart({ busy: false, msg: { tone: 'error', text: errText(err, 'Neustart fehlgeschlagen.') } })
+    }
+  }
   if (!auto.enabled) {
     return (
       <div className="space-y-2 rounded-md border border-border/80 p-3">
@@ -406,10 +426,31 @@ function AutomationPanel({ auto, here, port, level, locked, onCommand, busy, msg
               Wartung beenden
             </Button>
           ) : (
-            <Button size="sm" variant="outline" className="h-9 flex-1 sm:h-8 sm:flex-none" disabled={busy}
-              onClick={() => onCommand({ action: 'maintenance_start' })}>
-              Wartung starten (A15 aus)
-            </Button>
+            <>
+              <Button size="sm" variant="outline" className="h-9 flex-1 sm:h-8 sm:flex-none" disabled={busy}
+                onClick={() => onCommand({ action: 'maintenance_start' })}>
+                Wartung starten (A15 aus)
+              </Button>
+              {confirmRestart ? (
+                <>
+                  <span className="basis-full self-center sm:basis-auto">Wirklich neu starten?</span>
+                  <Button size="sm" variant="destructive" className="h-9 flex-1 sm:h-8 sm:flex-none"
+                    disabled={restart.busy} onClick={restartA15}>
+                    Ja
+                  </Button>
+                  <Button size="sm" variant="secondary" className="h-9 flex-1 sm:h-8 sm:flex-none"
+                    onClick={() => setConfirmRestart(false)}>
+                    Nein
+                  </Button>
+                </>
+              ) : (
+                <Button size="sm" variant="outline" className="h-9 flex-1 sm:h-8 sm:flex-none" disabled={restart.busy}
+                  onClick={() => setConfirmRestart(true)}>
+                  {restart.busy && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
+                  A15 neu starten
+                </Button>
+              )}
+            </>
           )}
           {confirmOff ? (
             <>
@@ -433,6 +474,9 @@ function AutomationPanel({ auto, here, port, level, locked, onCommand, busy, msg
           )}
         </span>
       </div>
+      {restart.msg && (
+        <p className={restart.msg.tone === 'ok' ? 'text-emerald-600' : 'text-destructive'}>{restart.msg.text}</p>
+      )}
       {!here && <p className="text-amber-600">Steuert Port {auto.port} dieses Controllers.</p>}
       {auto.maintenance_at && st.phase !== 'wartung' && (
         <p className="text-amber-600">

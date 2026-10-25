@@ -322,3 +322,20 @@ def test_payload_temp_test(client, a15, backup):
     auto.save(update_fields=['state'])
     assert client.get(url).data['state']['test'] == test
     assert client.get('/api/live/').data['automation']['state']['test'] == test
+
+
+def test_restart_of_the_a15_is_logged(client, a15):
+    """A15 neu starten (Lüfter-Seite, Nutzer 25.10.): the existing restart sends ascset 0,reboot,0; for the A15 of the
+    automation it is a user event in the protocol."""
+    nano = Device.objects.create(make='avalon', device_id='N3S', name='Avalon Nano 3S', ip_address='10.0.0.16',
+                                 port=4028, protocol=Device.PROTOCOL_CGMINER_TCP)
+    with patch('api.views._cgminer_command', side_effect=OSError('timed out')):
+        assert client.post('/api/devices/%d/restart/' % a15.id).status_code == 502
+    with patch('api.views._cgminer_command', return_value='STATUS=S,Msg=ASC 0 set info: reboot') as cmd:
+        assert client.post('/api/devices/%d/restart/' % a15.id).status_code == 200
+        assert client.post('/api/devices/%d/restart/' % nano.id).status_code == 200
+    assert [c.args[2] for c in cmd.call_args_list] == ['ascset|0,reboot,0'] * 2
+    events = list(AutomationLog.objects.filter(kind='neustart_nutzer'))
+    assert len(events) == 1 and events[0].device_id == a15.id and events[0].source == 'nutzer'
+    assert events[0].trigger == 'Nutzer: A15-Neustart gesendet' and events[0].ok is True
+    assert events[0].request == 'ascset|0,reboot,0'
