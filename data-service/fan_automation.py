@@ -62,6 +62,9 @@ FAN_CONFIRM_S = 10            # the controller reports a new level only after > 
 FAN_WRITE_GAP_S = 20
 TEMP_KEEP_S = 60
 OWN_SWITCH_S = 120            # so lange nach einem eigenen Modusbefehl gilt ein Neustart als Folge davon
+TEST_TARGETS = [84, 86, 88, 90, 92]   # Temperatur-Test (Nutzer 25.10.): Ziel TMax je Stufe, erlaubt ±1 °C ...
+TEST_STAGE_S = 3600                   # ... je 60 min
+TEST_ABORT_ABOVE = 4                  # Sicherheitsabbruch bei Ziel + 4 °C (Nutzer 25.10.)
 STOCK_PLAUSIBLE_MHZ = 15      # gemerkter Standardtakt nur, wenn er nahe am Standardtakt des Modus (Tabelle) liegt
 THERMAL_EVERY_S, THERMAL_N = 30, 10   # thermischer Verlauf je Befehl: alle 30 s, 10 Werte
 LOG_KEEP = 40
@@ -843,8 +846,11 @@ class Round:
                                'Chiptemperatur %d °C' % t if t >= EXC_BELOW else 'Takt nicht mehr 440 MHz')
 
     def rules(self):
-        st, t = self.st, self.t
-        if t >= T_HOT:
+        st = self.st
+        if st.get('test') and not st.get('cal'):
+            self.test_rules()
+            return
+        if self.t >= T_HOT:
             # Sicherheit zuerst: beim Eintritt in die Korrekturphase ersetzt die Taktsenkung einen laufenden Befehl
             if not st.get('corr') and not st.get('cal') and (st.get('queue') or st.get('pending')):
                 self.drop_pending('abgelöst: hohe Chiptemperatur')
@@ -861,9 +867,80 @@ class Round:
         if not st.get('corr'):
             self.exception()
 
+    # --- Temperatur-Test (Nutzer 25.10.)
+    def temp_test(self, valid, over_hot, cal):
+        """Stufen je 60 min mit festem Ziel TMax 84, 86, 88, 90, 92 °C (erlaubt ±1 °C), danach Normalbetrieb.
+        Während des Tests eigene Taktregeln (test_rules), keine Lüfterkorrektur, kein Lernen.
+        Abbruch bei Ziel + 4 °C, Over Hot oder Takt-Messung."""
+        st, now = self.st, self.now
+        at = self.row.get('temp_test_at')
+        tt = st.get('test')
+        if not at:
+            if tt:
+                st.pop('test', None)
+                self.note('Temperatur-Test beendet (vom Nutzer bzw. durch Automatik aus/Wartung).')
+            return
+        started = at if isinstance(at, datetime) else datetime.fromisoformat(str(at))
+        stage = int((now - started).total_seconds() // TEST_STAGE_S) + 1
+        target = TEST_TARGETS[min(stage, len(TEST_TARGETS)) - 1]
+        reason = None
+        if over_hot:
+            reason = 'Over Hot'
+        elif valid and self.t >= target + TEST_ABORT_ABOVE:
+            reason = 'Chiptemperatur %d °C (Grenze Ziel + %d = %d °C)' % (self.t, TEST_ABORT_ABOVE, target + TEST_ABORT_ABOVE)
+        elif cal:
+            reason = 'Takt-Messung gestartet'
+        if reason or stage > len(TEST_TARGETS):
+            done = not reason
+            self.base_event(kind='test_ende', trigger='Temperatur-Test fertig' if done else 'Temperatur-Test abgebrochen: ' + reason,
+                            ok=None, details={'ergebnis': 'fertig' if done else 'abgebrochen', 'grund': reason or 'alle Stufen',
+                                              'gestartet': started.isoformat()})
+            self.note('Temperatur-Test %s.' % ('fertig: zurück zum Normalbetrieb' if done else 'abgebrochen: ' + reason))
+            st.pop('test', None)
+            st['test_clear'] = True                      # run_fan_automation löscht temp_test_at
+            return
+        new_test = not tt or tt.get('started') != started.isoformat()
+        if new_test:
+            self.end_learning('Temperatur-Test')
+            if st.get('corr'):                           # eine laufende Korrekturphase endet: Lüfter auf die Basisstufe
+                self.return_to_base('Temperatur-Test beginnt')
+        if new_test or tt.get('stage') != stage:
+            self.base_event(kind='test_stufe', trigger='Temperatur-Test Stufe %d/%d: Ziel %d °C (±1 °C)'
+                            % (stage, len(TEST_TARGETS), target),
+                            details={'stufe': stage, 'ziel': target, 'zielbereich': [target - 1, target + 1]})
+            self.note('Temperatur-Test Stufe %d/%d: Ziel %d °C (±1 °C).' % (stage, len(TEST_TARGETS), target))
+        st['test'] = {'started': started.isoformat(), 'stage': stage, 'stages': len(TEST_TARGETS), 'target': target,
+                      'band': [target - 1, target + 1],
+                      'stage_ends': (started + timedelta(seconds=stage * TEST_STAGE_S)).isoformat(),
+                      'ends': (started + timedelta(seconds=len(TEST_TARGETS) * TEST_STAGE_S)).isoformat()}
+
+    def test_rules(self):
+        """Taktregeln im Temperatur-Test: Ziel + 2 °C → −1 MHz, ab Ziel + 3 → −2; Ziel ± 1 → nichts; Ziel − 2 °C 30 s lang →
+        +1; Ziel − 3 bis − 5 → +2; darunter +5. Zwischen zwei Schritten das Beobachtungsfenster (30 s)."""
+        st, t = self.st, self.t
+        target = st['test']['target']
+        st['test_below_since'] = (st.get('test_below_since') or _iso(self.now)) if t <= target - 2 else None
+        if self.busy() or not self.window_over() or st.get('clock_set') is None:
+            return
+        if t >= target + 3:
+            size = -2
+        elif t == target + 2:
+            size = -1
+        elif t < target - 5:
+            size = 5
+        elif t <= target - 3:
+            size = 2
+        elif t == target - 2 and _age(st.get('test_below_since'), self.now) >= PLUS_ONE_AFTER_S:
+            size = 1
+        else:
+            return
+        self.queue_clock(int(round(st['clock_set'])) + size,
+                         'Temperatur-Test Ziel %d °C: Chiptemperatur %d °C → %+d MHz' % (target, t, size), step=size)
+
     # --- main
     def run(self):
         st, row, now = self.st, self.row, self.now
+        st.pop('test_clear', None)
         if not row['enabled']:
             if not st.get('off'):
                 self.note('Automatik aus: Takt bleibt %s.' % ('%s MHz' % st['clock_set'] if st.get('clock_set') else 'wie er ist'))
@@ -875,7 +952,7 @@ class Round:
         if st.pop('off', False) or st.get('v') != STATE_VERSION:
             # Automatik ein bzw. Umstellung auf die neue Regelung (startet ohne Lernwerte, Plan Kapitel 7)
             keep = ('log', 'stock', 'fan_set', 'fan_read', 'fan_read_at', 'fan_set_at', 'elapsed', 'mode_key',
-                    'maint', 'maint_ended_at', 'offline', 'over_hot')
+                    'maint', 'maint_ended_at', 'offline', 'over_hot', 'test')
             new = {k: st[k] for k in keep if k in st}
             new['learned'] = (st.get('learned') or {}) if st.get('v') == STATE_VERSION else {}
             if new.get('stock') is None:
@@ -959,6 +1036,8 @@ class Round:
 
         if valid:
             self.t = int(round(tmax))
+        self.temp_test(valid, over_hot, cal)
+        if valid:
             temps = [x for x in st.get('temps') or [] if _age(x[0], now) <= TEMP_KEEP_S]
             st['temps'] = temps
             st['t'] = self.t
@@ -1003,7 +1082,7 @@ class Round:
         self.write_fan()                                   # Lüfter vor den (möglicherweise langsamen) Miner-Befehlen
         if not cal and not over_hot:
             self.resend_or_send()
-            if valid:
+            if valid and not st.get('test'):
                 self.learn()
         self.read_fan()
         st['phase'] = self.phase()
@@ -1039,7 +1118,7 @@ def run_fan_automation(database_url, ac=None):
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
-                "SELECT f.id, f.enabled, f.ac_dev_id, f.ac_port, f.level, f.level_at, f.maintenance_at, f.state, "
+                "SELECT f.id, f.enabled, f.ac_dev_id, f.ac_port, f.level, f.level_at, f.maintenance_at, f.temp_test_at, f.state, "
                 "d.id AS device_id, d.ip_address, d.port, "
                 "d.connection_config, EXISTS (SELECT 1 FROM calibration_runs r WHERE r.device_id = d.id "
                 "AND r.status IN ('running', 'cancelling', 'finishing')) AS cal_active "
@@ -1059,6 +1138,10 @@ def run_fan_automation(database_url, ac=None):
                 journal.event(kind='fehler', trigger='Fehler in der Regelung', ok=False, error=str(exc)[:2000])
             with conn.cursor() as cur:
                 cur.execute("UPDATE fan_automation SET state = %s WHERE id = %s", (json.dumps(state), row['id']))
+                if state.pop('test_clear', False):
+                    # Temperatur-Test fertig oder abgebrochen: nur den Test löschen, der gelaufen ist
+                    cur.execute("UPDATE fan_automation SET temp_test_at = NULL, state = %s WHERE id = %s "
+                                "AND temp_test_at = %s", (json.dumps(state), row['id'], row['temp_test_at']))
                 if state.pop('maint_end', False):
                     # the A15 is back on: end the maintenance (only the one that was announced)
                     cur.execute("UPDATE fan_automation SET maintenance_at = NULL, state = %s WHERE id = %s "

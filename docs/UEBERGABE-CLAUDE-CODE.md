@@ -128,7 +128,8 @@ solange die Seite offen ist. Steuerung läuft immer auf dem Server, unabhängig 
 4. Je nach Teil: Backend (Autoreload; Migration → `migrate`), Data-Service (`podman restart -t 5 …`; Compose → `ms-recreate.sh`),
    Frontend (`rm -f /root/fe-build7.status; (nohup ./ms-build-frontend.sh > /root/fe-build7.status 2>&1 &)`, fertig bei `BUILT`+`FIN`;
    „build try 1 failed“ ist das bekannte virtfs-Problem, das Skript wiederholt selbst).
-   **Reihenfolge bei neuen Tabellen: erst `migrate`, dann Data-Service neu starten** (der Data-Service schreibt per SQL in die Tabellen).
+   **Reihenfolge bei neuen Tabellen/Spalten: erst `migrate`, dann Data-Service neu starten** (der Data-Service liest/schreibt per SQL;
+   fehlt z. B. `temp_test_at`, scheitert die Abfrage der Automatik).
    Vor Migrationen/Datenänderungen betroffene Tabellen sichern (`pg_dump -t …` nach `/root/ms-bak-…`).
 5. Prüfen: `podman ps` (alle 4 Container!), Data-Service-Log auf `ERROR`/`Traceback`, `curl https://miners.lb-db.de/` = 200.
    Ein Data-Service-Neustart unterbricht einen laufenden Takt-Lauf nur ~10 s (Zustand in der DB).
@@ -151,7 +152,7 @@ solange die Seite offen ist. Steuerung läuft immer auf dem Server, unabhängig 
 - Python ≥ 3.10 nötig (System-Python 3.9 reicht nicht): `/opt/homebrew/bin/python3.10 -m venv <dir>` + requirements von backend und data-service + pytest, pytest-django.
 - pytest mit `-p no:cacheprovider -q -o addopts=""` aufrufen, sonst fehlt die Zusammenfassung (pyproject-Einstellungen).
   Das venv im Scratchpad kann von macOS teilweise gelöscht werden (25.10.: `pytest` fehlte) → in jeder Session neu anlegen.
-- Stand 25.10.: **Backend 191 ✓, Data-Service 158 ✓ (5 übersprungen), Frontend 153 ✓**, Lint 0 Fehler (15 Warnungen aus dem Original).
+- Stand 25.10.: **Backend 197 ✓, Data-Service 165 ✓ (5 übersprungen), Frontend 153 ✓**, Lint 0 Fehler (15 Warnungen aus dem Original).
   Achtung: `npm run lint` meldet zusätzlich Fehler aus `frontend/dist-local/` (lokaler Build-Ordner, nicht im Repo) – ignorieren.
 
 ---
@@ -184,6 +185,13 @@ solange die Seite offen ist. Steuerung läuft immer auf dem Server, unabhängig 
 - Leistung: `WALLPOWER` (A15), sonst `PS[6]`. `MPO` ist nur ein Limit.
 - **`TMax` = heißester Chip = max(`MTmax[a b c]`)**, alle 10 s neu, schwankt ±1 °C. Heißestes Board ist immer **Board 1**
   (4–6 °C über Board 2). Nach Neustart kurz `-273` = kein Wert.
+- **DH (Fehlerrate)** = fehlerhafte ÷ alle Prüfungen der Chips je Zeitfenster (~134 s); `GHSspd` zählt nur die fehlerfreien →
+  DH kostet direkt Hashrate (25.10. Stufe 2: GHSmm 143 TH/s, GHSspd 126 TH/s bei DH 12 %). Normal laut Canaan bei A10–A12 0,6–1,6 %;
+  **Nutzerziel ≤ 3 %**. Gemessen 25.10.: ~175 MHz → 6 %, ~315 MHz → 8–13 %; bei 79–83 °C kein Temperatur-Einfluss sichtbar.
+- **Temperatur (Recherche 25.10., Quellen in der Session):** Canaan regelt auf **TAvg** (Mittel aller Chips), A15-Werkseinstellung
+  70 °C, Mini 3 (gleiche Chips) im Mining-Modus 75 °C; Canaan schreibt, die Chips arbeiten bei höheren Temperaturen besser
+  (Nutzererfahrung: ASICs haben einen optimalen Bereich, **kühler ist nicht besser**). Mit TMax 80 °C liegt TAvg bei ~67 °C.
+  Überhitzungsschutz der Firmware: TMax > 108 °C. Zusammenhang Temperatur ↔ DH bei festem Takt ist nirgends gemessen → Temperatur-Test (7.8).
 - `SYSTEMSTATU` mit `Over Hot` = Boards abgeschaltet. `FanR`/`Fan1..` = interne A15-Lüfter: **nur Anzeige auf der Übersicht, sonst
   nirgends verwenden** (Nutzer: „Lüfter-Simulatoren“).
 - Thermik (Analyse 21.10., 4 saubere Leistungssprünge ≥ 80 W + Lauf 7): Temperaturänderung erreicht ~50 % nach 60–90 s,
@@ -319,6 +327,14 @@ liegt. Der **Modus folgt dem Takt**. Der Lüfter weicht nur vorübergehend ab (K
 - Bekannt, nicht gelöst: Antwortet nur die **Einstellungsseite** des A15 nicht, gilt das als „Miner antwortet nicht“ (eine Umgehung
   hätte die Pool-Zugangsdaten im Umschaltbefehl gefährdet).
 
+**Temperatur-Test** (v2.0.4, Nutzer 25.10.): Button „Temperatur-Test starten“ auf der Lüfter-Seite (`fan_automation.temp_test_at`,
+Migration 0025). **5 Stufen à 60 min mit festem Ziel TMax 84, 86, 88, 90, 92 °C (je ±1 °C)**, danach Normalbetrieb. Grund (Nutzer):
+mit dem Bereich 80–84 °C lag TMax praktisch immer bei 80–81 °C; ein breiter Bereich ergibt keinen festen Messpunkt.
+Eigene Taktregeln im Test: Ziel + 2 → −1 MHz, ab Ziel + 3 → −2; Ziel ± 1 → nichts; Ziel − 2 °C 30 s lang → +1; Ziel − 3 … − 5 → +2;
+darunter +5; Beobachtungsfenster 30 s. Keine Lüfterkorrektur, kein Lernen. Abbruch bei **Ziel + 4 °C**, Over Hot, Takt-Messung,
+Automatik aus, Wartung oder „Test abbrechen“. Ereignisse `test_start`, `test_stufe`, `test_ende`.
+Auswertung: je Stufe die ersten 15 min verwerfen, dann DH, GHSspd, Leistung, J/TH, Takt, Anteil Zeit in Ziel ± 1 aus `automation_cycle`.
+
 **Wartung** (unverändert): Button „Wartung starten (A15 ausschalten)“ (`maintenance_at`, Migration 0023; ein laufender Takt-Lauf
 wird pausiert). Antwortet der A15 nicht mehr → Lüfter **aus** (`atType` 1); antwortet er wieder → Lüfter **an auf die Stufe von
 vorher**, Wartung endet, dann Start. Keine offline/online-Meldungen während der Wartung und 15 min danach (`maint_ended_at`).
@@ -331,7 +347,7 @@ ausnahme > normal; wartung, aus), Flags `corr`, `exc_active`, `cal`, `start_reas
 `maintenance_start`, `maintenance_end`).
 
 **Simulation:** `data-service/tests/test_fan_automation.py` enthält zwei Simulationen mit einem **Schätzmodell** (keine Messwerte;
-Nutzerentscheidung 24.10.). 53 Regel-Tests, je einer pro Regel/Befund.
+Nutzerentscheidung 24.10.). 60 Regel-Tests, je einer pro Regel/Befund.
 
 ### 7.9 Zentrale Abfrage & Live-API (`data-service/live_reader.py`, `miner_cache.py`, `backend/api/live_views.py`, `frontend/src/lib/LiveContext.jsx`)
 - **Ein Leser alle 5 s**: `estats` + `summary` je Avalon (parallel, ein ausgeschaltetes Gerät bremst nichts), A15-Webinterface alle 30 s
@@ -376,7 +392,7 @@ Original + „Activity“ + „Takt-Tabellen“ + „Lüfter“; Dockerfiles/Com
 ## 9. Datenbank und Migrationen
 
 - Eigene Tabellen: `calibration_runs`, `calibration_points` (0020), **`fan_automation`** (**0021**, handgeschrieben, hängt an 0020;
-  **0022** `level_at`, **0023** `maintenance_at`), **`automation_log`, `automation_cycle`** (**0024**, mit Datenmigration: alte
+  **0022** `level_at`, **0023** `maintenance_at`, **0025** `temp_test_at`), **`automation_log`, `automation_cycle`** (**0024**, mit Datenmigration: alte
   A15-Drosselung entfernen). Der Device-FK der beiden Protokoll-Tabellen hat keinen eigenen Index (`db_index=False`, der
   Verbundindex device + Zeit deckt ihn ab).
 - `calibration_points.kind`: `max`, `step`, `manual` (nur noch alte Punkte); `data` enthält u. a. `fields`, `summary`, `web`,

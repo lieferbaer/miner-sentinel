@@ -209,7 +209,8 @@ function AutomationCards({ auto, st }) {
 // Protokoll page
 const RECENT_KINDS = ['takt', 'modus', 'luefter', 'hohe_temperatur', 'rueckkehr', 'ausnahme', 'ausnahme_ende', 'lernwert',
   'start', 'neustart', 'over_hot', 'miner_offline', 'miner_online', 'firmware_takt', 'messung_start',
-  'messung_ende', 'fehler', 'basisstufe', 'automatik_ein', 'automatik_aus', 'wartung_start', 'wartung_ende']
+  'messung_ende', 'fehler', 'basisstufe', 'automatik_ein', 'automatik_aus', 'wartung_start', 'wartung_ende',
+  'test_start', 'test_stufe', 'test_ende']
 const RECENT_COUNT = 20
 const RECENT_REFRESH_MS = 10000
 const RECENT_LABEL = { takt: 'Takt', modus: 'Modus', luefter: 'Lüfter', start: 'Start' }
@@ -324,7 +325,56 @@ function RecentEvents() {
   )
 }
 
-function AutomationPanel({ auto, here, port, level, locked, onCommand, busy }) {
+// Temperatur-Test (Nutzer 25.10.): the data-service runs the stages, the page starts and aborts it
+const TEST_QUESTION = '5 Stufen à 60 min mit Ziel 84, 86, 88, 90, 92 °C (je ±1 °C). Lernen ist währenddessen aus. Abbruch bei Ziel + 4 °C.'
+
+function TempTest({ auto, st, onCommand, busy, msg }) {
+  const [confirm, setConfirm] = useState(false)
+  const test = st.test
+  const time = (iso) => (iso ? clockTime(iso) : '—')
+  if (test || auto.temp_test_at) {
+    const goal = test?.target != null ? test.target + ' °C (±1 °C)' : '—'
+    return (
+      <div className="flex flex-wrap items-center gap-2 rounded-md border border-amber-500/60 bg-amber-500/10 p-2">
+        <p className="w-full text-sm font-medium text-amber-600 sm:w-auto sm:flex-1">
+          {test
+            ? 'Temperatur-Test läuft: Stufe ' + test.stage + '/' + (test.stages || 5) + ' · Ziel ' + goal + ' · Stufe endet ' +
+              time(test.stage_ends) + ' · Test endet ' + time(test.ends)
+            : 'Temperatur-Test startet …'}
+        </p>
+        <Button size="sm" variant="outline" className="h-9 w-full sm:h-8 sm:w-auto" disabled={busy}
+          onClick={() => onCommand({ action: 'temp_test_abort' })}>
+          Test abbrechen
+        </Button>
+      </div>
+    )
+  }
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      {confirm ? (
+        <>
+          <span className="basis-full self-center sm:basis-auto">{TEST_QUESTION}</span>
+          <Button size="sm" className="h-9 flex-1 sm:h-8 sm:flex-none" disabled={busy}
+            onClick={() => { setConfirm(false); onCommand({ action: 'temp_test_start' }) }}>
+            Ja
+          </Button>
+          <Button size="sm" variant="secondary" className="h-9 flex-1 sm:h-8 sm:flex-none"
+            onClick={() => setConfirm(false)}>
+            Nein
+          </Button>
+        </>
+      ) : (
+        <Button size="sm" variant="outline" className="h-9 w-full sm:h-8 sm:w-auto" disabled={busy}
+          onClick={() => setConfirm(true)}>
+          Temperatur-Test starten
+        </Button>
+      )}
+      {msg && msg.tone !== 'ok' && <span className="basis-full text-destructive">{msg.text}</span>}
+    </div>
+  )
+}
+
+function AutomationPanel({ auto, here, port, level, locked, onCommand, busy, msg }) {
   const [confirmOff, setConfirmOff] = useState(false)
   if (!auto) return null
   const st = auto.state || {}
@@ -387,6 +437,7 @@ function AutomationPanel({ auto, here, port, level, locked, onCommand, busy }) {
           auf die Stufe von vorher.
         </p>
       )}
+      <TempTest auto={auto} st={st} onCommand={onCommand} busy={busy} msg={msg} />
       <AutomationCards auto={auto} st={st} />
       <LearnedTable learned={auto.learned} level={auto.level} />
       {st.ac_error && <p className="text-amber-600">AC Infinity: {st.ac_error}</p>}
@@ -568,7 +619,7 @@ function Controller({ dev, backups, automation, onReload }) {
         </div>
 
         <AutomationPanel auto={auto} here={autoHere} port={port} level={enableLevel} locked={locked}
-          busy={busy === 'auto'} onCommand={autoCommand} />
+          busy={busy === 'auto'} onCommand={autoCommand} msg={msg} />
 
         <div className="space-y-2 rounded-md border border-border/80 p-3">
           <div className="flex flex-wrap items-center gap-1.5 text-xs">

@@ -30,6 +30,9 @@ export const KIND_LABEL = {
   firmware_takt: 'Miner hat den Takt geändert',
   messung_start: 'Takt-Messung beginnt',
   messung_ende: 'Takt-Messung endet',
+  test_start: 'Temperatur-Test gestartet',
+  test_stufe: 'Temperatur-Test: neue Stufe',
+  test_ende: 'Temperatur-Test beendet',
   fehler: 'Fehler',
 }
 // shown in red in both tabs; the list also marks failed commands (ok=false), the Verlauf cannot (its events

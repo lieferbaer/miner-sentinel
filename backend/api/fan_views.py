@@ -25,6 +25,8 @@ STATE_KEYS = ('phase', 't', 'tendency', 'boards', 'clock_set', 'clock_changed_at
 PENDING_KEYS = ('kind', 'value', 'sent_at', 'attempt')
 STATE_FRESH_S = 15    # the data-service writes the state every 5 s (only while it reads the miner)
 TMAX_FRESH_S = 30     # the collector writes the chip temperatures every 10 s
+# actions that set or clear FanAutomation.temp_test_at (Temperatur-Test, 25.10.)
+TEST_ACTIONS = ('temp_test_start', 'temp_test_abort', 'disable', 'maintenance_start')
 
 
 def _a15():
@@ -62,10 +64,16 @@ def automation_payload():
     state = {k: st.get(k) for k in STATE_KEYS}
     state['base'] = auto.level
     state['pending'] = {k: pending.get(k) for k in PENDING_KEYS} if pending else None
+    # Temperatur-Test: stage, band, ends as the data-service wrote them; only for the test that is set now (an aborted
+    # or older test keeps its state until the next full round of the data-service)
+    test = st.get('test')
+    started = parse_datetime(test.get('started') or '') if isinstance(test, dict) else None
+    state['test'] = test if auto.temp_test_at and started and started == auto.temp_test_at else None
     return {
         'now': {'tmax': tmax, 'boards': boards, 'at': at},
         'device': {'id': dev.id, 'name': dev.name}, 'enabled': auto.enabled, 'dev_id': auto.ac_dev_id,
         'maintenance_at': auto.maintenance_at, 'maintenance': st.get('maint') or None,
+        'temp_test_at': auto.temp_test_at,
         'port': auto.ac_port, 'level': auto.level,
         'state': state,
         # learned values per fan level ({"<stufe>": {mhz, temp_avg, at, count}}); the former per-mode values
@@ -128,6 +136,27 @@ def _user_event(dev, auto, kind, trigger, **fields):
         logger.warning('Protokoll: Nutzer-Ereignis %s nicht gespeichert: %s', kind, exc)
 
 
+def _temp_test_refusal(dev, auto):
+    """Why a Temperatur-Test cannot start now (None: it can)."""
+    from .models import CalibrationRun
+    from .views import DeviceViewSet
+    if not auto.enabled:
+        return 'Temperatur-Test nur bei eingeschalteter Automatik.'
+    if auto.maintenance_at:
+        return 'Während der Wartung ist kein Temperatur-Test möglich.'
+    if CalibrationRun.objects.filter(device=dev, status__in=DeviceViewSet.CAL_RUNNING).exists():
+        return 'Während einer Takt-Messung ist kein Temperatur-Test möglich.'
+    if auto.temp_test_at:
+        return 'Ein Temperatur-Test läuft bereits.'
+    return None
+
+
+def _test_end(reason):
+    """User event: a running Temperatur-Test is aborted (by the user, Automatik aus or Wartung)."""
+    trigger = 'Nutzer: Temperatur-Test abgebrochen' + ('' if reason == 'Nutzer' else ' (%s)' % reason)
+    return ('test_ende', trigger, {'details': {'ergebnis': 'abgebrochen', 'grund': reason}})
+
+
 def _error(exc):
     if isinstance(exc, ac.NotActive):
         code = status.HTTP_409_CONFLICT
@@ -159,7 +188,8 @@ def fans_status(request):
 @permission_classes([IsAuthenticated])
 def fans_automation(request):
     """Temperatur-Automatik (A15). GET: settings + state. POST {action: enable, dev_id, port, level} |
-    {action: level, level} | {action: disable}. The data-service applies the changes."""
+    {action: level, level} | {action: disable} | {action: maintenance_start|maintenance_end} |
+    {action: temp_test_start|temp_test_abort}. The data-service applies the changes."""
     dev, auto = _automation()
     if not auto:
         return Response({'error': 'Kein Avalon A15 gefunden.'}, status=status.HTTP_404_NOT_FOUND)
@@ -184,32 +214,49 @@ def fans_automation(request):
             _lift_throttle(dev)
             auto.enabled, auto.ac_dev_id, auto.ac_port, auto.level = True, dev_id, port, level
             auto.level_at = timezone.now()
-            event = ('automatik_ein', 'Nutzer: Automatik eingeschaltet (Basisstufe %d)' % level, {'base_new': level})
+            events = [('automatik_ein', 'Nutzer: Automatik eingeschaltet (Basisstufe %d)' % level, {'base_new': level})]
         elif action == 'level' and auto.enabled:
-            event = ('basisstufe', 'Nutzer: Basisstufe %d gewählt' % level,
-                     {'base_old': auto.level, 'base_new': level})
+            events = [('basisstufe', 'Nutzer: Basisstufe %d gewählt' % level,
+                       {'base_old': auto.level, 'base_new': level})]
             auto.level, auto.level_at = level, timezone.now()     # the data-service starts with this level
         elif action == 'disable':
-            # Automatik aus: no clock is sent, the clock stays as it is; already off: no entry
-            event = (('automatik_aus', 'Nutzer: Automatik beendet (Takt bleibt, wie er ist)', {})
-                     if auto.enabled else None)
-            auto.enabled = False
+            # Automatik aus: no clock is sent, the clock stays as it is; already off: no entry; ends a running test
+            events = [('automatik_aus', 'Nutzer: Automatik beendet (Takt bleibt, wie er ist)', {})] if auto.enabled else []
+            if auto.temp_test_at:
+                events.append(_test_end('Automatik aus'))
+            auto.enabled, auto.temp_test_at = False, None
         elif action == 'maintenance_start' and not auto.maintenance_at:
-            # Wartung: the A15 is switched off by hand; a running Takt-Messung is paused
+            # Wartung: the A15 is switched off by hand; a running Takt-Messung is paused, a running test ends
             from .models import CalibrationRun
             auto.maintenance_at = timezone.now()
             CalibrationRun.objects.filter(device=dev, status='running').update(
                 status='paused', pause_reason='wartung', message='Pausiert (Wartung).', updated_at=timezone.now())
-            event = ('wartung_start', 'Nutzer: Wartung gestartet', {})
+            events = [('wartung_start', 'Nutzer: Wartung gestartet', {})]
+            if auto.temp_test_at:
+                events.append(_test_end('Wartung'))
+            auto.temp_test_at = None
         elif action == 'maintenance_end':
-            event = ('wartung_ende', 'Nutzer: Wartung beendet', {}) if auto.maintenance_at else None
+            events = [('wartung_ende', 'Nutzer: Wartung beendet', {})] if auto.maintenance_at else []
             auto.maintenance_at = None
+        elif action == 'temp_test_start':
+            refusal = _temp_test_refusal(dev, auto)
+            if refusal:
+                return Response({'error': refusal}, status=status.HTTP_409_CONFLICT)
+            auto.temp_test_at = timezone.now()                    # the data-service runs the stages from here
+            events = [('test_start', 'Nutzer: Temperatur-Test gestartet', {})]
+        elif action == 'temp_test_abort':
+            # no test (already over): no entry
+            events = [_test_end('Nutzer')] if auto.temp_test_at else []
+            auto.temp_test_at = None
         else:
             return Response({'error': 'Diese Aktion ist gerade nicht möglich.'}, status=status.HTTP_400_BAD_REQUEST)
         auto.updated_at = timezone.now()
-        auto.save(update_fields=['enabled', 'ac_dev_id', 'ac_port', 'level', 'level_at', 'maintenance_at', 'updated_at'])
-        if event:
-            _user_event(dev, auto, event[0], event[1], **event[2])
+        fields = ['enabled', 'ac_dev_id', 'ac_port', 'level', 'level_at', 'maintenance_at', 'updated_at']
+        if action in TEST_ACTIONS:
+            fields.append('temp_test_at')     # other actions never write back a test the data-service just ended
+        auto.save(update_fields=fields)
+        for kind, trigger, fields in events:
+            _user_event(dev, auto, kind, trigger, **fields)
     return Response(automation_payload())
 
 

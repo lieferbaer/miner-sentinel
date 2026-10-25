@@ -757,6 +757,9 @@ class FanAutomation(models.Model):
     level = models.IntegerField(default=5)          # chosen fan level: the fan runs at it, never below
     level_at = models.DateTimeField(blank=True, null=True)   # last click on a level (also the same level again)
     maintenance_at = models.DateTimeField(blank=True, null=True)   # Wartung announced (A15 is switched off by hand)
+    # Temperatur-Test (25.10.): start of the test, null = no test; the backend sets it (start) and clears it (abort,
+    # Automatik aus, Wartung), the data-service clears it at the end of the test or on a safety abort
+    temp_test_at = models.DateTimeField(blank=True, null=True)
     state = models.JSONField(default=dict, blank=True)
     updated_at = models.DateTimeField(default=timezone.now)
 

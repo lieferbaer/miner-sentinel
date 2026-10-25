@@ -85,9 +85,9 @@ def miner(monkeypatch):
     return mn
 
 
-def row(state=None, level=5, enabled=True, cal=False, level_at=None, maintenance_at=None):
+def row(state=None, level=5, enabled=True, cal=False, level_at=None, maintenance_at=None, temp_test_at=None):
     return {'id': 1, 'device_id': 3, 'enabled': enabled, 'ac_dev_id': 'dev', 'ac_port': 1, 'level': level,
-            'level_at': level_at, 'maintenance_at': maintenance_at, 'state': state or {},
+            'level_at': level_at, 'maintenance_at': maintenance_at, 'temp_test_at': temp_test_at, 'state': state or {},
             'ip_address': '10.0.0.15', 'port': 4028, 'cal_active': cal,
             'connection_config': {'throttle': {'profiles': PROFILES}}}
 
@@ -721,3 +721,80 @@ def test_plus_one_at_79_only_after_30_s(miner):
     assert miner.clock() == 200
     r.go(10, temp=79)
     assert miner.clock() == 201                                   # 79 °C 30 s: +1
+
+
+
+# ---------------------------------------------------------------- Temperatur-Test (25.10.)
+
+def _test_run(miner, ac, start_offset_s=0):
+    r = started(miner, ac, level=2, learned={'2': {'mhz': 300, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    r.kw['temp_test_at'] = (r.now - timedelta(seconds=start_offset_s)).isoformat()
+    return r
+
+
+def test_temp_test_targets_and_band(miner):
+    ac = FakeAC(level=2)
+    r = _test_run(miner, ac, start_offset_s=3600)                 # Stufe 2: Ziel 86 °C
+    r.go(10, temp=86)
+    assert r.st['test']['stage'] == 2 and r.st['test']['target'] == 86 and r.st['test']['band'] == [85, 87]
+    assert r.events('test_stufe')[0]['details']['ziel'] == 86 and r.st['test']['stages'] == 5
+
+
+def test_temp_test_rules(miner):
+    ac = FakeAC(level=2)
+    r = _test_run(miner, ac, start_offset_s=2 * 3600)             # Stufe 3: Ziel 88 °C
+    r.go(40, temp=88)
+    assert miner.clock() == 300                                   # Ziel ± 1: nichts
+    r.go(5, temp=90)
+    assert miner.clock() == 299                                   # Ziel + 2: −1
+    r.go(35, temp=91)
+    assert miner.clock() == 297                                   # Ziel + 3: −2
+    assert ac.level == 2 and r.st['phase'] == 'normal'            # keine Lüfterkorrektur im Test (91 °C ≥ 85)
+    r.go(35, temp=85)
+    assert miner.clock() == 299                                   # Ziel − 3: +2
+    r.go(35, temp=80)
+    assert miner.clock() == 304                                   # unter Ziel − 5: +5
+
+
+def test_temp_test_plus_one_only_after_30_s(miner):
+    ac = FakeAC(level=2)
+    r = _test_run(miner, ac)                                      # Stufe 1: Ziel 84 °C
+    r.go(40, temp=84)
+    r.go(20, temp=82)
+    assert miner.clock() == 300
+    r.go(15, temp=82)
+    assert miner.clock() == 301                                   # Ziel − 2 seit 30 s: +1
+
+
+def test_temp_test_no_learning(miner):
+    ac = FakeAC(level=2)
+    r = _test_run(miner, ac)
+    r.go(20 * 60, temp=84)
+    assert r.st['learned']['2']['count'] == 1 and not r.events('lernwert')
+
+
+def test_temp_test_aborts_at_target_plus_4(miner):
+    ac = FakeAC(level=2)
+    r = _test_run(miner, ac, start_offset_s=4 * 3600)             # Stufe 5: Ziel 92 °C
+    r.go(5, temp=95)
+    assert 'test' in r.st                                         # 95 < 96: weiter
+    r.go(5, temp=96)
+    end = r.events('test_ende')[-1]
+    assert end['details']['ergebnis'] == 'abgebrochen' and 'test' not in r.st and r.st.get('test_clear')
+
+
+def test_temp_test_finishes_after_5_stages(miner):
+    ac = FakeAC(level=2)
+    r = _test_run(miner, ac, start_offset_s=5 * 3600 + 5)
+    r.go(5, temp=82)
+    assert r.events('test_ende')[-1]['details']['ergebnis'] == 'fertig' and 'test' not in r.st
+
+
+def test_temp_test_ended_by_user(miner):
+    ac = FakeAC(level=2)
+    r = _test_run(miner, ac, start_offset_s=3600)
+    r.go(10, temp=86)
+    assert r.st['phase'] == 'normal'
+    r.kw['temp_test_at'] = None
+    r.go(5, temp=86)
+    assert 'test' not in r.st and r.st['phase'] == 'korrektur'    # 86 °C ist ohne Test wieder „hoch“

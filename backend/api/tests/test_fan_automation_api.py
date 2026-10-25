@@ -234,3 +234,91 @@ def test_payload_state_of_the_new_regulation(client, a15, backup):
     assert 'queue' not in st and 'temps' not in st
     assert data['learned'] == {'3': {'mhz': 240, 'temp_avg': 82.1, 'at': '2026-10-24T19:00:00+00:00', 'count': 2}}
     assert data['log'] == [['2026-10-24T20:00:00+00:00', 'Korrekturphase']]
+
+
+def test_temp_test_start_and_abort(client, a15, backup):
+    url = '/api/fans/automation/'
+    client.post(url, {'action': 'enable', 'dev_id': 'dev1', 'port': 1, 'level': 2}, format='json')
+    res = client.post(url, {'action': 'temp_test_start'}, format='json')
+    assert res.status_code == 200 and res.data['temp_test_at'] and res.data['state']['test'] is None
+    assert FanAutomation.objects.get(device=a15).temp_test_at
+    res = client.post(url, {'action': 'temp_test_start'}, format='json')
+    assert res.status_code == 409 and res.data['error'] == 'Ein Temperatur-Test läuft bereits.'
+    res = client.post(url, {'action': 'temp_test_abort'}, format='json')
+    assert res.status_code == 200 and res.data['temp_test_at'] is None
+    assert client.post(url, {'action': 'temp_test_abort'}, format='json').status_code == 200   # no test: no entry
+    events = list(AutomationLog.objects.filter(kind__startswith='test_').order_by('id'))
+    assert [(e.kind, e.trigger, e.source) for e in events] == [
+        ('test_start', 'Nutzer: Temperatur-Test gestartet', 'nutzer'),
+        ('test_ende', 'Nutzer: Temperatur-Test abgebrochen', 'nutzer')]
+    assert events[1].details == {'ergebnis': 'abgebrochen', 'grund': 'Nutzer'}
+
+
+def test_temp_test_start_refused(client, a15, backup):
+    from api.models import CalibrationRun
+    url = '/api/fans/automation/'
+    res = client.post(url, {'action': 'temp_test_start'}, format='json')
+    assert res.status_code == 409 and res.data['error'] == 'Temperatur-Test nur bei eingeschalteter Automatik.'
+    client.post(url, {'action': 'enable', 'dev_id': 'dev1', 'port': 1, 'level': 2}, format='json')
+    client.post(url, {'action': 'maintenance_start'}, format='json')
+    res = client.post(url, {'action': 'temp_test_start'}, format='json')
+    assert res.status_code == 409 and res.data['error'] == 'Während der Wartung ist kein Temperatur-Test möglich.'
+    client.post(url, {'action': 'maintenance_end'}, format='json')
+    run = CalibrationRun.objects.create(device=a15, kind='step', modes=['2/L4'], status='running', state={})
+    res = client.post(url, {'action': 'temp_test_start'}, format='json')
+    assert res.status_code == 409 and res.data['error'] == 'Während einer Takt-Messung ist kein Temperatur-Test möglich.'
+    run.status = 'paused'
+    run.save()
+    assert client.post(url, {'action': 'temp_test_start'}, format='json').status_code == 200
+    assert FanAutomation.objects.get(device=a15).temp_test_at
+    assert not AutomationLog.objects.filter(kind='test_ende').exists()
+
+
+@pytest.mark.parametrize('action, grund, kinds', [
+    ('disable', 'Automatik aus', ['automatik_aus', 'test_ende']),
+    ('maintenance_start', 'Wartung', ['wartung_start', 'test_ende']),
+])
+def test_disable_and_maintenance_end_the_test(client, a15, backup, action, grund, kinds):
+    url = '/api/fans/automation/'
+    client.post(url, {'action': 'enable', 'dev_id': 'dev1', 'port': 1, 'level': 2}, format='json')
+    client.post(url, {'action': 'temp_test_start'}, format='json')
+    start = AutomationLog.objects.get(kind='test_start').id
+    res = client.post(url, {'action': action}, format='json')
+    assert res.status_code == 200 and res.data['temp_test_at'] is None
+    assert FanAutomation.objects.get(device=a15).temp_test_at is None
+    events = list(AutomationLog.objects.filter(id__gt=start).order_by('id'))
+    assert [e.kind for e in events] == kinds
+    assert events[1].details == {'ergebnis': 'abgebrochen', 'grund': grund}
+    assert events[1].trigger == 'Nutzer: Temperatur-Test abgebrochen (%s)' % grund
+
+
+def test_level_keeps_the_test_the_data_service_ended(client, a15, backup):
+    url = '/api/fans/automation/'
+    client.post(url, {'action': 'enable', 'dev_id': 'dev1', 'port': 1, 'level': 2}, format='json')
+    client.post(url, {'action': 'temp_test_start'}, format='json')
+    auto = FanAutomation.objects.get(device=a15)
+    FanAutomation.objects.filter(pk=auto.pk).update(temp_test_at=None)      # data-service: test over
+    with patch('api.fan_views._automation', return_value=(a15, auto)):     # loaded before that
+        client.post(url, {'action': 'level', 'level': 3}, format='json')
+    assert FanAutomation.objects.get(device=a15).temp_test_at is None
+
+
+def test_payload_temp_test(client, a15, backup):
+    url = '/api/fans/automation/'
+    client.post(url, {'action': 'enable', 'dev_id': 'dev1', 'port': 1, 'level': 2}, format='json')
+    test = {'started': '2026-10-25T18:00:00+00:00', 'stage': 2, 'delta': 4, 'band': [84, 88],
+            'stage_ends': '2026-10-25T20:00:00+00:00', 'ends': '2026-10-25T22:00:00+00:00'}
+    auto = FanAutomation.objects.get(device=a15)
+    auto.state = {'v': 2, 'phase': 'normal', 'test': test}
+    auto.save()
+    data = client.get(url).data
+    assert data['temp_test_at'] is None and data['state']['test'] is None    # no test set: state of an old one
+    client.post(url, {'action': 'temp_test_start'}, format='json')
+    data = client.get(url).data
+    assert data['temp_test_at'] and data['state']['test'] is None             # old test: not shown for the new one
+    auto.refresh_from_db()
+    test = dict(test, started=auto.temp_test_at.isoformat())                  # the data-service took the new test
+    auto.state = {'v': 2, 'phase': 'normal', 'test': test}
+    auto.save(update_fields=['state'])
+    assert client.get(url).data['state']['test'] == test
+    assert client.get('/api/live/').data['automation']['state']['test'] == test
