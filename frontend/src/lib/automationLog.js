@@ -32,6 +32,7 @@ export const KIND_LABEL = {
   messung_ende: 'Takt-Messung endet',
   test_start: 'Temperatur-Test gestartet',
   test_stufe: 'Temperatur-Test: neue Stufe',
+  test_ziel: 'Temperatur-Test: Ziel erreicht',
   test_ende: 'Temperatur-Test beendet',
   fehler: 'Fehler',
 }

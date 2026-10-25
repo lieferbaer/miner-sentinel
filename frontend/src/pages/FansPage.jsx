@@ -210,7 +210,7 @@ function AutomationCards({ auto, st }) {
 const RECENT_KINDS = ['takt', 'modus', 'luefter', 'hohe_temperatur', 'rueckkehr', 'ausnahme', 'ausnahme_ende', 'lernwert',
   'start', 'neustart', 'over_hot', 'miner_offline', 'miner_online', 'firmware_takt', 'messung_start',
   'messung_ende', 'fehler', 'basisstufe', 'automatik_ein', 'automatik_aus', 'wartung_start', 'wartung_ende',
-  'test_start', 'test_stufe', 'test_ende']
+  'test_start', 'test_stufe', 'test_ziel', 'test_ende']
 const RECENT_COUNT = 20
 const RECENT_REFRESH_MS = 10000
 const RECENT_LABEL = { takt: 'Takt', modus: 'Modus', luefter: 'Lüfter', start: 'Start' }
@@ -326,7 +326,8 @@ function RecentEvents() {
 }
 
 // Temperatur-Test (Nutzer 25.10.): the data-service runs the stages, the page starts and aborts it
-const TEST_QUESTION = '5 Stufen à 60 min mit Ziel 84, 86, 88, 90, 92 °C (je ±1 °C). Lernen ist währenddessen aus. Abbruch bei Ziel + 4 °C.'
+const TEST_QUESTION = '5 Stufen mit Ziel 84, 86, 88, 90, 92 °C (je ±1 °C), je 30 min ab Erreichen des Ziels. ' +
+  'Lernen ist währenddessen aus. Abbruch bei Ziel + 4 °C.'
 
 function TempTest({ auto, st, onCommand, busy, msg }) {
   const [confirm, setConfirm] = useState(false)
@@ -338,8 +339,10 @@ function TempTest({ auto, st, onCommand, busy, msg }) {
       <div className="flex flex-wrap items-center gap-2 rounded-md border border-amber-500/60 bg-amber-500/10 p-2">
         <p className="w-full text-sm font-medium text-amber-600 sm:w-auto sm:flex-1">
           {test
-            ? 'Temperatur-Test läuft: Stufe ' + test.stage + '/' + (test.stages || 5) + ' · Ziel ' + goal + ' · Stufe endet ' +
-              time(test.stage_ends) + ' · Test endet ' + time(test.ends)
+            ? 'Temperatur-Test läuft: Stufe ' + test.stage + '/' + (test.stages || 5) + ' · Ziel ' + goal + ' · ' +
+              // the 30 min of a stage start when its target is reached first; the end of the test is known in the last
+              (test.stage_ends ? 'Stufe endet ' + time(test.stage_ends) : 'wartet auf ' + test.target + ' °C') + ' · ' +
+              (test.ends ? 'Test endet ' + time(test.ends) : 'Testende offen')
             : 'Temperatur-Test startet …'}
         </p>
         <Button size="sm" variant="outline" className="h-9 w-full sm:h-8 sm:w-auto" disabled={busy}

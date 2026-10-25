@@ -328,12 +328,18 @@ liegt. Der **Modus folgt dem Takt**. Der Lüfter weicht nur vorübergehend ab (K
   hätte die Pool-Zugangsdaten im Umschaltbefehl gefährdet).
 
 **Temperatur-Test** (v2.0.4, Nutzer 25.10.): Button „Temperatur-Test starten“ auf der Lüfter-Seite (`fan_automation.temp_test_at`,
-Migration 0025). **5 Stufen à 60 min mit festem Ziel TMax 84, 86, 88, 90, 92 °C (je ±1 °C)**, danach Normalbetrieb. Grund (Nutzer):
+Migration 0025). **5 Stufen mit festem Ziel TMax 84, 86, 88, 90, 92 °C (je ±1 °C)**, danach Normalbetrieb. Grund (Nutzer):
 mit dem Bereich 80–84 °C lag TMax praktisch immer bei 80–81 °C; ein breiter Bereich ergibt keinen festen Messpunkt.
 Eigene Taktregeln im Test: Ziel + 2 → −1 MHz, ab Ziel + 3 → −2; Ziel ± 1 → nichts; Ziel − 2 °C 30 s lang → +1; Ziel − 3 … − 5 → +2;
 darunter +5; Beobachtungsfenster 30 s. Keine Lüfterkorrektur, kein Lernen. Abbruch bei **Ziel + 4 °C**, Over Hot, Takt-Messung,
-Automatik aus, Wartung oder „Test abbrechen“. Ereignisse `test_start`, `test_stufe`, `test_ende`.
-Auswertung: je Stufe die ersten 15 min verwerfen, dann DH, GHSspd, Leistung, J/TH, Takt, Anteil Zeit in Ziel ± 1 aus `automation_cycle`.
+Automatik aus, Wartung oder „Test abbrechen“. Ereignisse `test_start`, `test_stufe`, `test_ziel`, `test_ende`.
+**Stufenzeit (v2.0.5, Nutzer 25.10.):** jede Stufe heizt auf, bis TMax das Ziel zum ersten Mal erreicht (erste 5-s-Messung ≥ Ziel,
+Ereignis `test_ziel` „Ziel … erreicht, Stufe läuft bis HH:MM“); **ab dann 30 min**, auch wenn TMax danach wieder darunter liegt.
+Für „Ziel nie erreicht“ gibt es bewusst keine Regel (Nutzer: nicht möglich). Zustand `state.test`: `stage`, `target`, `band`,
+`reached_at`, `stage_ends` (erst ab Erreichen), `ends` (erst wenn Stufe 5 ihr Ziel erreicht hat; Seite sonst „Testende offen“).
+Ein laufender Test aus v2.0.4 (ohne `reached_at`) wurde übernommen: seine Stufe zählte ab dem nächsten Erreichen des Ziels.
+Auswertung: DH, GHSspd, Leistung, J/TH, Takt, Anteil Zeit in Ziel ± 1 aus `automation_cycle` (je Stufe die 30 min ab `test_ziel`;
+ob davon noch etwas verworfen wird, mit dem Nutzer klären).
 
 **Wartung** (unverändert): Button „Wartung starten (A15 ausschalten)“ (`maintenance_at`, Migration 0023; ein laufender Takt-Lauf
 wird pausiert). Antwortet der A15 nicht mehr → Lüfter **aus** (`atType` 1); antwortet er wieder → Lüfter **an auf die Stufe von

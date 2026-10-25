@@ -22,6 +22,7 @@ import logging
 import os
 import time
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -63,8 +64,9 @@ FAN_WRITE_GAP_S = 20
 TEMP_KEEP_S = 60
 OWN_SWITCH_S = 120            # so lange nach einem eigenen Modusbefehl gilt ein Neustart als Folge davon
 TEST_TARGETS = [84, 86, 88, 90, 92]   # Temperatur-Test (Nutzer 25.10.): Ziel TMax je Stufe, erlaubt ±1 °C ...
-TEST_STAGE_S = 3600                   # ... je 60 min
+TEST_STAGE_S = 1800                   # ... je 30 min ab dem ersten Erreichen des Ziels (Nutzer 25.10.)
 TEST_ABORT_ABOVE = 4                  # Sicherheitsabbruch bei Ziel + 4 °C (Nutzer 25.10.)
+LOCAL_TZ = ZoneInfo('Europe/Berlin')  # Uhrzeiten in Protokolltexten
 STOCK_PLAUSIBLE_MHZ = 15      # gemerkter Standardtakt nur, wenn er nahe am Standardtakt des Modus (Tabelle) liegt
 THERMAL_EVERY_S, THERMAL_N = 30, 10   # thermischer Verlauf je Befehl: alle 30 s, 10 Werte
 LOG_KEEP = 40
@@ -869,7 +871,8 @@ class Round:
 
     # --- Temperatur-Test (Nutzer 25.10.)
     def temp_test(self, valid, over_hot, cal):
-        """Stufen je 60 min mit festem Ziel TMax 84, 86, 88, 90, 92 °C (erlaubt ±1 °C), danach Normalbetrieb.
+        """Stufen mit festem Ziel TMax 84, 86, 88, 90, 92 °C (erlaubt ±1 °C), danach Normalbetrieb. Jede Stufe heizt
+        auf, bis die Chiptemperatur das Ziel zum ersten Mal erreicht; ab dann läuft sie 30 min (Nutzer 25.10.).
         Während des Tests eigene Taktregeln (test_rules), keine Lüfterkorrektur, kein Lernen.
         Abbruch bei Ziel + 4 °C, Over Hot oder Takt-Messung."""
         st, now = self.st, self.now
@@ -881,7 +884,13 @@ class Round:
                 self.note('Temperatur-Test beendet (vom Nutzer bzw. durch Automatik aus/Wartung).')
             return
         started = at if isinstance(at, datetime) else datetime.fromisoformat(str(at))
-        stage = int((now - started).total_seconds() // TEST_STAGE_S) + 1
+        new_test = not tt or tt.get('started') != started.isoformat()
+        # ein Test aus v2.0.4 (Stufen nach fester Zeit, ohne reached_at) wird übernommen: die laufende Stufe zählt ab
+        # dem nächsten Erreichen des Ziels (Nutzer 25.10.)
+        stage = 1 if new_test else tt['stage']
+        reached = None if new_test or not tt.get('reached_at') else datetime.fromisoformat(tt['reached_at'])
+        if reached and (now - reached).total_seconds() >= TEST_STAGE_S:
+            stage, reached = stage + 1, None
         target = TEST_TARGETS[min(stage, len(TEST_TARGETS)) - 1]
         reason = None
         if over_hot:
@@ -899,7 +908,6 @@ class Round:
             st.pop('test', None)
             st['test_clear'] = True                      # run_fan_automation löscht temp_test_at
             return
-        new_test = not tt or tt.get('started') != started.isoformat()
         if new_test:
             self.end_learning('Temperatur-Test')
             if st.get('corr'):                           # eine laufende Korrekturphase endet: Lüfter auf die Basisstufe
@@ -909,10 +917,19 @@ class Round:
                             % (stage, len(TEST_TARGETS), target),
                             details={'stufe': stage, 'ziel': target, 'zielbereich': [target - 1, target + 1]})
             self.note('Temperatur-Test Stufe %d/%d: Ziel %d °C (±1 °C).' % (stage, len(TEST_TARGETS), target))
+        if reached is None and valid and self.t >= target:
+            reached = now
+            until = (now + timedelta(seconds=TEST_STAGE_S)).astimezone(LOCAL_TZ).strftime('%H:%M')
+            self.base_event(kind='test_ziel', trigger='Temperatur-Test Stufe %d/%d: Ziel %d °C erreicht, Stufe läuft bis %s'
+                            % (stage, len(TEST_TARGETS), target, until),
+                            details={'stufe': stage, 'ziel': target,
+                                     'stufe_endet': (now + timedelta(seconds=TEST_STAGE_S)).isoformat()})
+            self.note('Temperatur-Test Stufe %d/%d: Ziel %d °C erreicht, Stufe läuft bis %s.'
+                      % (stage, len(TEST_TARGETS), target, until))
+        stage_ends = (reached + timedelta(seconds=TEST_STAGE_S)).isoformat() if reached else None
         st['test'] = {'started': started.isoformat(), 'stage': stage, 'stages': len(TEST_TARGETS), 'target': target,
-                      'band': [target - 1, target + 1],
-                      'stage_ends': (started + timedelta(seconds=stage * TEST_STAGE_S)).isoformat(),
-                      'ends': (started + timedelta(seconds=len(TEST_TARGETS) * TEST_STAGE_S)).isoformat()}
+                      'band': [target - 1, target + 1], 'reached_at': reached.isoformat() if reached else None,
+                      'stage_ends': stage_ends, 'ends': stage_ends if stage == len(TEST_TARGETS) else None}
 
     def test_rules(self):
         """Taktregeln im Temperatur-Test: Ziel + 2 °C → −1 MHz, ab Ziel + 3 → −2; Ziel ± 1 → nichts; Ziel − 2 °C 30 s lang →

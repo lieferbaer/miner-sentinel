@@ -726,15 +726,19 @@ def test_plus_one_at_79_only_after_30_s(miner):
 
 # ---------------------------------------------------------------- Temperatur-Test (25.10.)
 
-def _test_run(miner, ac, start_offset_s=0):
+def _test_run(miner, ac, stage=1):
+    """Temperatur-Test gestartet; bei `stage` > 1 hat die Stufe davor ihr Ziel vor 30 min erreicht (nächste Runde: `stage`)."""
     r = started(miner, ac, level=2, learned={'2': {'mhz': 300, 'temp_avg': 82, 'at': 'x', 'count': 1}})
-    r.kw['temp_test_at'] = (r.now - timedelta(seconds=start_offset_s)).isoformat()
+    r.kw['temp_test_at'] = r.now.isoformat()
+    if stage > 1:
+        r.st['test'] = {'started': r.kw['temp_test_at'], 'stage': stage - 1,
+                        'reached_at': (r.now - timedelta(seconds=fa.TEST_STAGE_S)).isoformat()}
     return r
 
 
 def test_temp_test_targets_and_band(miner):
     ac = FakeAC(level=2)
-    r = _test_run(miner, ac, start_offset_s=3600)                 # Stufe 2: Ziel 86 °C
+    r = _test_run(miner, ac, stage=2)                             # Stufe 2: Ziel 86 °C
     r.go(10, temp=86)
     assert r.st['test']['stage'] == 2 and r.st['test']['target'] == 86 and r.st['test']['band'] == [85, 87]
     assert r.events('test_stufe')[0]['details']['ziel'] == 86 and r.st['test']['stages'] == 5
@@ -742,7 +746,7 @@ def test_temp_test_targets_and_band(miner):
 
 def test_temp_test_rules(miner):
     ac = FakeAC(level=2)
-    r = _test_run(miner, ac, start_offset_s=2 * 3600)             # Stufe 3: Ziel 88 °C
+    r = _test_run(miner, ac, stage=3)                             # Stufe 3: Ziel 88 °C
     r.go(40, temp=88)
     assert miner.clock() == 300                                   # Ziel ± 1: nichts
     r.go(5, temp=90)
@@ -775,7 +779,7 @@ def test_temp_test_no_learning(miner):
 
 def test_temp_test_aborts_at_target_plus_4(miner):
     ac = FakeAC(level=2)
-    r = _test_run(miner, ac, start_offset_s=4 * 3600)             # Stufe 5: Ziel 92 °C
+    r = _test_run(miner, ac, stage=5)                             # Stufe 5: Ziel 92 °C
     r.go(5, temp=95)
     assert 'test' in r.st                                         # 95 < 96: weiter
     r.go(5, temp=96)
@@ -785,16 +789,64 @@ def test_temp_test_aborts_at_target_plus_4(miner):
 
 def test_temp_test_finishes_after_5_stages(miner):
     ac = FakeAC(level=2)
-    r = _test_run(miner, ac, start_offset_s=5 * 3600 + 5)
+    r = _test_run(miner, ac, stage=6)                             # Stufe 5 seit 30 min am Ziel
     r.go(5, temp=82)
     assert r.events('test_ende')[-1]['details']['ergebnis'] == 'fertig' and 'test' not in r.st
 
 
 def test_temp_test_ended_by_user(miner):
     ac = FakeAC(level=2)
-    r = _test_run(miner, ac, start_offset_s=3600)
+    r = _test_run(miner, ac, stage=2)
     r.go(10, temp=86)
     assert r.st['phase'] == 'normal'
     r.kw['temp_test_at'] = None
     r.go(5, temp=86)
     assert 'test' not in r.st and r.st['phase'] == 'korrektur'    # 86 °C ist ohne Test wieder „hoch“
+
+
+def test_temp_test_stage_runs_30_min_from_reaching_the_target(miner):
+    """Nutzer 25.10.: jede Stufe heizt auf, bis das Ziel zum ersten Mal erreicht ist; ab dann 30 min."""
+    ac = FakeAC(level=2)
+    r = _test_run(miner, ac)                                      # Stufe 1: Ziel 84 °C
+    r.go(10 * 60, temp=83)
+    assert r.st['test']['stage'] == 1 and r.st['test']['reached_at'] is None and r.st['test']['stage_ends'] is None
+    assert not r.events('test_ziel')
+    reached = r.now
+    r.go(5, temp=84)
+    ziel = r.events('test_ziel')
+    until = (reached + timedelta(minutes=30)).astimezone(fa.LOCAL_TZ).strftime('%H:%M')
+    assert len(ziel) == 1 and ziel[0]['trigger'] == 'Temperatur-Test Stufe 1/5: Ziel 84 °C erreicht, Stufe läuft bis ' + until
+    assert r.st['test']['reached_at'] == reached.isoformat()
+    assert r.st['test']['stage_ends'] == (reached + timedelta(minutes=30)).isoformat()
+    assert r.st['test']['ends'] is None                           # Testende offen bis zur letzten Stufe
+    r.go(30 * 60 - 5, temp=83)                                    # unter das Ziel zurück: die 30 min laufen weiter
+    assert r.st['test']['stage'] == 1 and len(r.events('test_ziel')) == 1
+    r.go(5, temp=84)
+    assert r.st['test']['stage'] == 2 and r.st['test']['target'] == 86 and r.st['test']['reached_at'] is None
+    assert r.events('test_stufe')[-1]['details']['stufe'] == 2
+
+
+def test_temp_test_end_known_once_the_last_stage_reached_its_target(miner):
+    ac = FakeAC(level=2)
+    r = _test_run(miner, ac, stage=5)                             # Stufe 5: Ziel 92 °C
+    r.go(10, temp=90)
+    assert r.st['test']['stage'] == 5 and r.st['test']['ends'] is None
+    r.go(5, temp=92)
+    assert r.st['test']['ends'] == r.st['test']['stage_ends'] is not None
+
+
+def test_temp_test_taken_over_from_v204(miner):
+    """Ein laufender Test aus v2.0.4 (Stufe nach fester Zeit, ohne reached_at) läuft mit seiner Stufe weiter; deren
+    30 min zählen ab dem nächsten Erreichen des Ziels (Nutzer 25.10.)."""
+    ac = FakeAC(level=2)
+    r = _test_run(miner, ac)
+    r.st['test'] = {'started': r.kw['temp_test_at'], 'stage': 2, 'stages': 5, 'target': 86, 'band': [85, 87],
+                    'stage_ends': (r.now + timedelta(minutes=20)).isoformat(),
+                    'ends': (r.now + timedelta(hours=3)).isoformat()}
+    r.go(10, temp=85)
+    assert r.st['test']['stage'] == 2 and r.st['test']['reached_at'] is None
+    assert not r.events('test_stufe') and not r.events('test_ziel')
+    r.go(5, temp=86)
+    assert len(r.events('test_ziel')) == 1
+    r.go(30 * 60, temp=86)
+    assert r.st['test']['stage'] == 3 and r.st['test']['target'] == 88
