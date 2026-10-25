@@ -2,12 +2,13 @@
  * Lüfter (AC Infinity, Testmenü): Controller und Ports anzeigen, Einstellungen sichern/zurückschreiben und
  * testen, welcher Schreibweg die Lüfterstufe am echten Gerät wirklich ändert.
  */
+import { formatHashrate, formatNumber } from '@/components/dashboard'
 import MetricCard from '@/components/metrics/MetricCard'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import api from '@/lib/api'
 import { useLive } from '@/lib/LiveContext'
-import { Activity, Fan, Gauge, Loader2, RefreshCw, Thermometer } from 'lucide-react'
+import { Activity, Fan, Gauge, Hash, Loader2, RefreshCw, Thermometer } from 'lucide-react'
 import { useCallback, useEffect, useState } from 'react'
 
 const ACTIONS = {
@@ -133,6 +134,9 @@ function AutomationCards({ auto, st }) {
   const live = useLive()
   const sys = Object.values(live.data?.system || {}).find((d) => d && d.id === auto.device?.id) || {}
   const errorText = sys.error_rate_pct != null ? ' · Fehlerrate ' + fmt(sys.error_rate_pct, 2, ' %') : ''
+  // the same hashrate card as on the overview (latest collector value of the A15)
+  const deviceKey = (live.data?.devices || []).find((d) => d.id === auto.device?.id)?.device_id
+  const mining = (live.data?.mining || []).find((row) => row.device_id_str === deviceKey) || {}
   // during a Takt-Messung the run sets the clock: then the same value as the throttle card
   const throttle = live.data?.throttle?.[auto.device?.id] || {}
   const measuring = st.phase === 'messung'
@@ -174,7 +178,10 @@ function AutomationCards({ auto, st }) {
     st.learn_since ? 'lernt seit ' + clockTime(st.learn_since) : null,
   ].filter(Boolean).join(' · ') || phase.sub
   return (
-    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-5">
+      <MetricCard variant="hero" layout="icon-left" icon={Hash} label="Hashrate"
+        value={formatHashrate(mining.hashrate_ghs || 0)}
+        subtitle={formatNumber(mining.hashrate_ghs || 0, 2) + ' GH/s' + errorText} />
       <MetricCard variant="hero" layout="icon-left" icon={Thermometer} label="Heißester Chip" tone={tempTone}
         value={fmt(tmax, 0, ' °C')}
         subtitle={[others.length ? 'weitere Boards ' + others.join(' / ') : null,
@@ -183,7 +190,7 @@ function AutomationCards({ auto, st }) {
       <MetricCard variant="hero" layout="icon-left" icon={Gauge} label="Takt laut Miner"
         value={fmt(st.clock_now, 0, ' MHz')}
         subtitle={'gesetzt ' + setText + (st.mode_key ? ' · ' + (MODE_LABEL[st.mode_key] || st.mode_key) : '') +
-          ' · Standard ' + fmt(st.stock_mhz, 0, ' MHz') + errorText} />
+          ' · Standard ' + fmt(st.stock_mhz, 0, ' MHz')} />
       <MetricCard variant="hero" layout="icon-left" icon={Fan} label="Lüfter läuft auf"
         tone={st.phase === 'korrektur' ? 'warning' : 'default'}
         value={st.phase === 'wartung' ? 'Aus' : running == null ? '—' : 'Stufe ' + running}
