@@ -85,9 +85,11 @@ def miner(monkeypatch):
     return mn
 
 
-def row(state=None, level=5, enabled=True, cal=False, level_at=None, maintenance_at=None, temp_test_at=None):
+def row(state=None, level=5, enabled=True, cal=False, level_at=None, maintenance_at=None, temp_test_at=None,
+        restart_req_at=None):
     return {'id': 1, 'device_id': 3, 'enabled': enabled, 'ac_dev_id': 'dev', 'ac_port': 1, 'level': level,
             'level_at': level_at, 'maintenance_at': maintenance_at, 'temp_test_at': temp_test_at, 'state': state or {},
+            'restart_req_at': restart_req_at,
             'ip_address': '10.0.0.15', 'port': 4028, 'cal_active': cal,
             'connection_config': {'throttle': {'profiles': PROFILES}}}
 
@@ -950,8 +952,9 @@ def test_new_measurement_after_the_correction_phase(miner):
 
 # ---------------------------------------------------------------- Startpause (Nutzer 25.10.)
 
-def test_start_hold_after_restart_no_plus_for_3_min(miner):
-    """25.10. live: nach dem Neustart meldete der Miner 26 °C, die Regelung setzte +40 MHz → 85 °C."""
+def test_start_hold_after_restart_until_79(miner):
+    """25.10. live: nach dem Neustart meldete der Miner 26 °C, die Regelung setzte +40 MHz → 85 °C; danach wurde er
+    bei 253 MHz nur ~1 °C/min wärmer. Startpause bis 79 °C, höchstens 10 min (Nutzer 26.10.)."""
     ac = FakeAC(level=5)
     r = started(miner, ac, level=5, learned={'5': {'mhz': 300, 'temp_avg': 82, 'at': 'x', 'count': 1}})
     r.go(30, temp=82)
@@ -959,13 +962,28 @@ def test_start_hold_after_restart_no_plus_for_3_min(miner):
     start = r.now
     r.go(5, temp=26)
     ev = r.events('startpause')
-    until = start + timedelta(minutes=3)
-    assert len(ev) == 1 and ev[0]['trigger'] == ('Startpause: keine Takterhöhung bis %s (Neustart des Miners)'
+    until = start + timedelta(minutes=10)
+    assert len(ev) == 1 and ev[0]['trigger'] == ('Startpause: keine Takterhöhung bis 79 °C, spätestens %s'
                                                   % until.astimezone(fa.LOCAL_TZ).strftime('%H:%M'))
-    r.go(170, temp=26)
-    assert r.st['clock_set'] == 300                               # 3 min keine Takterhöhung, auch bei 26 °C
-    r.go(10, temp=26)
-    assert r.st['clock_set'] == 340                               # danach wie immer (+40 unter 60 °C)
+    assert ev[0]['details']['grund'] == 'Neustart des Miners'
+    r.go(60, temp=26)
+    r.go(6 * 60, temp=77)
+    assert r.st['clock_set'] == 300                               # langsam warm: keine Takterhöhung
+    r.go(5, temp=79)
+    assert not r.st.get('start_hold')                             # 79 °C erreicht: Pause vorbei
+    r.go(40, temp=78)
+    assert r.st['clock_set'] == 305                               # danach wie immer
+
+
+def test_start_hold_ends_after_10_min_at_the_latest(miner):
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, learned={'5': {'mhz': 300, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    r.go(30, temp=82)
+    miner.elapsed = 10
+    r.go(10 * 60 - 5, temp=70)
+    assert r.st['clock_set'] == 300
+    r.go(10, temp=70)
+    assert r.st['clock_set'] == 305 and not r.st.get('start_hold')
 
 
 def test_start_hold_keeps_high_temperature_rules(miner):
@@ -999,3 +1017,92 @@ def test_no_start_hold_when_base_level_is_chosen(miner):
     r.kw['level_at'] = 'neu'
     r.go(60, temp=72)
     assert not r.events('startpause') and r.st['clock_set'] > 300
+
+
+def test_start_hold_also_when_another_start_reason_follows_in_the_same_round(miner):
+    """Review 25.10.: Neustart erkannt und in derselben Runde Basisstufe gewählt (z. B. während das MinerGerät
+    offline war) – die Chips sind trotzdem kalt: Startpause."""
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, learned={'5': {'mhz': 300, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    r.go(30, temp=82)
+    miner.elapsed = 10
+    r.kw['level_at'] = 'neu'
+    r.go(5, temp=26)
+    assert r.events('start')[-1]['trigger'].startswith('Basisstufe gewählt') and r.events('startpause')
+    r.go(60, temp=26)
+    assert r.st['clock_set'] == 300
+
+
+# ---------------------------------------------------------------- Neustart sauber anzeigen (Nutzer 25.10.)
+
+def test_restart_by_button_offline_is_expected(miner):
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, learned={'5': {'mhz': 300, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    r.go(30, temp=82)
+    r.kw['restart_req_at'] = r.now.isoformat()                    # Knopf „A15 neu starten“
+    r.go(5, temp=82)
+    assert r.st['restart_req']
+    miner.offline = True
+    r.go(30)
+    assert r.st['offline'] == 'neustart' and not r.events('miner_offline')
+    assert r.events('neustart_offline')[0]['trigger'] == 'A15 startet neu – nicht erreichbar (erwartet)'
+    miner.offline, miner.elapsed = False, 10
+    r.go(5, temp=26)
+    assert r.events('neustart_online')[0]['trigger'] == 'A15 nach Neustart wieder erreichbar nach 30 s'
+    assert r.events('start')[-1]['trigger'] == 'Neustart des Miners' and not r.st.get('restart_req')
+
+
+def test_restart_another_way_relabels_offline_of_the_last_3_min(miner):
+    """Neustart über die Einstellungsseite oder Strom: erst an der Laufzeit erkannt, dann werden „antwortet nicht/
+    wieder“ der 3 min davor zu Neustart-Einträgen (nicht mehr rot)."""
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, learned={'5': {'mhz': 300, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    r.go(30, temp=82)
+    miner.offline = True
+    r.go(30)
+    miner.offline = False
+    r.go(15, temp=82)
+    assert r.events('miner_offline') and r.events('miner_online')
+    miner.elapsed = 10
+    r.go(5, temp=26)
+    assert not r.events('miner_offline') and not r.events('miner_online')
+    assert r.events('neustart_offline')[0]['ok'] is None
+    assert r.events('neustart_online')[0]['trigger'] == 'A15 nach Neustart wieder erreichbar nach 30 s'
+    miner.offline = True                                          # während der Startpause: Teil des Neustarts
+    r.go(20)
+    assert len(r.events('neustart_offline')) == 2 and not r.events('miner_offline')
+
+
+def test_offline_without_restart_stays_an_error(miner):
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, learned={'5': {'mhz': 300, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    r.go(30, temp=82)
+    miner.offline = True
+    r.go(30)
+    miner.offline = False
+    r.go(4 * 60, temp=82)                                         # kein Neustart in den 3 min danach
+    miner.elapsed = 10
+    r.go(5, temp=26)
+    assert r.events('miner_offline') and r.events('miner_offline')[0]['ok'] is False
+
+
+def test_firmware_resend_waits_60_s_while_the_firmware_ramps(miner, monkeypatch):
+    """26.10. live: nach dem Hochfahren setzte die Firmware 360 MHz und senkte dann schrittweise; die Regelung sandte
+    in 10 s dreimal neu. Nach einem erneuten Senden frühestens nach 60 s wieder."""
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, learned={'5': {'mhz': 253, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    r.go(70, temp=82)
+
+    def ramping(ip, port, points):                                # Firmware stellt den Takt nur schrittweise ein
+        miner.clock_sets.append(sum(points) / len(points))
+        miner.points = [p + 60 for p in points]
+        return 'STATUS=S,Msg=ASC 0 set OK'
+    monkeypatch.setattr(calibration, 'set_frequency', ramping)
+    miner.points = list(STOCK['2/L4'])                            # Firmware setzt den Standardtakt
+    r.go(5, temp=82)
+    assert len(r.events('firmware_takt')) == 1
+    r.go(50, temp=82)
+    assert len(r.events('firmware_takt')) == 1                    # Takt laut Miner noch hoch: aber erst nach 60 s
+    r.go(15, temp=82)
+    assert len(r.events('firmware_takt')) == 2
+

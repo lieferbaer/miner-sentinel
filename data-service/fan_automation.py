@@ -13,7 +13,8 @@ Regelungslogik nach dem Plan vom 24.10.2026 (docs/claude/Regelungslogik-Luefter-
     (einmal je Änderung; endet über 84 °C).
   * Schritt 4 - Takt 100-440 MHz, Modus folgt dem Takt (Spielraum 10 MHz nach unten).
   * Schritt 5 - Ausnahme: Takt 440 und 3 min stabil unter 70 °C -> Lüfter -1 (stufenweise); Ende über 70 °C.
-  * Startpause: nach Neustart, Wartung oder Over Hot 3 min keine Takterhöhung (kalte Chips, Nutzer 25.10.).
+  * Startpause: nach Neustart, Wartung oder Over Hot keine Takterhöhung bis 79 °C, höchstens 10 min (kalte Chips,
+    Nutzer 25.10.). „Nicht erreichbar“ rund um einen Neustart ist ein Neustart-Eintrag, kein Fehler.
   * Lernen: 15 min in 79-84 °C (Nutzer 25.10.) bei unverändertem Lüfter -> Lernwert der aktiven Stufe.
   * Jeder Zyklus und jede Entscheidung wird protokolliert (automation_journal.py).
 Takt-Messung (Takt-Tabellen): Taktregelung pausiert, der Lüfter reagiert nur nach Schritt 1/2.
@@ -52,8 +53,9 @@ WINDOW_S = 30                 # Beobachtungsfenster nach jeder Taktänderung
 TENDENCY_S = 30               # Tendenz: gegen den Wert von vor höchstens 30 s (bzw. bei der letzten Taktänderung)
 CALM_LOW = 79                 # 79-84 °C: keine Taktänderung (Nutzer 25.10.)
 CALM_AFTER_HOT_S = 5 * 60     # Taktsperre: letzte Taktänderung über 84 °C, dann unter 79 °C → 5 min keine Taktänderung
-START_HOLD_S = 3 * 60         # Startpause: nach einem Start mit kalten Chips 3 min keine Takterhöhung (Nutzer 25.10.)
-START_HOLD_REASONS = ('Neustart des Miners', 'nach Wartung', 'nach Over Hot')
+START_HOLD_S = 10 * 60        # Startpause: nach einem Start mit kalten Chips keine Takterhöhung bis 79 °C, höchstens 10 min
+RESTART_EXPECT_S = 5 * 60     # Neustart über den Knopf: so lange gilt „nicht erreichbar“ als erwartet (Nutzer 25.10.)
+RESTART_RELABEL_S = 3 * 60    # Neustart auf anderem Weg: „antwortet nicht/wieder“ der 3 min davor gehören zum Neustart
 RETURN_STABLE_S = 60          # Rückkehr zur Basisstufe nach 1 min stabil in 80-84 °C
 FAN_DOWN_DELAY_S = 30         # niedrigere Korrekturstufe erst, wenn die Tabelle sie 30 s lang verlangt
 EXC_BELOW = 70                # Ausnahme: unter 70 °C ...
@@ -367,12 +369,13 @@ class Round:
                                  details={'quelle': source, 'starttakt': target, 'basisstufe': self.base})
         self.note('%s: Starttakt %d MHz (%s Stufe %d), Lüfter Stufe %d.' % (reason, target, source, self.base, self.base))
         self.decide('Start (%s): %d MHz' % (reason, target), log_id)
-        if reason in START_HOLD_REASONS:
-            # die Chips waren aus: der erste Messwert ist kalt (25.10.: 26 °C → +40 MHz → 85 °C)
+        if st.pop('start_cold', False):
+            # die Chips waren aus (Neustart, Wartung, Over Hot – auch wenn in derselben Runde ein anderer Startgrund
+            # dazukam): der erste Messwert ist kalt (25.10.: 26 °C → +40 MHz → 85 °C)
             until = self.now + timedelta(seconds=START_HOLD_S)
             st['start_hold'] = {'until': _iso(until)}
-            text = 'Startpause: keine Takterhöhung bis %s' % until.astimezone(LOCAL_TZ).strftime('%H:%M')
-            self.base_event(kind='startpause', trigger='%s (%s)' % (text, reason), details={'bis': _iso(until)})
+            text = 'Startpause: keine Takterhöhung bis 79 °C, spätestens %s' % until.astimezone(LOCAL_TZ).strftime('%H:%M')
+            self.base_event(kind='startpause', trigger=text, details={'bis': _iso(until), 'grund': reason})
             self.note(text + '.')
 
     # --- commands (Kapitel 8)
@@ -715,6 +718,31 @@ class Round:
             self.decide('Lernwert gespeichert', log_id)
             st.update({'learn_since': _iso(now), 'learn_sum': 0, 'learn_n': 0, 'learn_clock_sum': 0.0})
 
+    # --- Neustart sauber anzeigen (Nutzer 25.10.)
+    def restart_expected(self):
+        """„Nicht erreichbar“ gehört zu einem Neustart: Knopf „A15 neu starten“ vor höchstens 5 min oder Startpause."""
+        hold = self.st.get('start_hold')
+        return bool(self.st.get('restart_req') or (hold and _age(hold['until'], self.now) < 0))
+
+    def remember_net(self, log_id, kind, took=None):
+        """„Antwortet nicht/wieder“ merken, um sie bei einem später erkannten Neustart umzubenennen."""
+        net = [x for x in self.st.get('net_log') or [] if _age(x[2], self.now) <= RESTART_RELABEL_S]
+        if log_id:
+            net.append([log_id, kind, _iso(self.now), took])
+        self.st['net_log'] = net
+
+    def relabel_restart(self):
+        """Neustart erkannt: „Miner antwortet nicht/wieder“ der 3 min davor sind Teil des Neustarts."""
+        for log_id, kind, at, took in self.st.get('net_log') or []:
+            if _age(at, self.now) > RESTART_RELABEL_S:
+                continue
+            if kind == 'miner_offline':
+                self.j.update(log_id, kind='neustart_offline', trigger='A15 startet neu – nicht erreichbar (erwartet)', ok=None)
+            elif kind == 'miner_online':
+                self.j.update(log_id, kind='neustart_online', trigger='A15 nach Neustart wieder erreichbar'
+                              + (' nach %d s' % took if took is not None else ''))
+        self.st['net_log'] = []
+
     # --- the rules (Kapitel 5)
     def window_over(self):
         wu = self.st.get('window_until')
@@ -812,7 +840,7 @@ class Round:
         old = st.get('clock_set')
         if old is None or t >= CALM_LOW or st.get('corr') or st.get('calm') or d > 0:
             return
-        if st.get('start_hold') and _age(st['start_hold']['until'], self.now) < 0:
+        if st.get('start_hold'):
             return                                       # Startpause nach einem Start mit kalten Chips
         old = int(round(old))
         if old < CLOCK_MAX:
@@ -877,6 +905,9 @@ class Round:
 
     def rules(self):
         st = self.st
+        hold = st.get('start_hold')
+        if hold and (self.t >= CALM_LOW or _age(hold['until'], self.now) >= 0):
+            st['start_hold'] = None                      # Startpause endet bei 79 °C, spätestens nach 10 min
         if st.get('test') and not st.get('cal'):
             self.test_rules()
             return
@@ -1020,6 +1051,15 @@ class Round:
             st = self.st = new
             self.note('Automatik ein (Basisstufe %d).' % self.base)
 
+        req = row.get('restart_req_at')
+        if req is not None and str(req) != st.get('restart_req_seen'):
+            st['restart_req_seen'] = str(req)
+            req = req if isinstance(req, datetime) else datetime.fromisoformat(str(req))
+            if (now - req).total_seconds() < RESTART_EXPECT_S:
+                st['restart_req'] = _iso(req)                # Knopf „A15 neu starten“: Neustart erwartet
+        if st.get('restart_req') and _age(st['restart_req'], now) >= RESTART_EXPECT_S:
+            st['restart_req'] = None
+
         if row.get('maintenance_at'):
             m = _maintenance(row, st, now, self.ac, self.j)
             if m is None:
@@ -1030,22 +1070,40 @@ class Round:
                 return st
             if st.get('maint_end'):
                 st['start_reason'] = 'nach Wartung'
+                st['start_cold'] = True
         else:
             st.pop('maint', None)
             try:
                 m = calibration.read_miner(row['ip_address'], row['port'])
             except (OSError, RuntimeError, ValueError) as exc:
                 if not st.get('offline'):
-                    st['offline'] = True
-                    self.base_event(kind='miner_offline', trigger='Miner antwortet nicht', ok=False, error=str(exc)[:500])
-                    self.note('Miner antwortet nicht: Lüfter unverändert, warten.')
+                    st['offline_since'] = _iso(now)
+                    if self.restart_expected():
+                        st['offline'] = 'neustart'
+                        log_id = self.base_event(kind='neustart_offline', trigger='A15 startet neu – nicht erreichbar (erwartet)',
+                                                 ok=None, error=str(exc)[:500])
+                        self.note('A15 startet neu: nicht erreichbar (erwartet).')
+                    else:
+                        st['offline'] = True
+                        log_id = self.base_event(kind='miner_offline', trigger='Miner antwortet nicht', ok=False,
+                                                 error=str(exc)[:500])
+                        self.note('Miner antwortet nicht: Lüfter unverändert, warten.')
+                    self.remember_net(log_id, 'neustart_offline' if st['offline'] == 'neustart' else 'miner_offline')
                 self.j.cycle(recorded_at=now, phase=st.get('phase') or '', base_level=self.base,
                              clock_set=st.get('clock_set'), fan_level=st.get('fan_set'), fan_read=st.get('fan_read'),
-                             decision='Miner antwortet nicht')
+                             decision='A15 startet neu' if st['offline'] == 'neustart' else 'Miner antwortet nicht')
                 return st
         self.m = m
-        if st.pop('offline', False):
-            self.base_event(kind='miner_online', trigger='Miner antwortet wieder')
+        off = st.pop('offline', False)
+        if off:
+            took = int(_age(st['offline_since'], now)) if st.get('offline_since') else None
+            if off == 'neustart':
+                log_id = self.base_event(kind='neustart_online', trigger='A15 nach Neustart wieder erreichbar'
+                                         + (' nach %d s' % took if took is not None else ''), details={'nicht_erreichbar_s': took})
+            else:
+                log_id = self.base_event(kind='miner_online', trigger='Miner antwortet wieder', details={'nicht_erreichbar_s': took})
+            self.remember_net(log_id, 'neustart_online' if off == 'neustart' else 'miner_online', took)
+        st.pop('offline_since', None)
         st['seen_at'] = _iso(now)
         st['ac_error'] = None
 
@@ -1055,7 +1113,10 @@ class Round:
                 and not own_switch):
             self.base_event(kind='neustart', trigger='Laufzeit des Miners zurückgesetzt (%s s → %s s)' % (st['elapsed'], m['elapsed']))
             st['start_reason'] = 'Neustart des Miners'
+            st['start_cold'] = True
             self.restarted = True
+            st['restart_req'] = None
+            self.relabel_restart()
         st['elapsed'] = m['elapsed']
         level_at = row.get('level_at')
         if level_at is not None and str(level_at) != st.get('level_seen'):
@@ -1093,6 +1154,7 @@ class Round:
         if not over_hot and st.get('over_hot'):
             st.pop('over_hot')
             st['start_reason'] = 'nach Over Hot'
+            st['start_cold'] = True
 
         if valid:
             self.t = int(round(tmax))
@@ -1126,9 +1188,12 @@ class Round:
             self.confirm_pending()
             # Miner hat den Takt selbst geändert (Takt laut Miner > gesetzt + 25 MHz, frühestens 60 s nach der letzten
             # Taktänderung – vorher stellt die Firmware den neuen Takt noch schrittweise ein): erneut senden
+            # nach dem erneuten Senden ebenfalls 60 s warten (25./26.10.: nach dem Hochfahren 3× in 10 s gesendet,
+            # während die Firmware von 360 MHz schon schrittweise heruntersetzte)
             if (not self.busy() and st.get('clock_set') and st['clock_now']
                     and st['clock_now'] > st['clock_set'] + OVERRIDE_MHZ
-                    and _age(st.get('clock_changed_at'), now) >= OVERRIDE_AFTER_S):
+                    and _age(st.get('clock_changed_at'), now) >= OVERRIDE_AFTER_S
+                    and _age(st.get('resent_at'), now) >= OVERRIDE_AFTER_S):
                 self.base_event(kind='firmware_takt', trigger='Takt laut Miner %.0f MHz, gesetzt %s MHz'
                                 % (st['clock_now'], st['clock_set']))
                 self.note('Miner hat den Takt selbst geändert (%.0f MHz laut Miner): %s MHz erneut.'
@@ -1141,6 +1206,7 @@ class Round:
                 q.append({'kind': 'takt', 'value': int(round(st['clock_set'])),
                           'why': 'Miner hat den Takt geändert: erneut senden'})
                 st['queue'] = q
+                st['resent_at'] = _iso(now)
         if valid:
             self.rules()
         self.write_fan()                                   # Lüfter vor den (möglicherweise langsamen) Miner-Befehlen
@@ -1184,6 +1250,8 @@ def run_fan_automation(database_url, ac=None):
             cur.execute(
                 "SELECT f.id, f.enabled, f.ac_dev_id, f.ac_port, f.level, f.level_at, f.maintenance_at, f.temp_test_at, f.state, "
                 "d.id AS device_id, d.ip_address, d.port, "
+                "(SELECT max(l.recorded_at) FROM automation_log l WHERE l.device_id = d.id AND l.kind = 'neustart_nutzer') "
+                "AS restart_req_at, "
                 "d.connection_config, EXISTS (SELECT 1 FROM calibration_runs r WHERE r.device_id = d.id "
                 "AND r.status IN ('running', 'cancelling', 'finishing')) AS cal_active "
                 "FROM fan_automation f JOIN devices d ON d.id = f.device_id "
