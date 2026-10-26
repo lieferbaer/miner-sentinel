@@ -73,6 +73,7 @@ const LOGIC_TEXT =
   'zurück zur Basisstufe nach 1 min in 80–84 °C oder sobald unter 80 °C. War die letzte ' +
   'Taktänderung über 84 °C und fällt die Temperatur unter 79 °C: 5 min keine Taktänderung (endet über 84 °C). ' +
   'Nach Neustart, Wartung oder Over Hot keine Takterhöhung bis 79 °C, höchstens 10 min (Startpause). ' +
+  'Bei jedem Start Lüfter Stufe 1, bis die Chiptemperatur 74 °C erreicht (Heizmodus). ' +
   'Bei 440 MHz und 3 min unter 70 °C Lüfter −1 (Ausnahme).'
 const START_TEXT =
   'Start (Stufenwahl, Einschalten, Neustart, nach Wartung oder Takt-Messung): Lernwert der Basisstufe, sonst ' +
@@ -166,7 +167,8 @@ function AutomationCards({ auto, st, roomTemp }) {
     st.phase === 'ausnahme' ? 'Ausnahme' + (running != null && running < base ? ' −' + (base - running) : '') : null,
     // after the Ausnahme the fan stays on the reduced level (plan, step 5); judged by the target: fan_set lags
     // behind until the controller has taken a new base level
-    st.phase === 'normal' && st.fan_target != null && st.fan_target < base
+    st.heat ? 'Heizmodus bis 74 °C' : null,
+    !st.heat && st.phase === 'normal' && st.fan_target != null && st.fan_target < base
       ? 'reduziert nach Ausnahme −' + (base - st.fan_target) : null,
     st.fan_target != null && st.fan_target !== st.fan_set ? 'wird Stufe ' + st.fan_target : null,
     confirmed ? null : 'Rückmeldung folgt',
@@ -184,6 +186,7 @@ function AutomationCards({ auto, st, roomTemp }) {
     pending,
     windowOpen ? 'Beobachtungsfenster bis ' + clockTime(st.window_until, true) : null,
     st.calm && Date.parse(st.calm.until) > Date.now() ? 'Taktsperre bis ' + clockTime(st.calm.until) : null,
+    st.heat ? 'Heizmodus bis 74 °C (Lüfter Stufe 1)' : null,
     st.start_hold && Date.parse(st.start_hold.until) > Date.now()
       ? 'keine Takterhöhung bis 79 °C, spätestens ' + clockTime(st.start_hold.until) : null,
     st.learn_since ? 'lernt seit ' + clockTime(st.learn_since) : null,
@@ -223,7 +226,7 @@ const RECENT_KINDS = ['takt', 'modus', 'luefter', 'hohe_temperatur', 'rueckkehr'
   'messung_ende', 'fehler', 'basisstufe', 'automatik_ein', 'automatik_aus', 'wartung_start', 'wartung_ende',
   'test_start', 'test_stufe', 'test_ziel', 'test_schritt', 'test_messung', 'test_ende', 'neustart_nutzer', 'taktsperre',
   'taktsperre_ende', 'startpause', 'startpause_ende', 'neustart_offline', 'neustart_online',
-  'einstellungsseite_aus', 'einstellungsseite_an', 'modus_wartet']
+  'einstellungsseite_aus', 'einstellungsseite_an', 'modus_wartet', 'heizmodus', 'heizmodus_ende']
 const RECENT_COUNT = 20
 const RECENT_REFRESH_MS = 10000
 const RECENT_LABEL = { takt: 'Takt', modus: 'Modus', luefter: 'Lüfter', start: 'Start' }

@@ -33,6 +33,8 @@ export const KIND_LABEL = {
   einstellungsseite_aus: 'Einstellungsseite antwortet nicht',
   einstellungsseite_an: 'Einstellungsseite wieder erreichbar',
   modus_wartet: 'Moduswechsel wartet',
+  heizmodus: 'Heizmodus',
+  heizmodus_ende: 'Heizmodus beendet',
   over_hot: 'Over Hot',
   miner_offline: 'Miner antwortet nicht',
   miner_online: 'Miner antwortet wieder',

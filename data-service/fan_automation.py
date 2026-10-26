@@ -11,8 +11,9 @@ Regelungslogik nach dem Plan vom 24.10.2026 (docs/claude/Regelungslogik-Luefter-
   * Schritt 3 - Feintuning: unter 79 °C 70-78 +5; 60-69 +20; unter 60 +40 (kleinster Schritt 5 MHz, Nutzer 25.10.).
     Taktsperre: war die letzte Taktänderung über 84 °C und fällt die Chiptemperatur unter 79 °C, 5 min keine Taktänderung
     (einmal je Änderung; endet über 84 °C).
-  * Schritt 4 - Takt 100-440 MHz, Modus folgt dem Takt (Spielraum 10 MHz nach unten).
+  * Schritt 4 - Takt 100-440 MHz, Modus folgt dem Takt (Spielraum 20 MHz nach unten).
   * Schritt 5 - Ausnahme: Takt 440 und 3 min stabil unter 70 °C -> Lüfter -1 (stufenweise); Ende über 70 °C.
+  * Heizmodus: bei jedem Start Lüfter Stufe 1, bis die Chiptemperatur 74 °C erreicht (Nutzer 26.10.).
   * Startpause: nach Neustart, Wartung oder Over Hot keine Takterhöhung bis 79 °C, höchstens 10 min (kalte Chips,
     Nutzer 25.10.). „Nicht erreichbar“ rund um einen Neustart ist ein Neustart-Eintrag, kein Fehler.
   * Lernen: 15 min in 79-84 °C (Nutzer 25.10.) bei unverändertem Lüfter -> Lernwert der aktiven Stufe.
@@ -48,12 +49,13 @@ DWELL_S, DWELL_MINUS = 300, (10, 5)   # 85-87 °C (None): vorher unter 5 min in 
 START_CLOCK = {1: 100, 2: 110, 3: 120, 4: 130, 5: 140, 6: 150, 7: 160, 8: 170, 9: 180, 10: 190}
 CLOCK_MIN, CLOCK_MAX = 100, 440
 MODE_TOP = {4: 360, 3: 380, 2: 400, 1: 420, 0: 440}   # oberer Takt je Modus (mode 04 ... mode 00)
-MODE_DOWN_MARGIN = 10         # Spielraum nach unten: Wechsel in den tieferen Modus erst 10 MHz unter dessen Obergrenze
+MODE_DOWN_MARGIN = 20         # Spielraum nach unten: Wechsel in den tieferen Modus erst 20 MHz unter dessen Obergrenze (Nutzer 26.10.)
 WINDOW_S = 30                 # Beobachtungsfenster nach jeder Taktänderung
 TENDENCY_S = 30               # Tendenz: gegen den Wert von vor höchstens 30 s (bzw. bei der letzten Taktänderung)
 CALM_LOW = 79                 # 79-84 °C: keine Taktänderung (Nutzer 25.10.)
 CALM_AFTER_HOT_S = 5 * 60     # Taktsperre: letzte Taktänderung über 84 °C, dann unter 79 °C → 5 min keine Taktänderung
 PLUS_WAIT_FROM, PLUS_WAIT_S = 75, 3 * 60   # bei 75-78 °C: nächste Takterhöhung erst 3 min nach der letzten (Nutzer 26.10.)
+HEAT_FAN, HEAT_UNTIL = 1, CALM_LOW - 5      # Heizmodus beim Start: Lüfter Stufe 1, bis 5 °C unter 79 °C (Nutzer 26.10.)
 START_HOLD_S = 10 * 60        # Startpause: nach einem Start mit kalten Chips keine Takterhöhung bis 79 °C, höchstens 10 min
 RESTART_EXPECT_S = 5 * 60     # Neustart über den Knopf: so lange gilt „nicht erreichbar“ als erwartet (Nutzer 25.10.)
 RESTART_RELABEL_S = 3 * 60    # Neustart auf anderem Weg: „antwortet nicht/wieder“ der 3 min davor gehören zum Neustart
@@ -136,7 +138,7 @@ def table_level(mhz):
 
 
 def required_level(mhz, current):
-    """Modus für einen Takt: aufwärts ab Obergrenze + 1, abwärts erst 10 MHz unter der Obergrenze des tieferen Modus."""
+    """Modus für einen Takt: aufwärts ab Obergrenze + 1, abwärts erst 20 MHz unter der Obergrenze des tieferen Modus."""
     if current is None:
         return table_level(mhz)
     level = current
@@ -358,7 +360,12 @@ class Round:
         st.update({'corr': False, 'corr_dwell_s': None, 'exc_active': False, 'clock_set': target, 'queue': [], 'window_until': None,
                    'band_since': None, 'cold_since': None, 'down_since': None,
                    'clock_changed_at': _iso(self.now), 'clock_changed_t': self.t, 'start_reason': None})
-        self.set_fan_target(self.base, 'Start: Basisstufe %d' % self.base)
+        # Heizmodus (Nutzer 26.10.): Lüfter Stufe 1, bis die Chiptemperatur 74 °C erreicht; schon so warm: Basisstufe
+        st['heat'] = self.t is None or self.t < HEAT_UNTIL
+        if st['heat']:
+            self.set_fan_target(HEAT_FAN, 'Heizmodus: Stufe %d bis %d °C' % (HEAT_FAN, HEAT_UNTIL))
+        else:
+            self.set_fan_target(self.base, 'Start: Basisstufe %d' % self.base)
         self.end_learning(None)
         level = table_level(target)
         queue = []
@@ -366,11 +373,17 @@ class Round:
             queue.append({'kind': 'modus', 'value': level, 'why': 'Start: Modus für %d MHz' % target})
         queue.append({'kind': 'takt', 'value': target, 'from': old_clock, 'why': 'Start: %s Stufe %d' % (source, self.base)})
         st['queue'] = queue
-        log_id = self.base_event(kind='start', trigger=reason, fan_old=old_fan, fan_new=self.base, clock_old=old_clock,
-                                 clock_new=target, mode_new=calibration.mode_key(2, level),
+        log_id = self.base_event(kind='start', trigger=reason, fan_old=old_fan, fan_new=st['fan_target'],
+                                 clock_old=old_clock, clock_new=target, mode_new=calibration.mode_key(2, level),
                                  details={'quelle': source, 'starttakt': target, 'basisstufe': self.base})
-        self.note('%s: Starttakt %d MHz (%s Stufe %d), Lüfter Stufe %d.' % (reason, target, source, self.base, self.base))
+        self.note('%s: Starttakt %d MHz (%s Stufe %d), Lüfter Stufe %d.' % (reason, target, source, self.base,
+                                                                        st['fan_target']))
         self.decide('Start (%s): %d MHz' % (reason, target), log_id)
+        if st['heat']:
+            text = 'Heizmodus: Lüfter Stufe %d bis %d °C' % (HEAT_FAN, HEAT_UNTIL)
+            self.base_event(kind='heizmodus', trigger=text, fan_old=old_fan, fan_new=HEAT_FAN,
+                            details={'bis': HEAT_UNTIL, 'basisstufe': self.base})
+            self.note(text + '.')
         if st.pop('start_cold', False):
             # die Chips waren aus (Neustart, Wartung, Over Hot – auch wenn in derselben Runde ein anderer Startgrund
             # dazukam): der erste Messwert ist kalt (25.10.: 26 °C → +40 MHz → 85 °C)
@@ -964,8 +977,34 @@ class Round:
             self.stability_end('ausnahme', 'abgebrochen',
                                'Chiptemperatur %d °C' % t if t >= EXC_BELOW else 'Takt nicht mehr 440 MHz')
 
+    def end_heat(self, why):
+        """Heizmodus beenden: Lüfter auf die Basisstufe (Nutzer 26.10.)."""
+        st = self.st
+        if not st.get('heat'):
+            return
+        st['heat'] = False
+        old = st.get('fan_target')
+        self.set_fan_target(self.base, 'Heizmodus beendet: Basisstufe %d' % self.base)
+        text = 'Heizmodus beendet: %s, Lüfter Stufe %d' % (why, self.base)
+        self.base_event(kind='heizmodus_ende', trigger=text, fan_old=old, fan_new=self.base)
+        self.note(text + '.')
+
+    def heat_off(self, why):
+        """Ohne Regelung (Automatik aus, Miner antwortet nicht): ein laufender Heizmodus endet sofort, Lüfter auf die
+        Basisstufe; ein fehlgeschlagener Lüfterbefehl wird wiederholt (Nutzer 26.10.)."""
+        st = self.st
+        if st.get('heat'):
+            self.end_heat(why)
+            st['heat_fan_due'] = True
+        if st.get('heat_fan_due'):
+            self.write_fan()
+            if st.get('fan_set') == st.get('fan_target'):
+                st.pop('heat_fan_due')
+
     def rules(self):
         st = self.st
+        if st.get('heat') and self.t >= HEAT_UNTIL:
+            self.end_heat('%d °C erreicht' % HEAT_UNTIL)
         hold = st.get('start_hold')
         if hold and (self.t >= CALM_LOW or _age(hold['until'], self.now) >= 0):
             st['start_hold'] = None                      # Startpause endet bei 79 °C, spätestens nach 10 min
@@ -1047,6 +1086,7 @@ class Round:
             self.return_to_base('Temperatur-Test beginnt')
         self.stability_end('ausnahme', 'abgebrochen', 'Temperatur-Test')
         st['exc_active'] = False
+        self.end_heat('Temperatur-Test')
         self.set_fan_target(self.base, 'Temperatur-Test: Basisstufe %d' % self.base)
         learned = (st.get('learned') or {}).get(str(self.base))
         clock = int(round(learned['mhz'])) if learned else START_CLOCK.get(self.base, START_CLOCK[1])
@@ -1103,6 +1143,7 @@ class Round:
             if not st.get('off'):
                 self.note('Automatik aus: Takt bleibt %s.' % ('%s MHz' % st['clock_set'] if st.get('clock_set') else 'wie er ist'))
                 self.drop_pending('Automatik aus')
+            self.heat_off('Automatik aus')
             st.update({'off': True, 'phase': 'aus', 'queue': [], 'settle': None})
             self.j.cycle(recorded_at=now, phase='aus', base_level=self.base, clock_set=st.get('clock_set'),
                          fan_level=st.get('fan_set'), decision='Automatik aus')
@@ -1161,6 +1202,8 @@ class Round:
                     self.note('Miner antwortet nicht: Lüfter unverändert, warten.')
                     self.remember_net(log_id, 'miner_offline', err=err)
                     st['offline_entry'] = [log_id, err, _iso(now)]
+                if st['offline'] is True:
+                    self.heat_off('Miner antwortet nicht')
                 self.j.cycle(recorded_at=now, phase=st.get('phase') or '', base_level=self.base,
                              clock_set=st.get('clock_set'), fan_level=st.get('fan_set'), fan_read=st.get('fan_read'),
                              decision='A15 startet neu' if st['offline'] == 'neustart' else 'Miner antwortet nicht')
@@ -1230,6 +1273,7 @@ class Round:
             st['over_hot'] = True
             self.base_event(kind='over_hot', trigger='Miner meldet Over Hot: keine Entscheidung bis zu gültigen Werten')
             self.note('Over Hot gemeldet: keine Entscheidung bis zu gültigen Werten.')
+            self.end_heat('Over Hot')
         if not over_hot and st.get('over_hot'):
             st.pop('over_hot')
             st['start_reason'] = 'nach Over Hot'
@@ -1261,6 +1305,7 @@ class Round:
         if st.get('start_reason') and not cal and not over_hot and m['points']:
             self.start(st['start_reason'])
         elif st.get('start_reason') and cal:
+            self.end_heat('Takt-Messung')
             self.set_fan_target(self.base, 'Takt-Messung: Basisstufe')
 
         if not cal and not over_hot:

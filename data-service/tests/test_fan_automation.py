@@ -238,12 +238,12 @@ def test_clock_below_100_is_an_error_and_not_sent(miner):
 
 def test_high_temperature_with_mode_change_clock_first_then_mode_then_clock(miner):
     ac = FakeAC(level=5)
-    r = started(miner, ac, level=5, learned={'5': {'mhz': 400, 'temp_avg': 82, 'at': 'x', 'count': 1}})
-    assert miner.level == 2 and miner.clock() == 400
+    r = started(miner, ac, level=5, learned={'5': {'mhz': 390, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    assert miner.level == 2 and miner.clock() == 390
     miner.clock_sets.clear()
-    r.go(15, temp=88)                                             # 400 − 30 = 370 → mode 03 (Spielraum: bei 370 runter)
+    r.go(15, temp=88)                                             # 390 − 30 = 360 → mode 03 (Spielraum 20: bei 360 runter)
     assert miner.mode_sets[-1] == 3 and miner.level == 3
-    assert miner.clock_sets[0] == pytest.approx(370, abs=1) and miner.clock() == 370
+    assert miner.clock_sets[0] == pytest.approx(360, abs=1) and miner.clock() == 360
     assert len(miner.clock_sets) == 2                             # Takt, Modus, Takt erneut
 
 
@@ -317,7 +317,7 @@ def test_plus_step_stays_5_after_strong_effect(miner):
 
 # ---------------------------------------------------------------- Modus (Kapitel 8)
 
-def test_mode_up_at_361_and_down_only_at_350(miner):
+def test_mode_up_at_361_and_down_only_at_340(miner):
     ac = FakeAC(level=5)
     r = started(miner, ac, level=5, tmax=78, learned={'5': {'mhz': 358, 'temp_avg': 82, 'at': 'x', 'count': 1}})
     assert miner.level == 4
@@ -325,9 +325,10 @@ def test_mode_up_at_361_and_down_only_at_350(miner):
     assert miner.level == 3 and miner.clock() == 363
     st = r.st
     st['clock_set'] = 352
-    assert fa.required_level(352, 3) == 3 and fa.required_level(350, 3) == 4
+    assert fa.required_level(341, 3) == 3 and fa.required_level(340, 3) == 4     # Spielraum 20 MHz (Nutzer 26.10.)
     assert fa.required_level(361, 4) == 3 and fa.required_level(360, 4) == 4
-    assert fa.required_level(370, 2) == 3 and fa.required_level(371, 2) == 2
+    assert fa.required_level(360, 2) == 3 and fa.required_level(361, 2) == 2
+    assert fa.required_level(400, 0) == 1 and fa.required_level(401, 0) == 0
     assert fa.table_level(360) == 4 and fa.table_level(361) == 3 and fa.table_level(440) == 0
 
 
@@ -342,8 +343,8 @@ def test_clock_capped_at_440(miner):
 
 def test_exception_lowers_fan_stepwise_after_3_minutes(miner):
     ac = FakeAC(level=5)
-    r = started(miner, ac, level=5, tmax=60, learned={'5': {'mhz': 440, 'temp_avg': 82, 'at': 'x', 'count': 1}})
-    r.go(170, temp=60)
+    r = started(miner, ac, level=5, tmax=82, learned={'5': {'mhz': 440, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    r.go(170, temp=60)                                           # warm gestartet (kein Heizmodus), dann kühl
     assert ac.level == 5
     r.go(15, temp=60)
     assert ac.level == 4 and r.st['phase'] == 'ausnahme'
@@ -1366,4 +1367,118 @@ def test_plus_wait_counts_from_the_takeover_and_only_real_increases(miner):
     miner.web_down = False
     r.go(45, temp=76)                                             # Seite wieder da: der Plus-Schritt kommt gleich
     assert miner.mode_sets == [3] and r.st['clock_set'] == 365 and r.st.get('last_plus_at')
+
+
+# ---------------------------------------------------------------- Heizmodus beim Start (Nutzer 26.10.)
+
+def test_heat_mode_after_a_cold_start_fan_1_until_74(miner):
+    ac = FakeAC(level=3)
+    r = started(miner, ac, level=3, learned={'3': {'mhz': 300, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    r.go(30, temp=82)
+    assert ac.level == 3
+    miner.elapsed = 10                                            # Neustart: Chips kalt
+    r.go(10, temp=26)
+    assert ac.level == 1 and r.st['heat']
+    assert r.events('heizmodus')[-1]['trigger'] == 'Heizmodus: Lüfter Stufe 1 bis 74 °C'
+    r.go(120, temp=73)
+    assert ac.level == 1
+    r.go(15, temp=74)
+    assert ac.level == 3 and not r.st['heat']
+    assert r.events('heizmodus_ende')[-1]['trigger'] == 'Heizmodus beendet: 74 °C erreicht, Lüfter Stufe 3'
+
+
+def test_no_heat_mode_when_already_warm(miner):
+    ac = FakeAC(level=3)
+    r = started(miner, ac, level=3, learned={'3': {'mhz': 300, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    r.kw['level_at'] = 'neu'                                      # Basisstufe gewählt bei 82 °C
+    r.go(15, temp=82)
+    assert ac.level == 3 and not r.st['heat'] and not r.events('heizmodus')
+
+
+def test_heat_mode_ends_when_a_temperature_test_begins(miner):
+    """Review 26.10.: der Temperatur-Test stellt den Lüfter auf die Basisstufe – damit endet der Heizmodus."""
+    ac = FakeAC(level=2)
+    r = started(miner, ac, level=2, tmax=40, learned={'2': {'mhz': 319.2, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    assert r.st['heat'] and ac.level == 1
+    r.kw['temp_test_at'] = r.now.isoformat()
+    r.go(10, temp=60)
+    assert r.st['test'] and not r.st['heat'] and ac.level == 2
+    ev = r.events('heizmodus_ende')[-1]
+    assert ev['trigger'] == 'Heizmodus beendet: Temperatur-Test, Lüfter Stufe 2' and ev['fan_old'] == 1
+
+
+def test_heat_mode_ends_with_a_start_during_takt_messung(miner):
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, tmax=40, learned={'5': {'mhz': 300, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    assert r.st['heat'] and ac.level == 1
+    r.kw['cal'] = True
+    r.go(10, temp=60)
+    miner.elapsed = 10                                            # Moduswechsel der Messung: Laufzeit zurückgesetzt
+    r.go(10, temp=60)
+    assert not r.st['heat'] and ac.level == 5
+    r.go(30, temp=76)
+    assert len(r.events('heizmodus_ende')) == 1
+
+
+def _heating(miner, ac):
+    r = started(miner, ac, level=3, tmax=40, learned={'3': {'mhz': 300, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    assert r.st['heat'] and ac.level == 1
+    return r
+
+
+def test_heat_mode_ends_at_once_when_automation_is_turned_off(miner):
+    """Nutzer 26.10.: ohne Regelung kein Lüfter auf Stufe 1 – Automatik aus, Miner antwortet nicht, Over Hot."""
+    ac = FakeAC(level=3)
+    r = _heating(miner, ac)
+    ac.fail = True
+    r.go(5, temp=60, enabled=False)
+    assert not r.st['heat'] and ac.level == 1 and r.st.get('heat_fan_due')    # Befehl fehlgeschlagen: wiederholen
+    ac.fail = False
+    r.go(60, temp=60)
+    assert ac.level == 3 and not r.st.get('heat_fan_due') and r.st['phase'] == 'aus'
+    assert r.events('heizmodus_ende')[-1]['trigger'] == 'Heizmodus beendet: Automatik aus, Lüfter Stufe 3'
+    writes = list(ac.writes)
+    r.go(60, temp=60)
+    assert ac.writes == writes                                    # danach kein Lüfterbefehl mehr bei Automatik aus
+
+
+def test_heat_mode_ends_at_once_when_the_miner_does_not_answer(miner):
+    ac = FakeAC(level=3)
+    r = _heating(miner, ac)
+    miner.offline = True
+    r.go(5, temp=60)
+    assert not r.st['heat'] and ac.level == 3
+    assert r.events('heizmodus_ende')[-1]['trigger'] == 'Heizmodus beendet: Miner antwortet nicht, Lüfter Stufe 3'
+    assert r.j.cycles[-1]['decision'] == 'Miner antwortet nicht'
+
+
+def test_heat_mode_stays_while_the_a15_restarts_by_button(miner):
+    ac = FakeAC(level=3)
+    r = _heating(miner, ac)
+    r.kw['restart_req_at'] = r.now.isoformat()
+    miner.offline = True
+    r.go(30, temp=60)
+    assert r.st['offline'] == 'neustart' and r.st['heat'] and ac.level == 1
+
+
+def test_heat_mode_ends_at_once_on_over_hot(miner):
+    ac = FakeAC(level=3)
+    r = _heating(miner, ac)
+    miner.status = 'Over Hot'
+    r.go(5, temp=60)
+    assert not r.st['heat'] and ac.level == 3
+    assert r.events('heizmodus_ende')[-1]['trigger'] == 'Heizmodus beendet: Over Hot, Lüfter Stufe 3'
+
+
+def test_heat_mode_also_when_the_temperature_is_unknown_at_the_start(miner):
+    ac = FakeAC(level=4)
+    r = started(miner, ac, level=4, learned={'4': {'mhz': 300, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    r.go(30, temp=82)
+    miner.elapsed, miner.status = 10, 'Over Hot'                 # Over Hot: keine gültige Temperatur
+    r.go(10, temp=82)
+    miner.status = 'Work: In Work'
+    r.go(5, temp=40)
+    assert r.st['heat'] and ac.level == 1
+    r.go(30, temp=80)
+    assert not r.st['heat'] and ac.level == 4
 
