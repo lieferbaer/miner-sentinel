@@ -136,7 +136,7 @@ function LearnedTable({ learned, level }) {
 }
 
 /** Status of the Temperatur-Automatik as cards like the overview; the small line never repeats the big value. */
-function AutomationCards({ auto, st }) {
+function AutomationCards({ auto, st, roomTemp }) {
   const live = useLive()
   const sys = Object.values(live.data?.system || {}).find((d) => d && d.id === auto.device?.id) || {}
   const errorText = sys.error_rate_pct != null ? ' · Fehlerrate ' + fmt(sys.error_rate_pct, 2, ' %') : ''
@@ -204,8 +204,8 @@ function AutomationCards({ auto, st }) {
       <MetricCard variant="hero" layout="icon-left" icon={Fan} label="Lüfter läuft auf"
         tone={st.phase === 'korrektur' ? 'warning' : 'default'}
         value={st.phase === 'wartung' ? 'Aus' : running == null ? '—' : 'Stufe ' + running}
-        subtitle={st.phase === 'wartung' ? 'Wartung · danach wieder Stufe ' + (auto.maintenance?.fan_before ?? base)
-          : fanSub} />
+        subtitle={[st.phase === 'wartung' ? 'Wartung · danach wieder Stufe ' + (auto.maintenance?.fan_before ?? base)
+          : fanSub, roomTemp != null ? 'Raum ' + fmt(roomTemp, 1, ' °C') : null].filter(Boolean).join(' · ')} />
       {/* Neustart (Knopf oder nicht erreichbar während der Startpause): kein Fehler, sondern ein erwarteter Zustand */}
       <MetricCard variant="hero" layout="icon-left" icon={Activity} label="Status"
         tone={st.phase === 'normal' && !restarting ? 'default' : 'warning'} value={restarting ? 'Neustart' : phase.value}
@@ -391,7 +391,7 @@ function TempTest({ auto, st, onCommand, busy, msg }) {
   )
 }
 
-function AutomationPanel({ auto, here, port, level, locked, onCommand, busy, msg }) {
+function AutomationPanel({ auto, here, port, level, locked, onCommand, busy, msg, roomTemp }) {
   const [confirmOff, setConfirmOff] = useState(false)
   const [confirmRestart, setConfirmRestart] = useState(false)
   const [restart, setRestart] = useState({ busy: false, msg: null })
@@ -492,7 +492,7 @@ function AutomationPanel({ auto, here, port, level, locked, onCommand, busy, msg
         </p>
       )}
       <TempTest auto={auto} st={st} onCommand={onCommand} busy={busy} msg={msg} />
-      <AutomationCards auto={auto} st={st} />
+      <AutomationCards auto={auto} st={st} roomTemp={roomTemp} />
       <LearnedTable learned={auto.learned} level={auto.level} />
       {st.ac_error && <p className="text-amber-600">AC Infinity: {st.ac_error}</p>}
       {st.last_error && <p className="text-destructive">Fehler: {st.last_error}</p>}
@@ -673,7 +673,7 @@ function Controller({ dev, backups, automation, onReload }) {
         </div>
 
         <AutomationPanel auto={auto} here={autoHere} port={port} level={enableLevel} locked={locked}
-          busy={busy === 'auto'} onCommand={autoCommand} msg={msg} />
+          busy={busy === 'auto'} onCommand={autoCommand} msg={msg} roomTemp={dev.temperature_c} />
 
         <div className="space-y-2 rounded-md border border-border/80 p-3">
           <div className="flex flex-wrap items-center gap-1.5 text-xs">
