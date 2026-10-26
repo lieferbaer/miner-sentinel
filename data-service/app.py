@@ -427,6 +427,8 @@ def poll_all_sources():
     pool_failed = False
     pool_error = ''
     for pool_type, address, url, token in targets:
+        if pool_type == 'f2pool':
+            continue                    # own job every 5 min (poll_f2pool, Nutzer 26.10.)
         try:
             logger.info(f"Polling {pool_type} statistics for account {address[:10]}...")
             conn = psycopg2.connect(DATABASE_URL)
@@ -495,6 +497,37 @@ def poll_all_sources():
         )
 
     logger.info("Data collection cycle completed")
+
+
+F2POOL_EVERY_S = 300
+
+
+def poll_f2pool():
+    """f2pool every 5 min as its own job (Nutzer 26.10.): before, it ran in every device poll (10 s, 3 requests of ~1 s);
+    f2pool's own values change only every few minutes. A failure is reported like before (pool_down)."""
+    targets = [t for t in get_pool_targets() if t[0] == 'f2pool']
+    failed, error = False, ''
+    for _pool_type, address, _url, token in targets:
+        try:
+            logger.info(f"Polling f2pool statistics for account {address[:10]}...")
+            conn = psycopg2.connect(DATABASE_URL)
+            collect_f2pool_data(conn, address, token)
+            conn.close()
+        except Exception as e:
+            logger.error(f"Error polling f2pool for {address[:10]}: {e}", exc_info=True)
+            failed, error = True, str(e)
+    if targets and failed:
+        check_pool_staleness(
+            database_url=DATABASE_URL,
+            telegram=bitaxe_collector.telegram_notifier,
+            discord=bitaxe_collector.discord_notifier,
+            push=bitaxe_collector.push_notifier,
+            rules=bitaxe_collector.notification_rules,
+            preferences=_alert_preferences_from_settings(collector_settings),
+            pool_type='f2pool',
+            force_failure=True,
+            error_message=error,
+        )
 
 
 def prune_old_data():
@@ -620,6 +653,17 @@ def reschedule_jobs():
         id='prune_automation_journal',
         name='Protokoll der Automatik aufräumen (360 Tage)',
         replace_existing=True,
+    )
+
+    scheduler.add_job(
+        func=poll_f2pool,
+        trigger=IntervalTrigger(seconds=F2POOL_EVERY_S),
+        id='poll_f2pool',
+        name='f2pool abfragen (alle 5 min)',
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        next_run_time=datetime.now(),
     )
 
     # Stundenwerte (Nutzer 26.10.): alle 5 min nachrechnen (der erste Lauf rechnet alle Rohwerte nach); jede Nacht

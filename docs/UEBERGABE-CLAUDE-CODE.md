@@ -152,7 +152,7 @@ solange die Seite offen ist. Steuerung läuft immer auf dem Server, unabhängig 
 - Python ≥ 3.10 nötig (System-Python 3.9 reicht nicht): `/opt/homebrew/bin/python3.10 -m venv <dir>` + requirements von backend und data-service + pytest, pytest-django.
 - pytest mit `-p no:cacheprovider -q -o addopts=""` aufrufen, sonst fehlt die Zusammenfassung (pyproject-Einstellungen).
   Das venv im Scratchpad kann von macOS teilweise gelöscht werden (25.10.: `pytest` fehlte) → in jeder Session neu anlegen.
-- Stand 26.10. (v2.1.3): **Backend 202 ✓, Data-Service 206 ✓ (5 übersprungen), Frontend 153 ✓**, Lint 0 Fehler (15 Warnungen aus dem Original).
+- Stand 26.10. (v2.1.3): **Backend 202 ✓, Data-Service 208 ✓ (5 übersprungen), Frontend 153 ✓**, Lint 0 Fehler (15 Warnungen aus dem Original).
   Achtung: `npm run lint` meldet zusätzlich Fehler aus `frontend/dist-local/` (lokaler Build-Ordner, nicht im Repo) – ignorieren.
 
 ---
@@ -289,6 +289,9 @@ Punkte (je 15 min bei 250 MHz, Endwert): Mode 04 252 MHz laut Miner, 121,8 TH/s,
 
 ### 7.7 Pools / f2pool
 - Pool-Einstellung je MinerGerät (`connection_config.pool_stats`) + globaler Fallback; Typen ckpool, publicpool, f2pool, btcpowlab, parasite.
+- **f2pool alle 5 min** als eigener Job `poll_f2pool` (v2.1.4, Nutzer 26.10.; vorher in jeder Geräteabfrage alle 10 s mit 3 Anfragen à ~1 s,
+  `pool_stats` wuchs ~6.500 Zeilen/Tag). `poll_all_sources` überspringt f2pool; Fehler → `check_pool_staleness(force_failure)` wie bisher
+  (Warnung „Pool stats unavailable“ erst ab 30 min ohne frische Werte, Standard).
 
 ### 7.8 Temperatur-Automatik v2 – nur A15 (`data-service/fan_automation.py`, Tabelle `fan_automation`)
 Seit **v1.0.7 (25.10.)** nach dem Plan des Nutzers vom 23./24.10. Diagramm: **`docs/claude/Regelungslogik-Luefter-Takt.drawio`**
