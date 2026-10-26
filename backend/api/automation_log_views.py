@@ -178,20 +178,20 @@ def log_stats(request):
 @permission_classes([IsAuthenticated])
 def cycles(request):
     """?from&to (default: the last 2 h) -> {bucket_s, points, events}. Up to 6 h the raw rounds, longer one point
-    per minute (mean of the temperatures and clocks, last value of phase and levels)."""
+    per minute (mean of the temperatures, clocks and hashrate, last value of phase and levels)."""
     try:
         start, end = _period(request.query_params, default_hours=CYCLES_DEFAULT_H)
     except BadParam as exc:
         return _bad(exc)
     rows = (AutomationCycle.objects.filter(recorded_at__gte=start, recorded_at__lte=end).order_by('recorded_at', 'id')
-            .values_list('recorded_at', 'chip_temp', 'clock_set', 'clock_reported', 'fan_level', 'base_level', 'phase',
-                         'decision').iterator(chunk_size=2000))
+            .values_list('recorded_at', 'chip_temp', 'clock_set', 'clock_reported', 'ghsspd_ths', 'fan_level', 'base_level',
+                         'phase', 'decision').iterator(chunk_size=2000))
     raw = end - start <= timedelta(hours=CYCLES_RAW_H)
     points = []
     if raw:
-        for at, temp, clock, reported, fan, base, phase, decision in rows:
-            point = {'t': at, 'chip_temp': temp, 'clock_set': clock, 'clock_reported': reported, 'fan_level': fan,
-                     'base_level': base, 'phase': phase}
+        for at, temp, clock, reported, ths, fan, base, phase, decision in rows:
+            point = {'t': at, 'chip_temp': temp, 'clock_set': clock, 'clock_reported': reported, 'ghsspd_ths': ths,
+                     'fan_level': fan, 'base_level': base, 'phase': phase}
             if decision:
                 point['decision'] = decision
             points.append(point)
@@ -203,12 +203,12 @@ def cycles(request):
                 if bucket:
                     points.append(_bucket_point(bucket))
                 bucket = {'key': key, 'sums': {}, 'last': {}}
-            for name, value in zip(('chip_temp', 'clock_set', 'clock_reported'), row[1:4]):
+            for name, value in zip(('chip_temp', 'clock_set', 'clock_reported', 'ghsspd_ths'), row[1:5]):
                 if value is not None:
                     total = bucket['sums'].setdefault(name, [0.0, 0])
                     total[0] += value
                     total[1] += 1
-            for name, value in zip(('fan_level', 'base_level', 'phase', 'decision'), row[4:8]):
+            for name, value in zip(('fan_level', 'base_level', 'phase', 'decision'), row[5:9]):
                 if value not in (None, ''):
                     bucket['last'][name] = value
         if bucket:
@@ -224,7 +224,7 @@ def cycles(request):
 def _bucket_point(bucket):
     at = datetime.fromtimestamp(bucket['key'] * BUCKET_S, tz=dt_timezone.utc)
     point = {'t': at}
-    for name in ('chip_temp', 'clock_set', 'clock_reported'):
+    for name in ('chip_temp', 'clock_set', 'clock_reported', 'ghsspd_ths'):
         total = bucket['sums'].get(name)
         point[name] = round(total[0] / total[1], 1) if total else None
     for name in ('fan_level', 'base_level', 'phase'):

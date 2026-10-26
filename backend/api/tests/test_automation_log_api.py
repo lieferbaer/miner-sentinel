@@ -95,7 +95,8 @@ def test_cycles_raw_and_per_minute(client, a15):
     for i in range(24):                                  # every 5 s, base - 115 s ... base
         AutomationCycle.objects.create(
             device=a15, recorded_at=base - timedelta(seconds=5 * i), phase='normal' if i else 'korrektur',
-            chip_temp=80 + (i % 2), clock_set=240, clock_reported=241, fan_level=3 if i else 4, base_level=3,
+            chip_temp=80 + (i % 2), clock_set=240, clock_reported=241, ghsspd_ths=130 + (i % 2), fan_level=3 if i else 4,
+            base_level=3,
             decision='Takt 240 MHz gesendet' if i == 3 else '')
     _log(a15, 20, 'takt', ok=True, trigger='Feintuning')
     _log(a15, 15, 'lernen_start')                        # not shown in the chart
@@ -103,6 +104,7 @@ def test_cycles_raw_and_per_minute(client, a15):
     data = client.get('/api/automation/cycles/').data
     assert data['bucket_s'] == 5 and len(data['points']) == 24
     assert data['points'][-1]['phase'] == 'korrektur' and data['points'][0]['chip_temp'] == 81
+    assert data['points'][0]['ghsspd_ths'] == 131
     assert [p.get('decision') for p in data['points'] if p.get('decision')] == ['Takt 240 MHz gesendet']
     assert [(e['kind'], e['trigger']) for e in data['events']] == [('takt', 'Feintuning')]
 
@@ -114,6 +116,7 @@ def test_cycles_raw_and_per_minute(client, a15):
     assert [p['t'] for p in minutes] == [full - timedelta(minutes=2), full - timedelta(minutes=1), full]
     assert [p['chip_temp'] for p in minutes] == [80.6, 80.5, 80.4]          # 5, 12 and 7 rounds
     assert minutes[0]['clock_set'] == 240.0 and minutes[0]['clock_reported'] == 241.0
+    assert [p['ghsspd_ths'] for p in minutes] == [130.6, 130.5, 130.4]
     last = minutes[-1]
     assert last['phase'] == 'korrektur' and last['fan_level'] == 4 and last['base_level'] == 3
     assert minutes[1]['phase'] == 'normal' and 'decision' not in minutes[1]

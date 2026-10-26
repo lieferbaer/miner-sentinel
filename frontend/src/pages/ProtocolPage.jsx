@@ -864,6 +864,10 @@ const CLOCK_LINES = [
   { key: 'clock_set', label: 'gesetzt', color: 'var(--chart-1)', step: true, format: (v) => fmt(v, 0, ' MHz') },
   { key: 'clock_reported', label: 'laut Miner', color: 'var(--chart-3)', dashed: true, format: (v) => fmt(v, 0, ' MHz') },
 ]
+// GHSspd of the miner (TH/s, only error-free results); the miner reports a new value about every 130 s
+const HASHRATE_LINES = [
+  { key: 'ghsspd_ths', label: 'Hashrate', color: 'var(--chart-2)', step: true, format: (v) => fmt(v, 1, ' TH/s') },
+]
 const FAN_LINES = [
   { key: 'fan_level', label: 'aktive Stufe', color: 'var(--chart-1)', step: true,
     format: (v) => (has(v) ? levelText(v) : '—') },
@@ -946,6 +950,8 @@ function HistoryTab() {
             yAxis={{ domain: ['dataMin - 2', 'dataMax + 2'], allowDecimals: false, tickFormatter: (v) => v + '°C' }} />
           <HistoryChart title="Takt (MHz)" series={series} axis={axis} lines={CLOCK_LINES} loading={loading}
             yAxis={{ domain: ['dataMin - 10', 'dataMax + 10'], allowDecimals: false }} />
+          <HistoryChart title="Hashrate (TH/s)" series={series} axis={axis} lines={HASHRATE_LINES} loading={loading}
+            yAxis={{ domain: ['dataMin - 5', 'dataMax + 5'], allowDecimals: false, tickFormatter: (v) => Math.round(v) }} />
           <HistoryChart title="Lüfterstufe" series={series} axis={axis} lines={FAN_LINES} loading={loading}
             yAxis={{ domain: [0, 10], ticks: [0, 2, 4, 6, 8, 10], allowDecimals: false }} />
           {phases.length > 0 && (
