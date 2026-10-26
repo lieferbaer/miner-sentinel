@@ -851,3 +851,59 @@ class AutomationLog(models.Model):
             models.Index(fields=['kind', '-recorded_at'], name='automation_log_kind_rec_idx'),
             models.Index(fields=['recorded_at'], name='automation_log_rec_idx'),
         ]
+
+
+class DeviceStatsHourly(models.Model):
+    """Hourly values per device, computed by the data-service (stats_rollup.py) from device_mining_stats and
+    device_hardware_stats; kept for good, the raw values only 30 days (Nutzer 26.10.). Means are per hour; for longer
+    periods weight them with the number of samples."""
+
+    device = models.ForeignKey(Device, on_delete=models.CASCADE, related_name='hourly_stats', db_index=False)
+    hour = models.DateTimeField()
+    mining_samples = models.IntegerField(default=0)
+    first_at = models.DateTimeField(blank=True, null=True)
+    last_at = models.DateTimeField(blank=True, null=True)
+    hashrate_avg = models.FloatField(blank=True, null=True)
+    hashrate_max = models.FloatField(blank=True, null=True)
+    hashrate_min = models.FloatField(blank=True, null=True)
+    best_difficulty = models.FloatField(blank=True, null=True)
+    shares_accepted_min = models.BigIntegerField(blank=True, null=True)
+    shares_accepted_max = models.BigIntegerField(blank=True, null=True)
+    shares_rejected_min = models.BigIntegerField(blank=True, null=True)
+    shares_rejected_max = models.BigIntegerField(blank=True, null=True)
+    hardware_samples = models.IntegerField(default=0)
+    temperature_avg = models.FloatField(blank=True, null=True)
+    temperature_max = models.FloatField(blank=True, null=True)
+    temperature_n = models.IntegerField(default=0)            # values (not NULL) behind the mean: its weight
+    chip_temperature_avg = models.FloatField(blank=True, null=True)
+    chip_temperature_max = models.FloatField(blank=True, null=True)
+    chip_temperature_n = models.IntegerField(default=0)
+    power_avg = models.FloatField(blank=True, null=True)
+    power_max = models.FloatField(blank=True, null=True)
+    power_n = models.IntegerField(default=0)
+    efficiency_avg = models.FloatField(blank=True, null=True)
+    efficiency_n = models.IntegerField(default=0)
+
+    class Meta:
+        db_table = 'device_stats_hourly'
+        ordering = ['hour']
+        constraints = [models.UniqueConstraint(fields=['device', 'hour'], name='device_stats_hourly_dev_hour')]
+
+
+class PoolStatsHourly(models.Model):
+    """Hourly values per pool account, computed by the data-service from pool_stats (raw values only 30 days)."""
+
+    pool_type = models.CharField(max_length=32)
+    pool_address = models.CharField(max_length=255)
+    hour = models.DateTimeField()
+    samples = models.IntegerField(default=0)
+    hashrate_1m_avg = models.FloatField(blank=True, null=True)
+    hashrate_1h_avg = models.FloatField(blank=True, null=True)
+    hashrate_1d_avg = models.FloatField(blank=True, null=True)
+    workers_max = models.IntegerField(blank=True, null=True)
+
+    class Meta:
+        db_table = 'pool_stats_hourly'
+        ordering = ['hour']
+        constraints = [models.UniqueConstraint(fields=['pool_type', 'pool_address', 'hour'],
+                                               name='pool_stats_hourly_pool_hour')]

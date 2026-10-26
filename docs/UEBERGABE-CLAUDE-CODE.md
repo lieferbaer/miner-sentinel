@@ -152,7 +152,7 @@ solange die Seite offen ist. Steuerung läuft immer auf dem Server, unabhängig 
 - Python ≥ 3.10 nötig (System-Python 3.9 reicht nicht): `/opt/homebrew/bin/python3.10 -m venv <dir>` + requirements von backend und data-service + pytest, pytest-django.
 - pytest mit `-p no:cacheprovider -q -o addopts=""` aufrufen, sonst fehlt die Zusammenfassung (pyproject-Einstellungen).
   Das venv im Scratchpad kann von macOS teilweise gelöscht werden (25.10.: `pytest` fehlte) → in jeder Session neu anlegen.
-- Stand 26.10. (v2.1.2): **Backend 198 ✓, Data-Service 203 ✓ (5 übersprungen), Frontend 153 ✓**, Lint 0 Fehler (15 Warnungen aus dem Original).
+- Stand 26.10. (v2.1.3): **Backend 202 ✓, Data-Service 206 ✓ (5 übersprungen), Frontend 153 ✓**, Lint 0 Fehler (15 Warnungen aus dem Original).
   Achtung: `npm run lint` meldet zusätzlich Fehler aus `frontend/dist-local/` (lokaler Build-Ordner, nicht im Repo) – ignorieren.
 
 ---
@@ -410,6 +410,20 @@ Nutzer 24.10.: **alles sammeln**, 360 Tage behalten.
   Ereignisse als Linien; alle 30 s; „frei“ höchstens 7 Tage) und **CSV-Export**.
 
 ---
+
+### 7.11 Stundenwerte & Aufräumen (`data-service/stats_rollup.py`, Tabellen `device_stats_hourly`, `pool_stats_hourly`; v2.1.3, Nutzer 26.10.)
+- Anlass: Analytics mit 30 Tagen brauchte beim ersten Aufruf **11,8 s** (Rohwerte alle 10 s, ~1,2 Mio. Zeilen je Aufruf), danach 2–3 s.
+- **Stundenwerte je MinerGerät** (Ø/Max/Min Hashrate, beste Difficulty, Shares min/max, Ø/Max Temperatur, Ø/Max Chiptemperatur,
+  Ø/Max Leistung, Ø Effizienz, Anzahl Werte, erster/letzter Zeitpunkt; je Mittel die Zahl der Werte ohne NULL `*_n` als Gewicht – live
+  hatten 34 Stunden fehlende Chiptemperaturen) und **je Pool-Konto** (Ø Hashrate 1 min/1 h/24 h, Worker max, Anzahl). Data-Service-Job
+  `stats_rollup` alle 5 min, ab einer Stunde vor der letzten gespeicherten (verspätete Werte; die laufende Stunde wird später ergänzt); beim ersten Lauf alle Rohwerte (Nachrechnen ~2,6 s auf dem VPS). Geprüft 26.10.: Stundenwerte = Mittel der Rohwerte.
+- **Analytics** (`views.device_analytics`) liest über 24 h Zeitraum nur noch die Stundenwerte (`_hourly_device_view`, Mittel nach Anzahl
+  gewichtet; ab 7 Tagen je Tag zusammengefasst; ganze Stunden ab der Stunde des Beginns bis vor die Stunde des Endes); bis 24 h wie bisher
+  aus den Rohwerten.
+- **Rohwerte nur 30 Tage** (`device_mining_stats`, `device_hardware_stats`, `pool_stats`): Job `prune_raw_stats` jede Nacht 03:40 – erst
+  Stundenwerte nachrechnen, dann nur Rohwerte löschen, deren Stunde in den Stundenwerten steht (in Blöcken). Die alte
+  Aufbewahrungs-Einstellung (`metrics_retention_days`, 90 Tage) gilt weiter für alle Tabellen, also wirksam für `device_system_info`
+  (Chiptemperaturen je Board, Fehlerrate – nicht in Stundenwerten, darum nicht nach 30 Tagen gelöscht).
 
 ## 8. Integration des Originals 1.2.0
 

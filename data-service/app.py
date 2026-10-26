@@ -30,6 +30,7 @@ from throttle_controller import run_throttle_controller
 from calibration import run_calibration
 from live_reader import READ_S as LIVE_READ_S, run_live_cycle
 import automation_journal
+import stats_rollup
 from decouple import config
 from flask import Flask, jsonify, request
 from notifications.emitter import emit_alert, resolve_open_alerts
@@ -619,6 +620,27 @@ def reschedule_jobs():
         id='prune_automation_journal',
         name='Protokoll der Automatik aufräumen (360 Tage)',
         replace_existing=True,
+    )
+
+    # Stundenwerte (Nutzer 26.10.): alle 5 min nachrechnen (der erste Lauf rechnet alle Rohwerte nach); jede Nacht
+    # um 03:40 Rohwerte älter als 30 Tage löschen, die Stundenwerte bleiben
+    scheduler.add_job(
+        func=lambda: stats_rollup.run_rollup(DATABASE_URL),
+        trigger=IntervalTrigger(minutes=5),
+        id='stats_rollup',
+        name='Stundenwerte rechnen',
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        next_run_time=datetime.now(),
+    )
+    scheduler.add_job(
+        func=lambda: stats_rollup.prune_raw(DATABASE_URL),
+        trigger=CronTrigger(hour=3, minute=40),
+        id='prune_raw_stats',
+        name='Rohwerte älter als 30 Tage löschen (Stundenwerte bleiben)',
+        replace_existing=True,
+        max_instances=1,
     )
 
     # Daily retention prune (metrics / optional alert history)

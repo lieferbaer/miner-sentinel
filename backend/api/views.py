@@ -1135,6 +1135,58 @@ def collector_settings_view(request):
 
 
 
+def _weighted(rows, key, weight):
+    """Mean of hourly means weighted with the number of samples of each hour (None if there are none)."""
+    total = sum(r[weight] for r in rows if r[key] is not None and r[weight])
+    if not total:
+        return None
+    return sum(r[key] * r[weight] for r in rows if r[key] is not None and r[weight]) / total
+
+
+def _hourly_device_view(device, window, granularity):
+    """Analytics of one device from device_stats_hourly (periods over 24 h, Nutzer 26.10.): the same series and
+    aggregates as from the raw values, but from 24 rows per day instead of ~8,600."""
+    from .models import DeviceStatsHourly
+    start = window.start.replace(minute=0, second=0, microsecond=0)
+    # whole hours: from the hour of the start, up to the hour before the end (the hour starting at the end is after it)
+    rows = list(DeviceStatsHourly.objects.filter(device=device, hour__gte=start, hour__lt=window.end)
+                .order_by('hour').values())
+    groups = {}
+    for row in rows:
+        key = row['hour'].replace(hour=0) if granularity == 'day' else row['hour']
+        groups.setdefault(key, []).append(row)
+    series = [{
+        't': key.isoformat(),
+        'hashrate_ghs': _weighted(group, 'hashrate_avg', 'mining_samples'),
+        'temperature_c': _weighted(group, 'temperature_avg', 'temperature_n'),
+        'temperature_chip_c': _weighted(group, 'chip_temperature_avg', 'chip_temperature_n'),
+        'power_watts': _weighted(group, 'power_avg', 'power_n'),
+    } for key, group in sorted(groups.items())]
+
+    def pick(fn, key):
+        values = [r[key] for r in rows if r[key] is not None]
+        return fn(values) if values else None
+    mining_agg = {
+        'avg_hashrate': _weighted(rows, 'hashrate_avg', 'mining_samples'),
+        'max_hashrate': pick(max, 'hashrate_max'), 'min_hashrate': pick(min, 'hashrate_min'),
+        'best_difficulty': pick(max, 'best_difficulty'),
+        'first_accepted': pick(min, 'shares_accepted_min'), 'last_accepted': pick(max, 'shares_accepted_max'),
+        'first_rejected': pick(min, 'shares_rejected_min'), 'last_rejected': pick(max, 'shares_rejected_max'),
+        'samples': sum(r['mining_samples'] for r in rows),
+    }
+    hardware_agg = {
+        'avg_temp': _weighted(rows, 'temperature_avg', 'temperature_n'),
+        'max_temp': pick(max, 'temperature_max'),
+        'avg_chip': _weighted(rows, 'chip_temperature_avg', 'chip_temperature_n'),
+        'max_chip': pick(max, 'chip_temperature_max'),
+        'avg_power': _weighted(rows, 'power_avg', 'power_n'),
+        'max_power': pick(max, 'power_max'),
+        'avg_efficiency': _weighted(rows, 'efficiency_avg', 'efficiency_n'),
+        'samples': sum(r['hardware_samples'] for r in rows),
+    }
+    return series, mining_agg, hardware_agg, (pick(min, 'first_at'), pick(max, 'last_at'))
+
+
 @api_view(['GET'])
 def device_analytics(request):
     """Per-device analytics for a time window.
@@ -1169,98 +1221,105 @@ def device_analytics(request):
     payload_devices = []
     comparison = []
 
+    # over 24 h from the hourly values (the raw values are kept only 30 days; Nutzer 26.10.)
+    use_hourly = hours > 24
+
     for device in devices:
         mining_qs = DeviceMiningStats.objects.filter(device=device, **time_filter)
         hardware_qs = DeviceHardwareStats.objects.filter(device=device, **time_filter)
+        span = None
 
-        if granularity == 'raw':
-            mining_rows = list(
-                mining_qs.order_by('recorded_at').values('recorded_at', 'hashrate_ghs')
-            )
-            hardware_rows = list(
-                hardware_qs.order_by('recorded_at').values(
-                    'recorded_at', 'temperature_c', 'temperature_chip_c', 'power_watts'
+        if use_hourly:
+            series, mining_agg, hardware_agg, span = _hourly_device_view(device, window, granularity)
+        else:
+            if granularity == 'raw':
+                mining_rows = list(
+                    mining_qs.order_by('recorded_at').values('recorded_at', 'hashrate_ghs')
                 )
-            )
-            series = []
-            hardware_by_time = {row['recorded_at']: row for row in hardware_rows}
-            for row in mining_rows:
-                hardware = hardware_by_time.get(row['recorded_at'], {})
-                series.append({
-                    't': row['recorded_at'].isoformat(),
-                    'hashrate_ghs': row['hashrate_ghs'],
-                    'temperature_c': hardware.get('temperature_c'),
-                    'temperature_chip_c': hardware.get('temperature_chip_c'),
-                    'power_watts': hardware.get('power_watts'),
-                })
-            if not series:
-                for row in hardware_rows:
+                hardware_rows = list(
+                    hardware_qs.order_by('recorded_at').values(
+                        'recorded_at', 'temperature_c', 'temperature_chip_c', 'power_watts'
+                    )
+                )
+                series = []
+                hardware_by_time = {row['recorded_at']: row for row in hardware_rows}
+                for row in mining_rows:
+                    hardware = hardware_by_time.get(row['recorded_at'], {})
                     series.append({
                         't': row['recorded_at'].isoformat(),
-                        'hashrate_ghs': None,
-                        'temperature_c': row['temperature_c'],
-                        'temperature_chip_c': row['temperature_chip_c'],
-                        'power_watts': row['power_watts'],
+                        'hashrate_ghs': row['hashrate_ghs'],
+                        'temperature_c': hardware.get('temperature_c'),
+                        'temperature_chip_c': hardware.get('temperature_chip_c'),
+                        'power_watts': hardware.get('power_watts'),
                     })
-        else:
-            mining_buckets = (
-                mining_qs.annotate(bucket=trunc('recorded_at'))
-                .values('bucket')
-                .annotate(hashrate_ghs=Avg('hashrate_ghs'), samples=Count('id'))
-                .order_by('bucket')
-            )
-            hardware_buckets = (
-                hardware_qs.annotate(bucket=trunc('recorded_at'))
-                .values('bucket')
-                .annotate(
-                    temperature_c=Avg('temperature_c'),
-                    temperature_chip_c=Avg('temperature_chip_c'),
-                    power_watts=Avg('power_watts'),
+                if not series:
+                    for row in hardware_rows:
+                        series.append({
+                            't': row['recorded_at'].isoformat(),
+                            'hashrate_ghs': None,
+                            'temperature_c': row['temperature_c'],
+                            'temperature_chip_c': row['temperature_chip_c'],
+                            'power_watts': row['power_watts'],
+                        })
+            else:
+                mining_buckets = (
+                    mining_qs.annotate(bucket=trunc('recorded_at'))
+                    .values('bucket')
+                    .annotate(hashrate_ghs=Avg('hashrate_ghs'), samples=Count('id'))
+                    .order_by('bucket')
                 )
-                .order_by('bucket')
-            )
-            hardware_by_bucket = {row['bucket']: row for row in hardware_buckets}
-            series = []
-            for row in mining_buckets:
-                hardware = hardware_by_bucket.pop(row['bucket'], {})
-                series.append({
-                    't': row['bucket'].isoformat(),
-                    'hashrate_ghs': row['hashrate_ghs'],
-                    'temperature_c': hardware.get('temperature_c'),
-                    'temperature_chip_c': hardware.get('temperature_chip_c'),
-                    'power_watts': hardware.get('power_watts'),
-                })
-            for bucket, hardware in sorted(hardware_by_bucket.items()):
-                series.append({
-                    't': bucket.isoformat(),
-                    'hashrate_ghs': None,
-                    'temperature_c': hardware.get('temperature_c'),
-                    'temperature_chip_c': hardware.get('temperature_chip_c'),
-                    'power_watts': hardware.get('power_watts'),
-                })
-            series.sort(key=lambda item: item['t'])
+                hardware_buckets = (
+                    hardware_qs.annotate(bucket=trunc('recorded_at'))
+                    .values('bucket')
+                    .annotate(
+                        temperature_c=Avg('temperature_c'),
+                        temperature_chip_c=Avg('temperature_chip_c'),
+                        power_watts=Avg('power_watts'),
+                    )
+                    .order_by('bucket')
+                )
+                hardware_by_bucket = {row['bucket']: row for row in hardware_buckets}
+                series = []
+                for row in mining_buckets:
+                    hardware = hardware_by_bucket.pop(row['bucket'], {})
+                    series.append({
+                        't': row['bucket'].isoformat(),
+                        'hashrate_ghs': row['hashrate_ghs'],
+                        'temperature_c': hardware.get('temperature_c'),
+                        'temperature_chip_c': hardware.get('temperature_chip_c'),
+                        'power_watts': hardware.get('power_watts'),
+                    })
+                for bucket, hardware in sorted(hardware_by_bucket.items()):
+                    series.append({
+                        't': bucket.isoformat(),
+                        'hashrate_ghs': None,
+                        'temperature_c': hardware.get('temperature_c'),
+                        'temperature_chip_c': hardware.get('temperature_chip_c'),
+                        'power_watts': hardware.get('power_watts'),
+                    })
+                series.sort(key=lambda item: item['t'])
 
-        mining_agg = mining_qs.aggregate(
-            avg_hashrate=Avg('hashrate_ghs'),
-            max_hashrate=Max('hashrate_ghs'),
-            min_hashrate=Min('hashrate_ghs'),
-            best_difficulty=Max('best_difficulty'),
-            first_accepted=Min('shares_accepted'),
-            last_accepted=Max('shares_accepted'),
-            first_rejected=Min('shares_rejected'),
-            last_rejected=Max('shares_rejected'),
-            samples=Count('id'),
-        )
-        hardware_agg = hardware_qs.aggregate(
-            avg_temp=Avg('temperature_c'),
-            max_temp=Max('temperature_c'),
-            avg_chip=Avg('temperature_chip_c'),
-            max_chip=Max('temperature_chip_c'),
-            avg_power=Avg('power_watts'),
-            max_power=Max('power_watts'),
-            avg_efficiency=Avg('efficiency_j_per_th'),
-            samples=Count('id'),
-        )
+            mining_agg = mining_qs.aggregate(
+                avg_hashrate=Avg('hashrate_ghs'),
+                max_hashrate=Max('hashrate_ghs'),
+                min_hashrate=Min('hashrate_ghs'),
+                best_difficulty=Max('best_difficulty'),
+                first_accepted=Min('shares_accepted'),
+                last_accepted=Max('shares_accepted'),
+                first_rejected=Min('shares_rejected'),
+                last_rejected=Max('shares_rejected'),
+                samples=Count('id'),
+            )
+            hardware_agg = hardware_qs.aggregate(
+                avg_temp=Avg('temperature_c'),
+                max_temp=Max('temperature_c'),
+                avg_chip=Avg('temperature_chip_c'),
+                max_chip=Max('temperature_chip_c'),
+                avg_power=Avg('power_watts'),
+                max_power=Max('power_watts'),
+                avg_efficiency=Avg('efficiency_j_per_th'),
+                samples=Count('id'),
+            )
 
         avg_power = hardware_agg['avg_power'] or 0
         energy_kwh = (avg_power / 1000.0) * hours
@@ -1274,12 +1333,13 @@ def device_analytics(request):
         shares_total = accepted_delta + rejected_delta
 
         expected_samples = None
-        if granularity == 'raw':
-            expected_samples = None
         availability = None
         if mining_agg['samples']:
-            first = mining_qs.order_by('recorded_at').values_list('recorded_at', flat=True).first()
-            last = mining_qs.order_by('-recorded_at').values_list('recorded_at', flat=True).first()
+            if span:
+                first, last = span
+            else:
+                first = mining_qs.order_by('recorded_at').values_list('recorded_at', flat=True).first()
+                last = mining_qs.order_by('-recorded_at').values_list('recorded_at', flat=True).first()
             if first and last and last > first:
                 covered = (last - first).total_seconds()
                 availability = min(100.0, (covered / (hours * 3600.0)) * 100.0)
