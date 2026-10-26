@@ -67,8 +67,9 @@ const MODE_LABEL = { '2/L4': 'mode 04', '2/L3': 'mode 03', '2/L2': 'mode 02', '2
 // the regulation in short (plan of 24.10.)
 const LOGIC_TEXT =
   'Der Lüfter läuft fest auf der gewählten Basisstufe, der Takt hält den heißesten Chip bei 79–84 °C; dort keine ' +
-  'Taktänderung. Unter 79 °C Takt +5 / +20 / +40 MHz (kleinster Schritt 5 MHz). Ab 85 °C Lüfter +1 bzw. +2 und Takt ' +
-  'runter (Korrekturphase; bei 85–87 °C −10 MHz, wenn sie vorher unter 10 min in 79–84 °C lag, sonst −5 MHz); ' +
+  'Taktänderung. Unter 79 °C Takt +5 / +20 / +40 MHz (kleinster Schritt 5 MHz; bei 75–78 °C erst 3 min nach der letzten ' +
+  'Takterhöhung). Ab 85 °C Lüfter +1 bzw. +2 und Takt ' +
+  'runter (Korrekturphase; bei 85–87 °C −10 MHz, wenn sie vorher unter 5 min in 79–84 °C lag, sonst −5 MHz); ' +
   'zurück zur Basisstufe nach 1 min in 80–84 °C oder sobald unter 80 °C. War die letzte ' +
   'Taktänderung über 84 °C und fällt die Temperatur unter 79 °C: 5 min keine Taktänderung (endet über 84 °C). ' +
   'Nach Neustart, Wartung oder Over Hot keine Takterhöhung bis 79 °C, höchstens 10 min (Startpause). ' +

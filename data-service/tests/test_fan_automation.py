@@ -551,8 +551,8 @@ def _sim(level, room=0.0, hours=2.0, start_clock=200):
 def test_simulation_reaches_band_and_stays_safe(miner):
     r, peak, mn = _sim(5)
     assert peak < 86
-    band = [c for c in r.j.cycles[-360:] if 80 <= (c['chip_temp'] or 0) <= 84]
-    assert len(band) > 300                                       # letzte 30 min fast nur im Zielbereich
+    band = [c for c in r.j.cycles[-360:] if 79 <= (c['chip_temp'] or 0) <= 84]
+    assert len(band) > 300                                       # letzte 30 min fast nur im Zielbereich (79–84 °C)
     assert r.st['learned'].get('5')
 
 
@@ -726,7 +726,7 @@ def test_calm_only_once_per_hot_change_and_not_after_a_plus_step(miner):
     assert not r.st.get('calm') and r.st['clock_set'] == 290
     r.go(35, temp=78)                                             # wieder unter 79: keine neue Sperre, +5
     assert len(r.events('taktsperre')) == 1 and r.st['clock_set'] == 295
-    r.go(35, temp=77)
+    r.go(185, temp=77)                                            # 75–78 °C: 3 min nach der letzten Erhöhung
     assert r.st['clock_set'] == 300 and len(r.events('taktsperre')) == 1   # letzte Änderung bei 78 °C: keine Sperre
 
 # ---------------------------------------------------------------- Temperatur-Test (25.10., v2.0.6)
@@ -909,16 +909,16 @@ def test_85_after_short_stay_in_band_minus_10(miner):
     r = started(miner, ac, level=5, tmax=75, learned={'5': {'mhz': 300, 'temp_avg': 82, 'at': 'x', 'count': 1}})
     r.go(60, temp=75)                                             # unter 79 °C
     clock = r.st['clock_set']
-    r.go(6 * 60, temp=82)                                         # 6 min in 79–84 °C
+    r.go(4 * 60, temp=82)                                         # 4 min in 79–84 °C (Grenze 5 min, Nutzer 26.10.)
     r.go(5, temp=85)
     assert r.st['clock_set'] == clock - 10 and ac.level == 6
     takt = r.events('takt')[-1]
-    assert takt['trigger'] == 'Chiptemperatur 85 °C nach 6 min in 79–84 °C: Takt −10 MHz'
-    assert r.events('hohe_temperatur')[-1]['details']['aufenthalt_s'] == 360
+    assert takt['trigger'] == 'Chiptemperatur 85 °C nach 4 min in 79–84 °C: Takt −10 MHz'
+    assert r.events('hohe_temperatur')[-1]['details']['aufenthalt_s'] == 240
 
 
 def test_85_and_86_after_long_stay_minus_5_for_the_whole_correction_phase(miner):
-    """Aufenthalt ab 10 min → −5; gilt für jede Absenkung bei 85/86 °C bis zum Ende der Korrekturphase, auch nach
+    """Aufenthalt ab 5 min → −5; gilt für jede Absenkung bei 85/86 °C bis zum Ende der Korrekturphase, auch nach
     einem kurzen Rückgang auf 84 °C."""
     ac = FakeAC(level=5)
     r = started(miner, ac, level=5, learned={'5': {'mhz': 300, 'temp_avg': 82, 'at': 'x', 'count': 1}})
@@ -1255,7 +1255,7 @@ def test_mode_switch_waits_for_the_settings_page(miner):
     r.go(30, temp=78)
     assert miner.mode_sets == [] and len(r.events('modus_wartet')) == 1
     miner.web_down = False
-    r.go(45, temp=78)                                             # Seite wieder da: der nächste Plus-Schritt mit Modus
+    r.go(185, temp=78)                                            # Seite wieder da: nächster Plus-Schritt (nach 3 min) mit Modus
     assert miner.mode_sets == [3] and miner.clock() == r.st['clock_set'] > 360 and r.st.get('mode_wait') is None
 
 
@@ -1315,4 +1315,55 @@ def test_waiting_mode_switch_caps_the_clock_at_the_current_mode(miner):
     miner.web_down = False
     r.go(10, temp=65)
     assert r.st['clock_set'] <= 380                               # danach wieder in Schritten, kein Sprung auf 440
+
+
+# ---------------------------------------------------------------- 3 min zwischen Takterhöhungen bei 75–78 °C (Nutzer 26.10.)
+
+def test_plus_steps_at_75_to_78_wait_3_min(miner):
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, tmax=76, learned={'5': {'mhz': 250, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    r.go(35, temp=76)
+    assert r.st['clock_set'] == 255
+    r.go(170, temp=76)
+    assert r.st['clock_set'] == 255                               # 3 min nach der letzten Erhöhung noch nicht vorbei
+    r.go(15, temp=76)
+    assert r.st['clock_set'] == 260
+
+
+def test_wait_counts_from_any_increase_but_not_below_75(miner):
+    """Meine Lesart (freigegeben): die 3 min zählen ab der letzten Takterhöhung, egal bei welcher Temperatur."""
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, tmax=65, learned={'5': {'mhz': 250, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    r.go(35, temp=65)
+    assert r.st['clock_set'] == 270                               # 60–69 °C: +20
+    r.go(40, temp=72)
+    assert r.st['clock_set'] == 275                               # unter 75 °C: nach dem 30-s-Fenster wie bisher
+    r.go(40, temp=76)
+    assert r.st['clock_set'] == 275                               # 75–78 °C: erst 3 min nach dem +5
+    r.go(150, temp=76)
+    assert r.st['clock_set'] == 280
+
+
+def test_dwell_limit_is_5_min(miner):
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, tmax=75, learned={'5': {'mhz': 300, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    r.go(60, temp=75)
+    clock = r.st['clock_set']
+    r.go(5 * 60, temp=82)                                         # 5 min in 79–84 °C
+    r.go(5, temp=85)
+    assert r.st['clock_set'] == clock - 5
+
+
+def test_plus_wait_counts_from_the_takeover_and_only_real_increases(miner):
+    """Review 26.10.: die 3 min zählen ab der Übernahme (nicht ab der Entscheidung); ein auf den gleichen Takt gekappter
+    Schritt (Moduswechsel wartet) ist keine Takterhöhung."""
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, tmax=76, learned={'5': {'mhz': 360, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    r.go(10, temp=82)
+    miner.web_down = True
+    r.go(35, temp=76)                                             # 360 → 365 bräuchte mode 03: gekappt auf 360
+    assert r.st['clock_set'] == 360 and not r.st.get('last_plus_at')
+    miner.web_down = False
+    r.go(45, temp=76)                                             # Seite wieder da: der Plus-Schritt kommt gleich
+    assert miner.mode_sets == [3] and r.st['clock_set'] == 365 and r.st.get('last_plus_at')
 

@@ -6,7 +6,7 @@ Regelungslogik nach dem Plan vom 24.10.2026 (docs/claude/Regelungslogik-Luefter-
   * Start (Basisstufe gewählt, Automatik ein, Neustart des Miners, nach Wartung, nach Takt-Messung, nach Over Hot):
     Starttakt = Lernwert der Basisstufe, sonst Initialwert (Stufe 1 = 100 ... Stufe 10 = 190 MHz).
   * Schritt 1 - hohe Chiptemperatur (ab 85 °C): Lüfter = Basisstufe + 1/+2 (Korrekturphase), Takt -5 ... -100 MHz;
-    bei 85-87 °C nach dem Aufenthalt in 79-84 °C davor: unter 10 min -10, sonst -5 (Nutzer 25.10.).
+    bei 85-87 °C nach dem Aufenthalt in 79-84 °C davor: unter 5 min -10, sonst -5 (Nutzer 26.10.; vorher 10 min).
   * Schritt 2 - Korrekturphase: keine Plus-Schritte; zurück zur Basisstufe nach 1 min stabil in 80-84 °C oder unter 80 °C.
   * Schritt 3 - Feintuning: unter 79 °C 70-78 +5; 60-69 +20; unter 60 +40 (kleinster Schritt 5 MHz, Nutzer 25.10.).
     Taktsperre: war die letzte Taktänderung über 84 °C und fällt die Chiptemperatur unter 79 °C, 5 min keine Taktänderung
@@ -44,7 +44,7 @@ RUN_S = 5                     # one round per central reading
 T_LOW, T_HIGH = 80, 84        # Zieltemperatur
 T_HOT = 85                    # ab hier Tabelle „Hohe Chiptemperaturen“
 HIGH_TABLE = [(94, 2, 100), (92, 2, 80), (90, 2, 50), (88, 2, 30), (86, 1, None), (85, 1, None)]   # (ab °C, Lüfter +, Takt −)
-DWELL_S, DWELL_MINUS = 600, (10, 5)   # 85/86 °C (None): vorher unter 10 min in 79-84 °C → −10, sonst −5 (Nutzer 25.10.)
+DWELL_S, DWELL_MINUS = 300, (10, 5)   # 85-87 °C (None): vorher unter 5 min in 79-84 °C → −10, sonst −5 (Nutzer 26.10.)
 START_CLOCK = {1: 100, 2: 110, 3: 120, 4: 130, 5: 140, 6: 150, 7: 160, 8: 170, 9: 180, 10: 190}
 CLOCK_MIN, CLOCK_MAX = 100, 440
 MODE_TOP = {4: 360, 3: 380, 2: 400, 1: 420, 0: 440}   # oberer Takt je Modus (mode 04 ... mode 00)
@@ -53,6 +53,7 @@ WINDOW_S = 30                 # Beobachtungsfenster nach jeder Taktänderung
 TENDENCY_S = 30               # Tendenz: gegen den Wert von vor höchstens 30 s (bzw. bei der letzten Taktänderung)
 CALM_LOW = 79                 # 79-84 °C: keine Taktänderung (Nutzer 25.10.)
 CALM_AFTER_HOT_S = 5 * 60     # Taktsperre: letzte Taktänderung über 84 °C, dann unter 79 °C → 5 min keine Taktänderung
+PLUS_WAIT_FROM, PLUS_WAIT_S = 75, 3 * 60   # bei 75-78 °C: nächste Takterhöhung erst 3 min nach der letzten (Nutzer 26.10.)
 START_HOLD_S = 10 * 60        # Startpause: nach einem Start mit kalten Chips keine Takterhöhung bis 79 °C, höchstens 10 min
 RESTART_EXPECT_S = 5 * 60     # Neustart über den Knopf: so lange gilt „nicht erreichbar“ als erwartet (Nutzer 25.10.)
 RESTART_RELABEL_S = 3 * 60    # Neustart auf anderem Weg: „antwortet nicht/wieder“ der 3 min davor gehören zum Neustart
@@ -538,9 +539,12 @@ class Round:
         self.note('Modus → mode %02d%s.' % (level, '' if ok else ' (Fehler: %s)' % err))
 
     def clock_done(self, cmd):
-        """Takt übernommen: Beobachtungsfenster beginnt."""
+        """Takt übernommen: Beobachtungsfenster beginnt. Eine übernommene Takterhöhung der Regelung startet die 3 min für
+        75-78 °C – ab der Übernahme, und nur wenn der Takt wirklich stieg (Review 26.10.)."""
         st = self.st
         st['window_until'] = _iso(self.now + timedelta(seconds=WINDOW_S))
+        if (cmd.get('step') or 0) > 0 and cmd.get('from') is not None and cmd['value'] > cmd['from']:
+            st['last_plus_at'] = _iso(self.now)
 
     def follow(self, log_id):
         """Thermischen Verlauf nachtragen (alle 30 s, 10 Werte)."""
@@ -886,7 +890,8 @@ class Round:
 
     def fine_tuning(self):
         """Schritt 3: 79-84 °C keine Taktänderung; darunter +5/+20/+40 MHz (nicht in der Korrekturphase, nicht bei
-        steigender Tendenz, nicht während der Taktsperre oder der Startpause)."""
+        steigender Tendenz, nicht während der Taktsperre oder der Startpause; bei 75-78 °C erst 3 min nach der letzten
+        Takterhöhung)."""
         st, t, d = self.st, self.t, self.st['tendency']
         old = st.get('clock_set')
         if old is None or t >= CALM_LOW or st.get('corr') or st.get('calm') or d > 0:
@@ -896,6 +901,8 @@ class Round:
         current = level_of(self.m['mode_key'])
         if st.get('mode_wait') is not None and current is not None and old >= MODE_TOP[current]:
             return                                       # mehr geht erst mit dem wartenden Moduswechsel
+        if t >= PLUS_WAIT_FROM and _age(st.get('last_plus_at'), self.now) < PLUS_WAIT_S:
+            return                                       # 75-78 °C: 3 min nach der letzten Takterhöhung warten
         old = int(round(old))
         if old < CLOCK_MAX:
             size = plus_size(t)
