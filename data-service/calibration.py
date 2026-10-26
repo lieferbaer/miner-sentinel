@@ -91,14 +91,24 @@ def _retry(label, fn, *args, **kwargs):
 
 
 def a15_conf(ip):
-    with miner_cache.lock(ip):
-        raw = urllib.request.urlopen('http://%s/updatecgconf.cgi' % ip, timeout=5).read().decode('utf-8', 'replace')
+    try:
+        with miner_cache.lock(ip):
+            raw = urllib.request.urlopen('http://%s/updatecgconf.cgi' % ip, timeout=5).read().decode('utf-8', 'replace')
+    except http.client.HTTPException as exc:
+        # e.g. IncompleteRead of the overloaded page: an OSError like a timeout, so every reader handles it (26.10.)
+        raise OSError('%s: %s' % (type(exc).__name__, exc))
     match = re.search(r'CGConfCallback\((\{.*?\})\);', raw, re.S)
     return json.loads(match.group(1)) if match else None
 
 
+_last_conf = {}           # ip -> last settings read from the A15 page (used while only the page does not answer)
+
+
 def a15_set_mode(ip, conf, mode, level):
-    """Same POST as the Save button of the A15 configuration page."""
+    """Same POST as the Save button of the A15 configuration page. Never with settings that were not read just
+    now: the POST carries the pool fields (Nutzer 26.10.: a mode switch waits until the page answers again)."""
+    if not conf or conf.get('_stale'):
+        raise RuntimeError('A15-Einstellungsseite nicht erreichbar: Moduswechsel wartet (keine alten Pool-Daten)')
     fields = {k: conf.get(k, '') for k in ('pool1', 'worker1', 'passwd1', 'pool2', 'worker2', 'passwd2',
                                            'pool3', 'worker3', 'passwd3')}
     fields['mode'] = mode
@@ -108,6 +118,10 @@ def a15_set_mode(ip, conf, mode, level):
     try:
         with miner_cache.command(ip):
             urllib.request.urlopen(req, timeout=10).read()
+        if ip in _last_conf:
+            # switch sent: the last settings carry the new mode (pool fields unchanged), so a reading while only
+            # the settings page does not answer reports the mode actually set (Review 26.10.)
+            _last_conf[ip] = dict(_last_conf[ip], mode=mode, power_level=fields['power_level'])
     except (ConnectionResetError, http.client.HTTPException) as exc:
         # the A15 sometimes drops the connection of the switch command (then it is usually NOT applied);
         # wait_mode reads the mode back and sends the command again after RESEND_S
@@ -188,7 +202,19 @@ def read_miner(ip, port, fresh=False):
         summary = {}
     fields = _fields(estats)
     points = [int(v) for v in str(fields.get('SF0') or '').split()] if isinstance(fields.get('SF0'), str) else []
-    conf = miner_cache.fetch(ip, 'web', WEB_MAX_AGE, lambda: _retry('A15-Einstellungsseite lesen', a15_conf, ip))
+    # Nutzer 26.10.: answers only the settings page not (26.10. 04:31: 9.5 min, the mining interface answered), the
+    # last settings read stand in – marked as stale, so no mode switch is ever sent with them
+    web_error = None
+    try:
+        conf = miner_cache.fetch(ip, 'web', WEB_MAX_AGE, lambda: _retry('A15-Einstellungsseite lesen', a15_conf, ip))
+    except (OSError, RuntimeError) as exc:
+        # without settings read before (e.g. right after a restart of the data-service) the mode stays unknown here;
+        # the Temperatur-Automatik then keeps its last known mode
+        last = _last_conf.get(ip)
+        conf, web_error = (dict(last, _stale=True) if last else None), str(exc)[:300]
+    else:
+        if conf:
+            _last_conf[ip] = conf
     wm = _num(fields.get('WORKMODE'))
     key = None
     if wm is not None:
@@ -202,6 +228,7 @@ def read_miner(ip, port, fresh=False):
     power = _num(fields.get('WALLPOWER')) or (_num(ps[6]) if len(ps) >= 7 else None)
     return {
         'estats': estats, 'summary': summary, 'fields': fields, 'conf': conf, 'points': points,
+        'conf_fresh': web_error is None, 'web_error': web_error,
         'mode_key': key, 'status': str(fields.get('SYSTEMSTATU') or ''),
         'ghsspd': _num(fields.get('GHSspd')), 'power': power if power and power > 0 else None,
         'dh': _num(fields.get('DH')), 'tmax': _num(fields.get('TMax')),
@@ -259,8 +286,15 @@ def bounce_key(key):
     return '2/L3' if key == '2/L4' else '2/L4'
 
 
+MODE_WAIT_MESSAGE = 'Moduswechsel wartet: A15-Einstellungsseite antwortet nicht.'
+
+
 def _send_mode(st, ip, conf, key, now, elapsed, after):
-    """Switch via the A15 web interface and wait for the miner to report `key`, then go to `after`."""
+    """Switch via the A15 web interface and wait for the miner to report `key`, then go to `after`. Without freshly
+    read settings (pool fields) nothing is sent and the step is tried again next round (Nutzer 26.10.)."""
+    if conf is None or conf.get('_stale'):
+        st['mode_wait'] = True
+        return
     mode, level = parse_key(key)
     a15_set_mode(ip, conf, mode, level)
     st.update({'phase': 'wait_mode', 'expect': key, 'after': after, 'switch_sent_at': _iso(now),
@@ -347,6 +381,11 @@ def step_run(conn, run):
         expect = st.get('expect') or target
         sent = _parse(st.get('switch_sent_at')) or now
         notes = st.setdefault('notes', {})
+        if not m.get('conf_fresh', True) and m['mode_key'] != expect:
+            # the mode is not readable right now (settings page): no verdict, no timeout – wait (Review 26.10.)
+            run['message'] = 'Moduswechsel wird geprüft, sobald die A15-Einstellungsseite wieder antwortet.'
+            run['state'] = st
+            return run
         if m['mode_key'] == expect and st.get('after') == 'switch':
             st['phase'] = 'switch'                     # bounce done: now switch (back) to the target
         elif m['mode_key'] == expect and st.get('after') in ('restore_back', 'restore_done'):
@@ -374,6 +413,10 @@ def step_run(conn, run):
                 st['count'] = 0
                 st['phase'] = 'switch'
         elif (now - (_parse(st.get('post_at')) or sent)).total_seconds() >= RESEND_S:
+            if m['conf'] is None or m['conf'].get('_stale'):
+                run['message'] = MODE_WAIT_MESSAGE         # resend only with freshly read settings
+                run['state'] = st
+                return run
             mode, level = parse_key(expect)
             a15_set_mode(ip, m['conf'], mode, level)
             st['post_at'] = _iso(now)
@@ -473,6 +516,9 @@ def step_run(conn, run):
         back = st.get('back_mode') or st.get('orig_mode') or modes[0]
         _send_mode(st, ip, m['conf'], back, now, m['elapsed'], 'restore_done')
         run['message'] = 'Schalte zurück auf %s …' % mode_label(back)
+
+    if st.pop('mode_wait', False):
+        run['message'] = MODE_WAIT_MESSAGE         # _send_mode sent nothing: settings page not answering
 
     if st.get('phase') == 'restore_done':
         run['status'] = 'cancelled' if run['status'] == 'cancelling' else 'done'

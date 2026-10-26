@@ -52,14 +52,21 @@ class Miner:
         self.status = 'Work: In Work'
         self.offline = False
         self.ignore_clock = False
+        self.web_down = False                                    # nur die Einstellungsseite antwortet nicht
+        self.never_read = False                                  # ... und wurde seit dem Start nie gelesen
 
     def read(self, ip, port, fresh=False):
         if self.offline:
             raise OSError('timed out')
         self.elapsed += 5
+        conf = {'mode': 2, 'power_level': self.level}
+        unknown = self.web_down and self.never_read
         return {'fields': {'TMax': str(self.tmax), 'MTmax': '%s 70 69' % self.tmax}, 'points': list(self.points),
-                'mode_key': '2/L%d' % self.level, 'status': self.status, 'elapsed': self.elapsed,
-                'conf': {'mode': 2, 'power_level': self.level}, 'power': 2000.0, 'ghsspd': 150000.0, 'dh': 1.2}
+                'mode_key': None if unknown else '2/L%d' % self.level, 'status': self.status, 'elapsed': self.elapsed,
+                'conf': None if unknown else dict(conf, _stale=True) if self.web_down else conf,
+                'conf_fresh': not self.web_down,
+                'web_error': 'A15-Einstellungsseite lesen: timed out' if self.web_down else None,
+                'power': 2000.0, 'ghsspd': 150000.0, 'dh': 1.2}
 
     def set_frequency(self, ip, port, points):
         self.clock_sets.append(sum(points) / len(points))
@@ -1200,4 +1207,112 @@ def test_long_outage_pair_is_relabeled_together(miner):
     assert not r.events('miner_offline') and not r.events('miner_online')
     assert r.events('neustart_offline')[0]['details']['meldung'] == 'timed out'
     assert r.events('neustart_online')[0]['trigger'] == 'A15 nach Neustart wieder erreichbar nach 360 s'
+
+
+# ---------------------------------------------------------------- Einstellungsseite der A15 (Nutzer 26.10.)
+
+def test_settings_page_down_regulation_goes_on(miner):
+    """26.10. 04:31: 9,5 min antwortete nur die Einstellungsseite nicht – die Automatik war blind. Jetzt regelt sie
+    weiter, kein „Miner antwortet nicht“; Eintrag erst nach 2 min, beim Zurückkommen die Dauer."""
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, learned={'5': {'mhz': 300, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    r.go(30, temp=82)
+    miner.web_down = True
+    r.go(60, temp=82)
+    assert not r.events('einstellungsseite_aus') and not r.events('miner_offline')
+    r.go(5, temp=85)
+    assert r.st['clock_set'] == 290 and r.st['phase'] == 'korrektur'   # regelt weiter (Absenkung ab 85 °C)
+    r.go(60, temp=82)
+    ev = r.events('einstellungsseite_aus')
+    assert len(ev) == 1 and ev[0]['ok'] is None and ev[0]['trigger'] == ('A15-Einstellungsseite antwortet nicht – '
+                                                                       'Mining-Schnittstelle ok')
+    r.go(60, temp=82)
+    miner.web_down = False
+    r.go(5, temp=82)
+    assert r.events('einstellungsseite_an')[0]['trigger'] == 'A15-Einstellungsseite wieder erreichbar nach 3 min'
+    assert not r.events('miner_offline')
+
+
+def test_short_settings_page_drop_no_entry(miner):
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, learned={'5': {'mhz': 300, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    r.go(30, temp=82)
+    miner.web_down = True
+    r.go(100, temp=82)
+    miner.web_down = False
+    r.go(10, temp=82)
+    assert not r.events('einstellungsseite_aus') and not r.events('einstellungsseite_an')
+
+
+def test_mode_switch_waits_for_the_settings_page(miner):
+    """Ein Moduswechsel braucht die Pool-Felder der Einstellungsseite: nie mit alten Daten, er wartet."""
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, tmax=78, learned={'5': {'mhz': 358, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    miner.web_down = True
+    r.go(40, temp=78)                                             # +5 → 363 → mode 03 nötig
+    assert miner.mode_sets == [] and len(r.events('modus_wartet')) == 1
+    assert r.st['clock_set'] == 360 and not r.st['queue']         # Takt bis zum Standardtakt von mode 04
+    r.go(30, temp=78)
+    assert miner.mode_sets == [] and len(r.events('modus_wartet')) == 1
+    miner.web_down = False
+    r.go(45, temp=78)                                             # Seite wieder da: der nächste Plus-Schritt mit Modus
+    assert miner.mode_sets == [3] and miner.clock() == r.st['clock_set'] > 360 and r.st.get('mode_wait') is None
+
+
+def test_waiting_mode_switch_does_not_block_further_reductions(miner):
+    """Review 26.10.: wartete der Moduswechsel in der Befehlsfolge, kam ab 85 °C nach dem ersten Schritt keine weitere
+    Absenkung mehr (busy). Jetzt wartet er außerhalb, die Absenkungen laufen weiter."""
+    ac = FakeAC(level=5)
+    miner.level, miner.points = 3, list(STOCK['2/L3'])
+    r = started(miner, ac, level=5, learned={'5': {'mhz': 370, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    r.go(30, temp=82)
+    miner.web_down = True
+    r.go(5, temp=88)                                              # 370 − 30 = 340 → mode 04 nötig
+    r.go(5, temp=88)
+    assert r.st['clock_set'] == 340 and miner.mode_sets == [] and r.events('modus_wartet')
+    r.go(35, temp=88)
+    assert r.st['clock_set'] == 310                               # weitere Absenkung trotz wartendem Moduswechsel
+    r.go(40, temp=92)
+    assert r.st['clock_set'] == 230
+
+
+def test_second_outage_logs_mode_wait_again(miner):
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, tmax=78, learned={'5': {'mhz': 358, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    miner.web_down = True
+    r.go(40, temp=78)
+    assert len(r.events('modus_wartet')) == 1
+    miner.web_down = False
+    r.go(60, temp=82)
+    miner.web_down = True
+    r.go(10, temp=82)
+    r.go(40, temp=88)                                             # Absenkung über die Modusgrenze: wartet wieder
+    r.go(40, temp=78)
+    assert len(r.events('modus_wartet')) >= 1
+
+
+def test_settings_never_read_keeps_the_last_known_mode(miner):
+    """Review 26.10.: nach einem Data-Service-Neustart ohne gelesene Einstellungen kein rotes „antwortet nicht“ –
+    die Automatik regelt mit dem zuletzt bekannten Modus weiter."""
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, learned={'5': {'mhz': 300, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    r.go(30, temp=82)
+    miner.web_down = miner.never_read = True
+    r.go(5, temp=85)
+    assert not r.events('miner_offline') and r.st['mode_key'] == '2/L4' and r.st['clock_set'] == 290
+
+
+def test_waiting_mode_switch_caps_the_clock_at_the_current_mode(miner):
+    """Review 26.10.: wartete der Moduswechsel, stieg der gesetzte Takt bis 440 MHz, obwohl der Miner beim Standardtakt
+    von mode 04 blieb (Ausnahme, falscher Lernwert, am Ende ein Sprung). Jetzt höchstens der Standardtakt des Modus."""
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, learned={'5': {'mhz': 350, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    r.go(30, temp=82)
+    miner.web_down = True
+    r.go(6 * 60, temp=65)
+    assert r.st['clock_set'] == 360 and miner.mode_sets == [] and not r.events('ausnahme')
+    assert len(r.events('modus_wartet')) == 1
+    miner.web_down = False
+    r.go(10, temp=65)
+    assert r.st['clock_set'] <= 380                               # danach wieder in Schritten, kein Sprung auf 440
 

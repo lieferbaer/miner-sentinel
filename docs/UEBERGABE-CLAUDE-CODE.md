@@ -152,7 +152,7 @@ solange die Seite offen ist. Steuerung läuft immer auf dem Server, unabhängig 
 - Python ≥ 3.10 nötig (System-Python 3.9 reicht nicht): `/opt/homebrew/bin/python3.10 -m venv <dir>` + requirements von backend und data-service + pytest, pytest-django.
 - pytest mit `-p no:cacheprovider -q -o addopts=""` aufrufen, sonst fehlt die Zusammenfassung (pyproject-Einstellungen).
   Das venv im Scratchpad kann von macOS teilweise gelöscht werden (25.10.: `pytest` fehlte) → in jeder Session neu anlegen.
-- Stand 26.10. (v2.0.9): **Backend 198 ✓, Data-Service 190 ✓ (5 übersprungen), Frontend 153 ✓**, Lint 0 Fehler (15 Warnungen aus dem Original).
+- Stand 26.10. (v2.1.2): **Backend 198 ✓, Data-Service 203 ✓ (5 übersprungen), Frontend 153 ✓**, Lint 0 Fehler (15 Warnungen aus dem Original).
   Achtung: `npm run lint` meldet zusätzlich Fehler aus `frontend/dist-local/` (lokaler Build-Ordner, nicht im Repo) – ignorieren.
 
 ---
@@ -324,8 +324,22 @@ liegt; **dort keine Taktänderung** (v2.0.6, Nutzer 25.10.). Der **Modus folgt d
   nur wenn ±15 MHz am Tabellenwert; fehlt er, aus den gemeldeten Punkten geschätzt (Eintrag `fehler`, Grund `standardtakt_fehlt`).
 - Lüfter: neue Stufe sofort; erneut senden frühestens 20 s nach dem letzten Versuch; Rücklesen alle 60 s bzw. 10 s nach dem Setzen,
   nach Lesefehler erst wieder nach 60 s. Lüfter wird vor den (langsamen) Miner-Befehlen gesetzt.
-- Bekannt, nicht gelöst: Antwortet nur die **Einstellungsseite** des A15 nicht, gilt das als „Miner antwortet nicht“ (eine Umgehung
-  hätte die Pool-Zugangsdaten im Umschaltbefehl gefährdet).
+- **Einstellungsseite der A15** (v2.1.2, Nutzer 26.10.; vorher „Miner antwortet nicht“ – 26.10. 04:31–04:41 war die Automatik
+  9,5 min blind, die Mining-Schnittstelle antwortete): Antwortet nur die Seite nicht, wirft `calibration.read_miner` nicht mehr,
+  sondern liefert die zuletzt gelesenen Einstellungen (`_last_conf`, als `_stale` markiert, `conf_fresh`=False, `web_error`; ohne
+  gelesene Einstellungen seit dem Start `conf`/`mode_key` None – die Automatik nimmt dann ihren letzten `mode_key` aus dem Zustand).
+  Die Automatik regelt normal weiter. **Ein Moduswechsel wartet außerhalb der Befehlsfolge** (`mode_wait` = gewünschte Stufe,
+  Ereignis `modus_wartet` „Moduswechsel wartet: Einstellungsseite nicht erreichbar“ einmal je Ausfall); die Taktbefehle laufen
+  weiter, auch weitere Absenkungen ab 85 °C (Review 26.10.: in der Folge blockierte er sie); ein Takt über dem Standardtakt des
+  jetzigen Modus wird auf diesen begrenzt und Plus-Schritte darüber warten (sonst stieg der gesetzte Takt, während der Miner beim
+  Standardtakt blieb). Antwortet die Seite wieder, wird der Modus passend zum dann gesetzten Takt nachgeholt. Nach einem gesendeten
+  Umschaltbefehl tragen die zuletzt gelesenen Einstellungen den neuen Modus. HTTP-Fehler der Seite (z. B. IncompleteRead) gelten wie
+  eine Zeitüberschreitung (sonst brach der ganze Live-Zyklus ab). Takt-Messung in `wait_mode`: ohne lesbaren Modus kein Urteil und
+  keine Zeitüberschreitung, sie wartet. `a15_set_mode` lehnt alte Einstellungen ab – nie alte Pool-Daten. Takt-Messung:
+  wartet nur dort, wo ein Umschaltbefehl gesendet würde (`_send_mode`, Wiederholung in `wait_mode`; Meldung „Moduswechsel wartet …“),
+  Abbrechen/Ende ohne Moduswechsel laufen durch. Protokoll erst nach **2 min**: `einstellungsseite_aus` „A15-Einstellungsseite
+  antwortet nicht – Mining-Schnittstelle ok“, zurück `einstellungsseite_an` „… wieder erreichbar nach X min“ (nicht rot). Rot
+  „Miner antwortet nicht“ nur, wenn die Mining-Schnittstelle (estats/summary) selbst nicht antwortet.
 
 **Temperatur-Test** (v2.0.6, Nutzer 25.10.): Button „Temperatur-Test starten“ auf der Lüfter-Seite (`fan_automation.temp_test_at`,
 Migration 0025). Ablauf: **Takt auf den Lernwert der Basisstufe** (sonst Initialwert wie beim Start), warten bis TMax **≤ 80 °C**;
@@ -447,7 +461,7 @@ Original + „Activity“ + „Takt-Tabellen“ + „Lüfter“; Dockerfiles/Com
    gemessenen Reaktionszeiten prüfen (Nutzerwunsch aus dem Plan).
 4. **Unruhe an der 80-°C-Grenze**: seit v2.0.6 keine Taktänderung in 79–84 °C, kleinster Schritt 5 MHz, Taktsperre 5 min nach Absenkung – live beobachten (Taktwechsel je Stunde, Fehlerrate).
 5. Takt laut Miner liegt 13–20 MHz über dem gesetzten (Nachziehen der Firmware); ab > 25 MHz sendet die Regelung neu – beobachten.
-6. Einstellungsseite des A15 nicht erreichbar = „Miner antwortet nicht“ (7.8, bekannt).
+6. Einstellungsseite des A15 nicht erreichbar: seit v2.1.2 regelt die Automatik weiter (7.8) – beobachten, wie oft `einstellungsseite_aus` kommt.
 7. Allgemeine Zeitraumauswahl („Last 30 days“) erscheint auch auf Protokoll- und Lüfter-Seite, ohne Wirkung dort.
 8. Ausstehende Original-Migration – nur nach Rücksprache.
 

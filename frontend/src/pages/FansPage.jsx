@@ -221,7 +221,8 @@ const RECENT_KINDS = ['takt', 'modus', 'luefter', 'hohe_temperatur', 'rueckkehr'
   'start', 'neustart', 'over_hot', 'miner_offline', 'miner_online', 'firmware_takt', 'messung_start',
   'messung_ende', 'fehler', 'basisstufe', 'automatik_ein', 'automatik_aus', 'wartung_start', 'wartung_ende',
   'test_start', 'test_stufe', 'test_ziel', 'test_schritt', 'test_messung', 'test_ende', 'neustart_nutzer', 'taktsperre',
-  'taktsperre_ende', 'startpause', 'startpause_ende', 'neustart_offline', 'neustart_online']
+  'taktsperre_ende', 'startpause', 'startpause_ende', 'neustart_offline', 'neustart_online',
+  'einstellungsseite_aus', 'einstellungsseite_an', 'modus_wartet']
 const RECENT_COUNT = 20
 const RECENT_REFRESH_MS = 10000
 const RECENT_LABEL = { takt: 'Takt', modus: 'Modus', luefter: 'Lüfter', start: 'Start' }

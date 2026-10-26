@@ -56,6 +56,7 @@ CALM_AFTER_HOT_S = 5 * 60     # Taktsperre: letzte Taktänderung über 84 °C, d
 START_HOLD_S = 10 * 60        # Startpause: nach einem Start mit kalten Chips keine Takterhöhung bis 79 °C, höchstens 10 min
 RESTART_EXPECT_S = 5 * 60     # Neustart über den Knopf: so lange gilt „nicht erreichbar“ als erwartet (Nutzer 25.10.)
 RESTART_RELABEL_S = 3 * 60    # Neustart auf anderem Weg: „antwortet nicht/wieder“ der 3 min davor gehören zum Neustart
+WEB_DOWN_LOG_S = 2 * 60       # Einstellungsseite antwortet nicht (Mining-Schnittstelle ok): Eintrag erst nach 2 min
 RETURN_STABLE_S = 60          # Rückkehr zur Basisstufe nach 1 min stabil in 80-84 °C
 FAN_DOWN_DELAY_S = 30         # niedrigere Korrekturstufe erst, wenn die Tabelle sie 30 s lang verlangt
 EXC_BELOW = 70                # Ausnahme: unter 70 °C ...
@@ -448,6 +449,25 @@ class Round:
                 if level_of(m['mode_key']) == cmd['value']:
                     st['queue'].pop(0)
                     continue
+                if not m.get('conf_fresh', True):
+                    # der Umschaltbefehl braucht die Einstellungsseite (Pool-Felder): nie mit alten Daten. Er wartet
+                    # außerhalb der Folge, die Taktbefehle laufen weiter – auch weitere Absenkungen ab 85 °C (Nutzer 26.10.)
+                    st['queue'].pop(0)
+                    current = level_of(m['mode_key'])
+                    if current is not None:
+                        # der jetzige Modus kann höchstens seinen Standardtakt: ein höherer Takt wartet mit dem Modus
+                        # (sonst stiege der gesetzte Takt, während der Miner beim Standardtakt bleibt – Review 26.10.)
+                        for c in st['queue']:
+                            if c['kind'] == 'takt' and c['value'] > MODE_TOP[current]:
+                                c['value'] = MODE_TOP[current]
+                        if (st.get('clock_set') or 0) > MODE_TOP[current]:
+                            st['clock_set'] = MODE_TOP[current]
+                    if st.get('mode_wait') is None:
+                        self.base_event(kind='modus_wartet', trigger='Moduswechsel wartet: Einstellungsseite nicht erreichbar',
+                                        ok=None, mode_new=calibration.mode_key(2, cmd['value']))
+                        self.note('Moduswechsel auf mode %02d wartet: Einstellungsseite nicht erreichbar.' % cmd['value'])
+                    st['mode_wait'] = cmd['value']
+                    continue
                 self.send_mode(cmd)
                 return
             stock = self.stock_for_send()
@@ -755,6 +775,25 @@ class Round:
                     offline(partner[0], partner[1])      # das Paar gemeinsam, auch wenn „antwortet nicht“ älter als 3 min ist
         self.st['net_log'] = []
 
+    # --- Einstellungsseite der A15 (Nutzer 26.10.)
+    def web_status(self, m):
+        """Antwortet nur die Einstellungsseite nicht, regelt die Automatik mit den zuletzt gelesenen Einstellungen weiter;
+        erst nach 2 min ein Eintrag (nicht rot), beim Zurückkommen die Dauer."""
+        st, now = self.st, self.now
+        if m.get('web_error'):
+            st['web_down_since'] = st.get('web_down_since') or _iso(now)
+            if not st.get('web_down_logged') and _age(st['web_down_since'], now) >= WEB_DOWN_LOG_S:
+                st['web_down_logged'] = True
+                self.base_event(kind='einstellungsseite_aus', trigger='A15-Einstellungsseite antwortet nicht – Mining-Schnittstelle ok',
+                                ok=None, details={'seit': st['web_down_since'], 'meldung': m['web_error']})
+                self.note('A15-Einstellungsseite antwortet nicht – Regelung läuft weiter.')
+        elif st.get('web_down_since'):
+            if st.get('web_down_logged'):
+                text = 'A15-Einstellungsseite wieder erreichbar nach %d min' % int(_age(st['web_down_since'], now) // 60)
+                self.base_event(kind='einstellungsseite_an', trigger=text, details={'seit': st['web_down_since']})
+                self.note(text + '.')
+            st['web_down_since'], st['web_down_logged'] = None, False
+
     # --- the rules (Kapitel 5)
     def window_over(self):
         wu = self.st.get('window_until')
@@ -854,6 +893,9 @@ class Round:
             return
         if st.get('start_hold'):
             return                                       # Startpause nach einem Start mit kalten Chips
+        current = level_of(self.m['mode_key'])
+        if st.get('mode_wait') is not None and current is not None and old >= MODE_TOP[current]:
+            return                                       # mehr geht erst mit dem wartenden Moduswechsel
         old = int(round(old))
         if old < CLOCK_MAX:
             size = plus_size(t)
@@ -1117,6 +1159,9 @@ class Round:
                              decision='A15 startet neu' if st['offline'] == 'neustart' else 'Miner antwortet nicht')
                 return st
         self.m = m
+        if m.get('web_error') and m.get('mode_key') is None and st.get('mode_key'):
+            m['mode_key'] = st['mode_key']                 # Einstellungsseite seit dem Start nie gelesen: letzter Modus
+        self.web_status(m)
         off = st.pop('offline', False)
         if off:
             took = int(_age(st['offline_since'], now)) if st.get('offline_since') else None
@@ -1213,6 +1258,16 @@ class Round:
 
         if not cal and not over_hot:
             self.confirm_pending()
+            if st.get('mode_wait') is not None and m.get('conf_fresh', True) and not self.busy():
+                # Einstellungsseite wieder da: der gewartete Moduswechsel – passend zum jetzt gesetzten Takt
+                st['mode_wait'] = None
+                current = level_of(m['mode_key'])
+                if st.get('clock_set') and current is not None:
+                    level = required_level(int(round(st['clock_set'])), current)
+                    if level != current:
+                        st['queue'] = [{'kind': 'modus', 'value': level, 'why': 'Einstellungsseite wieder da: Modus'},
+                                       {'kind': 'takt', 'value': int(round(st['clock_set'])),
+                                        'why': 'Einstellungsseite wieder da: Takt im neuen Modus'}]
             # Miner hat den Takt selbst geändert (Takt laut Miner > gesetzt + 25 MHz, frühestens 60 s nach der letzten
             # Taktänderung – vorher stellt die Firmware den neuen Takt noch schrittweise ein): erneut senden
             # nach dem erneuten Senden ebenfalls 60 s warten (25./26.10.: nach dem Hochfahren 3× in 10 s gesendet,
