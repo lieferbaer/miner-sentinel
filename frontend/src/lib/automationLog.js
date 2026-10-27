@@ -9,6 +9,7 @@ export const KIND_LABEL = {
   automatik_aus: 'Automatik aus',
   wartung_start: 'Wartung gestartet',
   wartung_ende: 'Wartung beendet',
+  zielbereich: 'Zielbereich',
   start: 'Start (Starttakt)',
   takt: 'Taktbefehl',
   modus: 'Modusbefehl',

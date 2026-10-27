@@ -3,6 +3,7 @@
  * testen, welcher Schreibweg die Lüfterstufe am echten Gerät wirklich ändert.
  */
 import { formatHashrate, formatNumber } from '@/components/dashboard'
+import TargetRangeCard, { targetOf } from '@/components/fans/TargetRangeCard'
 import MetricCard from '@/components/metrics/MetricCard'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -51,33 +52,41 @@ function errText(err, fallback) {
   return err?.response?.data?.error || fallback
 }
 
-// state of the regulation (fan_automation.state.phase, Regelung vom 24.10.)
-const PHASE = {
-  normal: { value: 'Normalbetrieb', sub: 'Takt regelt 79–84 °C' },
-  korrektur: { value: 'Korrekturphase', sub: 'Lüfter erhöht, bis 80–84 °C erreicht sind' },
-  ausnahme: { value: 'Ausnahme', sub: 'Lüfter reduziert · 440 MHz und unter 70 °C' },
-  messung: { value: 'Takt-Messung', sub: 'Taktregelung pausiert, Lüfter nur ab 85 °C' },
-  wartung: { value: 'Wartung', sub: 'A15 aus · Lüfter aus · endet beim Einschalten' },
-  aus: { value: 'Aus', sub: '' },
+// state of the regulation (fan_automation.state.phase, Regelung vom 24.10.); the limits follow the Zielbereich
+// lo–hi (Nutzer 27.10.), the Takt-Messung keeps 85 °C
+function phases(lo, hi) {
+  return {
+    normal: { value: 'Normalbetrieb', sub: 'Takt regelt ' + lo + '–' + hi + ' °C' },
+    korrektur: { value: 'Korrekturphase', sub: 'Lüfter erhöht, bis ' + lo + '–' + hi + ' °C erreicht sind' },
+    ausnahme: { value: 'Ausnahme', sub: 'Lüfter reduziert · 440 MHz und unter ' + (lo - 9) + ' °C' },
+    messung: { value: 'Takt-Messung', sub: 'Taktregelung pausiert, Lüfter nur ab 85 °C' },
+    wartung: { value: 'Wartung', sub: 'A15 aus · Lüfter aus · endet beim Einschalten' },
+    aus: { value: 'Aus', sub: '' },
+  }
 }
 // commands, window and learning period are only current while the regulation runs on valid readings
 const REGULATING = new Set(['normal', 'korrektur', 'ausnahme'])
 const MODE_LABEL = { '2/L4': 'mode 04', '2/L3': 'mode 03', '2/L2': 'mode 02', '2/L1': 'mode 01', '2/L0': 'mode 00',
   '1/-': 'High Performance' }
-// the regulation in short (plan of 24.10.)
-const LOGIC_TEXT =
-  'Der Lüfter läuft fest auf der gewählten Basisstufe, der Takt hält den heißesten Chip bei 79–84 °C; dort keine ' +
-  'Taktänderung. Unter 79 °C Takt +5 / +20 / +40 MHz (kleinster Schritt 5 MHz; bei 75–78 °C erst 3 min nach der letzten ' +
-  'Takterhöhung). Ab 85 °C Lüfter +1 bzw. +2 und Takt ' +
-  'runter (Korrekturphase; bei 85–87 °C −10 MHz, wenn sie vorher unter 5 min in 79–84 °C lag, sonst −5 MHz); ' +
-  'zurück zur Basisstufe nach 1 min in 80–84 °C oder sobald unter 80 °C. War die letzte ' +
-  'Taktänderung über 84 °C und fällt die Temperatur unter 79 °C: 5 min keine Taktänderung (endet über 84 °C). ' +
-  'Nach Neustart, Wartung oder Over Hot keine Takterhöhung bis 79 °C, höchstens 10 min (Startpause). ' +
-  'Bei jedem Start Lüfter Stufe 1, bis die Chiptemperatur 74 °C erreicht (Heizmodus). ' +
-  'Bei 440 MHz und 3 min unter 70 °C Lüfter −1 (Ausnahme).'
-const START_TEXT =
-  'Start (Stufenwahl, Einschalten, Neustart, nach Wartung oder Takt-Messung): Lernwert der Basisstufe, sonst ' +
-  'Stufe 1 = 100 MHz … Stufe 7 = 160 MHz. Lernwert: 15 min stabil in 79–84 °C bei unveränderter Lüfterstufe.'
+// the regulation in short (plan of 24.10.), for the Zielbereich lo–hi (Nutzer 27.10.)
+function logicText(lo, hi) {
+  const range = lo + '–' + hi + ' °C'
+  return 'Der Lüfter läuft fest auf der gewählten Basisstufe, der Takt hält den heißesten Chip bei ' + range +
+    '; dort keine Taktänderung. Unter ' + lo + ' °C Takt +5 / +20 / +40 MHz (kleinster Schritt 5 MHz; bei ' +
+    (lo - 4) + '–' + (lo - 1) + ' °C erst 3 min nach der letzten Takterhöhung). Ab ' + (hi + 1) +
+    ' °C Lüfter +1 bzw. +2 und Takt runter (Korrekturphase; bei ' + (hi + 1) + '–' + (hi + 3) +
+    ' °C −10 MHz, wenn sie vorher unter 5 min in ' + range + ' lag, sonst −5 MHz); zurück zur Basisstufe nach ' +
+    '1 min in ' + range + ' oder sobald unter ' + lo + ' °C. War die letzte Taktänderung über ' + hi +
+    ' °C und fällt die Temperatur unter ' + lo + ' °C: 5 min keine Taktänderung (endet über ' + hi + ' °C). ' +
+    'Nach Neustart, Wartung oder Over Hot keine Takterhöhung bis ' + lo + ' °C, höchstens 10 min (Startpause). ' +
+    'Bei jedem Start Lüfter Stufe 1, bis die Chiptemperatur ' + lo + ' °C erreicht (Heizmodus). ' +
+    'Bei 440 MHz und 3 min unter ' + (lo - 9) + ' °C Lüfter −1 (Ausnahme).'
+}
+function startText(lo, hi) {
+  return 'Start (Stufenwahl, Einschalten, Neustart, nach Wartung oder Takt-Messung): Lernwert der Basisstufe, sonst ' +
+    'Stufe 1 = 100 MHz … Stufe 7 = 160 MHz. Lernwert: 15 min stabil in ' + lo + '–' + hi +
+    ' °C bei unveränderter Lüfterstufe.'
+}
 
 function clockTime(iso, seconds = false) {
   return new Date(iso).toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit', ...(seconds ? { second: '2-digit' } : {}) })
@@ -99,14 +108,14 @@ function useAutomation(initial) {
   return [auto, setAuto]
 }
 
-/** Learned values per fan level: clock at which the chip temperature stayed 15 min within 80-84 °C. */
-function LearnedTable({ learned, level }) {
+/** Learned values per fan level: clock at which the chip temperature stayed 15 min within the Zielbereich. */
+function LearnedTable({ learned, level, lo, hi }) {
   // only the per-level values of the regulation since 24.10. (older values per mode have no 'mhz' here)
   const rows = Object.entries(learned || {})
     .filter(([, v]) => v && typeof v.mhz === 'number')
     .sort((a, b) => Number(a[0]) - Number(b[0]))
   if (!rows.length) {
-    return <p className="text-muted-foreground">Lernwerte: noch keine (nach 15 min stabil bei 79–84 °C).</p>
+    return <p className="text-muted-foreground">Lernwerte: noch keine (nach 15 min stabil bei {lo}–{hi} °C).</p>
   }
   return (
     <div className="pt-1">
@@ -138,7 +147,7 @@ function LearnedTable({ learned, level }) {
 }
 
 /** Status of the Temperatur-Automatik as cards like the overview; the small line never repeats the big value. */
-function AutomationCards({ auto, st, roomTemp }) {
+function AutomationCards({ auto, st, roomTemp, lo, hi }) {
   const live = useLive()
   const sys = Object.values(live.data?.system || {}).find((d) => d && d.id === auto.device?.id) || {}
   const errorText = sys.error_rate_pct != null ? ' · Fehlerrate ' + fmt(sys.error_rate_pct, 2, ' %') : ''
@@ -154,7 +163,11 @@ function AutomationCards({ auto, st, roomTemp }) {
   const tmax = auto.now?.tmax
   const boards = (auto.now?.boards || []).filter((b) => b != null)
   const others = boards.length > 1 ? [...boards].sort((a, b) => b - a).slice(1) : []
-  const tempTone = tmax == null ? 'default' : tmax >= 88 ? 'danger' : tmax >= 85 ? 'warning' : 'default'
+  // colours like the table of high temperatures (Nutzer 27.10.): fan +1 from hi+1, +2 from hi+4, at most 96 °C;
+  // the Takt-Messung keeps the table for 84 °C
+  const top = measuring ? 84 : hi
+  const tempTone = tmax == null ? 'default' : tmax >= Math.min(top + 4, 96) ? 'danger'
+    : tmax >= Math.min(top + 1, 96) ? 'warning' : 'default'
   const tendency = tendencyText(st.tendency)
   // the level MinerSentinel set last; the controller confirms it only after > 5 s (read back after 10 s)
   const base = auto.level
@@ -167,13 +180,13 @@ function AutomationCards({ auto, st, roomTemp }) {
     st.phase === 'ausnahme' ? 'Ausnahme' + (running != null && running < base ? ' −' + (base - running) : '') : null,
     // after the Ausnahme the fan stays on the reduced level (plan, step 5); judged by the target: fan_set lags
     // behind until the controller has taken a new base level
-    st.heat ? 'Heizmodus bis 74 °C' : null,
+    st.heat ? 'Heizmodus bis ' + lo + ' °C' : null,
     !st.heat && st.phase === 'normal' && st.fan_target != null && st.fan_target < base
       ? 'reduziert nach Ausnahme −' + (base - st.fan_target) : null,
     st.fan_target != null && st.fan_target !== st.fan_set ? 'wird Stufe ' + st.fan_target : null,
     confirmed ? null : 'Rückmeldung folgt',
   ].filter(Boolean).join(' · ')
-  const phase = PHASE[st.phase] || { value: '—', sub: '' }
+  const phase = phases(lo, hi)[st.phase] || { value: '—', sub: '' }
   const pending = st.pending
     ? (st.pending.kind === 'modus' ? 'Modus ' + String(st.pending.value).padStart(2, '0') : 'Takt ' + st.pending.value + ' MHz') +
       ' wird übernommen' + (st.pending.attempt > 1 ? ' (Versuch ' + st.pending.attempt + ')' : '')
@@ -186,9 +199,9 @@ function AutomationCards({ auto, st, roomTemp }) {
     pending,
     windowOpen ? 'Beobachtungsfenster bis ' + clockTime(st.window_until, true) : null,
     st.calm && Date.parse(st.calm.until) > Date.now() ? 'Taktsperre bis ' + clockTime(st.calm.until) : null,
-    st.heat ? 'Heizmodus bis 74 °C (Lüfter Stufe 1)' : null,
+    st.heat ? 'Heizmodus bis ' + lo + ' °C (Lüfter Stufe 1)' : null,
     st.start_hold && Date.parse(st.start_hold.until) > Date.now()
-      ? 'keine Takterhöhung bis 79 °C, spätestens ' + clockTime(st.start_hold.until) : null,
+      ? 'keine Takterhöhung bis ' + lo + ' °C, spätestens ' + clockTime(st.start_hold.until) : null,
     st.learn_since ? 'lernt seit ' + clockTime(st.learn_since) : null,
   ].filter(Boolean).join(' · ') || phase.sub
   return (
@@ -200,7 +213,7 @@ function AutomationCards({ auto, st, roomTemp }) {
         value={fmt(tmax, 0, ' °C')}
         subtitle={[others.length ? 'weitere Boards ' + others.join(' / ') : null,
           st.t != null ? 'Regelwert ' + fmt(st.t, 0, ' °C') : null, tendency ? 'Tendenz ' + tendency : null,
-          'Ziel 79–84 °C'].filter(Boolean).join(' · ')} />
+          'Ziel ' + lo + '–' + hi + ' °C'].filter(Boolean).join(' · ')} />
       <MetricCard variant="hero" layout="icon-left" icon={Gauge} label="Takt laut Miner"
         value={fmt(st.clock_now, 0, ' MHz')}
         subtitle={'gesetzt ' + setText + (st.mode_key ? ' · ' + (MODE_LABEL[st.mode_key] || st.mode_key) : '') +
@@ -226,12 +239,13 @@ const RECENT_KINDS = ['takt', 'modus', 'luefter', 'hohe_temperatur', 'rueckkehr'
   'messung_ende', 'fehler', 'basisstufe', 'automatik_ein', 'automatik_aus', 'wartung_start', 'wartung_ende',
   'test_start', 'test_stufe', 'test_ziel', 'test_schritt', 'test_messung', 'test_ende', 'neustart_nutzer', 'taktsperre',
   'taktsperre_ende', 'startpause', 'startpause_ende', 'neustart_offline', 'neustart_online',
-  'einstellungsseite_aus', 'einstellungsseite_an', 'modus_wartet', 'heizmodus', 'heizmodus_ende']
+  'einstellungsseite_aus', 'einstellungsseite_an', 'modus_wartet', 'heizmodus', 'heizmodus_ende', 'zielbereich']
 const RECENT_COUNT = 20
 const RECENT_REFRESH_MS = 10000
 const RECENT_LABEL = { takt: 'Takt', modus: 'Modus', luefter: 'Lüfter', start: 'Start' }
 const FAN_KINDS = new Set(['luefter', 'hohe_temperatur', 'rueckkehr', 'ausnahme', 'ausnahme_ende'])
-const USER_KINDS = new Set(['basisstufe', 'automatik_ein', 'automatik_aus', 'wartung_start', 'wartung_ende'])
+const USER_KINDS = new Set(['basisstufe', 'automatik_ein', 'automatik_aus', 'wartung_start', 'wartung_ende',
+  'zielbereich'])
 
 function recentTone(e) {
   if (isError(e)) return 'text-destructive'
@@ -345,23 +359,23 @@ function RecentEvents() {
 const TEST_QUESTION = 'Takt ab Lernwert zweimal +30 MHz, je 2 min warten und 20 min messen, danach Normalbetrieb. ' +
   'Abbruch ab 96 °C.'
 
-// where the test is: Beginn (learned value, waits for ≤ 80 °C), then per step: clock being set, 2 min, measuring
-function testText(test) {
-  if (test.step === 0) return 'Beginn: wartet auf ≤ 80 °C'
+// where the test is: Beginn (learned value, waits for ≤ lo+1 °C), then per step: clock being set, 2 min, measuring
+function testText(test, lo) {
+  if (test.step === 0) return 'Beginn: wartet auf ≤ ' + (lo + 1) + ' °C'
   const head = 'Schritt ' + test.step + '/' + (test.steps || 2) + ' · ' + test.clock + ' MHz · '
   if (test.phase === 'warten') return head + 'wartet 2 min'
   if (test.phase === 'messen') return head + 'misst bis ' + (test.measure_ends ? clockTime(test.measure_ends) : '—')
   return head + 'Takt wird eingestellt'
 }
 
-function TempTest({ auto, st, onCommand, busy, msg }) {
+function TempTest({ auto, st, onCommand, busy, msg, lo }) {
   const [confirm, setConfirm] = useState(false)
   const test = st.test
   if (test || auto.temp_test_at) {
     return (
       <div className="flex flex-wrap items-center gap-2 rounded-md border border-amber-500/60 bg-amber-500/10 p-2">
         <p className="w-full text-sm font-medium text-amber-600 sm:w-auto sm:flex-1">
-          {test ? 'Temperatur-Test läuft: ' + testText(test) : 'Temperatur-Test startet …'}
+          {test ? 'Temperatur-Test läuft: ' + testText(test, lo) : 'Temperatur-Test startet …'}
         </p>
         <Button size="sm" variant="outline" className="h-9 w-full sm:h-8 sm:w-auto" disabled={busy}
           onClick={() => onCommand({ action: 'temp_test_abort' })}>
@@ -401,6 +415,7 @@ function AutomationPanel({ auto, here, port, level, locked, onCommand, busy, msg
   const [restart, setRestart] = useState({ busy: false, msg: null })
   if (!auto) return null
   const st = auto.state || {}
+  const [lo, hi] = targetOf(auto)
   // A15 neu starten (Nutzer 25.10.): the existing restart of the Over-Hot banner (ascset 0,reboot,0)
   const restartA15 = async () => {
     setConfirmRestart(false)
@@ -416,8 +431,8 @@ function AutomationPanel({ auto, here, port, level, locked, onCommand, busy, msg
     return (
       <div className="space-y-2 rounded-md border border-border/80 p-3">
         <p className="text-sm font-medium">Temperatur-Automatik · {auto.device?.name}</p>
-        <p className="text-xs text-muted-foreground">{LOGIC_TEXT}</p>
-        <p className="text-xs text-muted-foreground">{START_TEXT}</p>
+        <p className="text-xs text-muted-foreground">{logicText(lo, hi)}</p>
+        <p className="text-xs text-muted-foreground">{startText(lo, hi)}</p>
         <Button size="sm" disabled={locked || busy} onClick={() => onCommand({ action: 'enable', port, level })}>
           {busy && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
           Einschalten (Port {port}, Basisstufe {level})
@@ -495,9 +510,9 @@ function AutomationPanel({ auto, here, port, level, locked, onCommand, busy, msg
           auf die Stufe von vorher.
         </p>
       )}
-      <TempTest auto={auto} st={st} onCommand={onCommand} busy={busy} msg={msg} />
-      <AutomationCards auto={auto} st={st} roomTemp={roomTemp} />
-      <LearnedTable learned={auto.learned} level={auto.level} />
+      <TempTest auto={auto} st={st} onCommand={onCommand} busy={busy} msg={msg} lo={lo} />
+      <AutomationCards auto={auto} st={st} roomTemp={roomTemp} lo={lo} hi={hi} />
+      <LearnedTable learned={auto.learned} level={auto.level} lo={lo} hi={hi} />
       {st.ac_error && <p className="text-amber-600">AC Infinity: {st.ac_error}</p>}
       {st.last_error && <p className="text-destructive">Fehler: {st.last_error}</p>}
       <RecentEvents />
@@ -976,6 +991,7 @@ export default function FansPage() {
         </Button>
         {error && <span className="text-xs text-destructive">{error}</span>}
       </div>
+      {data?.automation && <TargetRangeCard automation={data.automation} onReload={load} />}
       {data?.configured && data.session?.test && <TestSession session={data.session} onChanged={load} />}
       {data && <Credentials configured={!!data.configured} onSaved={load} />}
       {data?.configured && data.devices.length === 0 && !(data.session?.test && !data.session.active) && (

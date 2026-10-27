@@ -2,23 +2,29 @@
 
 Regelungslogik nach dem Plan vom 24.10.2026 (docs/claude/Regelungslogik-Luefter-Takt.drawio):
   * Der Nutzer wählt die Lüfterstufe = Basisstufe. Die Automatik regelt den Takt, damit die Chiptemperatur
-    (heißester Chip, TMax) bei 79-84 °C liegt; in diesem Bereich keine Taktänderung (Nutzer 25.10.).
+    (heißester Chip, TMax) im Zielbereich L-U liegt; in diesem Bereich keine Taktänderung (Nutzer 25.10.).
+    Zielbereich wählt der Nutzer: L ab 76, U bis 92 °C, 2 bis 4 Grad (Nutzer 27.10.; vorher fest 79-84 °C).
   * Start (Basisstufe gewählt, Automatik ein, Neustart des Miners, nach Wartung, nach Takt-Messung, nach Over Hot):
     Starttakt = Lernwert der Basisstufe, sonst Initialwert (Stufe 1 = 100 ... Stufe 10 = 190 MHz).
-  * Schritt 1 - hohe Chiptemperatur (ab 85 °C): Lüfter = Basisstufe + 1/+2 (Korrekturphase), Takt -5 ... -100 MHz;
-    bei 85-87 °C nach dem Aufenthalt in 79-84 °C davor: unter 5 min -10, sonst -5 (Nutzer 26.10.; vorher 10 min).
-  * Schritt 2 - Korrekturphase: keine Plus-Schritte; zurück zur Basisstufe nach 1 min stabil in 80-84 °C oder unter 80 °C.
-  * Schritt 3 - Feintuning: unter 79 °C 70-78 +5; 60-69 +20; unter 60 +40 (kleinster Schritt 5 MHz, Nutzer 25.10.).
-    Taktsperre: war die letzte Taktänderung über 84 °C und fällt die Chiptemperatur unter 79 °C, 5 min keine Taktänderung
-    (einmal je Änderung; endet über 84 °C).
+  * Schritt 1 - hohe Chiptemperatur (ab U+1): Lüfter = Basisstufe + 1/+2 (Korrekturphase), Takt -5 ... -100 MHz;
+    bei U+1 bis U+3 nach dem Aufenthalt in L-U davor: unter 5 min -10, sonst -5 (Nutzer 26.10.; vorher 10 min).
+    Schwellen der Tabelle höchstens 96 °C: ab 96 °C immer Lüfter +2, Takt -100 (Nutzer 27.10.).
+  * Schritt 2 - Korrekturphase: keine Plus-Schritte; zurück zur Basisstufe nach 1 min stabil in L-U oder unter L
+    (Nutzer 27.10.; vorher 80-84 °C bzw. unter 80 °C).
+  * Schritt 3 - Feintuning: unter L ab L-9 +5; ab L-19 +20; darunter +40 (kleinster Schritt 5 MHz, Nutzer 25.10.).
+    Taktsperre: war die letzte Taktänderung über U und fällt die Chiptemperatur unter L, 5 min keine Taktänderung
+    (einmal je Änderung; endet über U).
   * Schritt 4 - Takt 100-440 MHz, Modus folgt dem Takt (Spielraum 20 MHz nach unten).
-  * Schritt 5 - Ausnahme: Takt 440 und 3 min stabil unter 70 °C -> Lüfter -1 (stufenweise); Ende über 70 °C.
-  * Heizmodus: bei jedem Start Lüfter Stufe 1, bis die Chiptemperatur 74 °C erreicht (Nutzer 26.10.).
-  * Startpause: nach Neustart, Wartung oder Over Hot keine Takterhöhung bis 79 °C, höchstens 10 min (kalte Chips,
+  * Schritt 5 - Ausnahme: Takt 440 und 3 min stabil unter L-9 -> Lüfter -1 (stufenweise); Ende über L-9.
+  * Heizmodus: bei jedem Start Lüfter Stufe 1, bis die Chiptemperatur L erreicht (Nutzer 26./27.10.).
+  * Startpause: nach Neustart, Wartung oder Over Hot keine Takterhöhung bis L, höchstens 10 min (kalte Chips,
     Nutzer 25.10.). „Nicht erreichbar“ rund um einen Neustart ist ein Neustart-Eintrag, kein Fehler.
-  * Lernen: 15 min in 79-84 °C (Nutzer 25.10.) bei unverändertem Lüfter -> Lernwert der aktiven Stufe.
+  * Lernen: 15 min in L-U (Nutzer 25.10.) bei unverändertem Lüfter -> Lernwert der aktiven Stufe; Lernwerte je
+    Zielbereich gemerkt (Nutzer 27.10.).
+  * Neuer Zielbereich: neue Grenzen sofort, kein Start (Nutzer 27.10.).
   * Jeder Zyklus und jede Entscheidung wird protokolliert (automation_journal.py).
-Takt-Messung (Takt-Tabellen): Taktregelung pausiert, der Lüfter reagiert nur nach Schritt 1/2.
+Takt-Messung (Takt-Tabellen): Taktregelung pausiert, der Lüfter reagiert nur nach Schritt 1/2 – fest wie bisher (ab 85 °C,
+Rückkehr in 80-84 °C), unabhängig vom Zielbereich (Nutzer 27.10.).
 Live only (MINERSENTINEL_ENV != Test). The AC Infinity client is the backend's (backend/api/acinfinity.py,
 mounted read-only), so both use the same stored session. The data-service writes only fan_automation.state.
 """
@@ -42,30 +48,32 @@ logger = logging.getLogger(__name__)
 STATE_VERSION = 2
 RUN_S = 5                     # one round per central reading
 # --- Vorgaben des Nutzers (Plan) ---
-T_LOW, T_HIGH = 80, 84        # Zieltemperatur
-T_HOT = 85                    # ab hier Tabelle „Hohe Chiptemperaturen“
-HIGH_TABLE = [(94, 2, 100), (92, 2, 80), (90, 2, 50), (88, 2, 30), (86, 1, None), (85, 1, None)]   # (ab °C, Lüfter +, Takt −)
-DWELL_S, DWELL_MINUS = 300, (10, 5)   # 85-87 °C (None): vorher unter 5 min in 79-84 °C → −10, sonst −5 (Nutzer 26.10.)
+# Zielbereich L-U (°C) kommt aus fan_automation.target_low/target_high (Nutzer 27.10.)
+HIGH_TABLE = [(10, 2, 100), (8, 2, 80), (6, 2, 50), (4, 2, 30), (2, 1, None), (1, 1, None)]   # (ab U + °C, Lüfter +, Takt −)
+HIGH_CAP = 96                 # jede Schwelle höchstens 96 °C: ab 96 °C immer Lüfter +2, Takt −100 (Nutzer 27.10.)
+ZB_START = (82, 85)           # Zielbereich bei Einführung (Startwert des Nutzers, 27.10.): die Lernwerte von davor gehören dazu
+CAL_LOW, CAL_HIGH, CAL_HOT = 80, 84, 85   # Takt-Messung: Lüfterschutz wie bisher, unabhängig vom Zielbereich (Nutzer 27.10.)
+DWELL_S, DWELL_MINUS = 300, (10, 5)   # U+1 bis U+3 (None): vorher unter 5 min in L-U → −10, sonst −5 (Nutzer 26.10.)
 START_CLOCK = {1: 100, 2: 110, 3: 120, 4: 130, 5: 140, 6: 150, 7: 160, 8: 170, 9: 180, 10: 190}
 CLOCK_MIN, CLOCK_MAX = 100, 440
 MODE_TOP = {4: 360, 3: 380, 2: 400, 1: 420, 0: 440}   # oberer Takt je Modus (mode 04 ... mode 00)
 MODE_DOWN_MARGIN = 20         # Spielraum nach unten: Wechsel in den tieferen Modus erst 20 MHz unter dessen Obergrenze (Nutzer 26.10.)
 WINDOW_S = 30                 # Beobachtungsfenster nach jeder Taktänderung
 TENDENCY_S = 30               # Tendenz: gegen den Wert von vor höchstens 30 s (bzw. bei der letzten Taktänderung)
-CALM_LOW = 79                 # 79-84 °C: keine Taktänderung (Nutzer 25.10.)
-CALM_AFTER_HOT_S = 5 * 60     # Taktsperre: letzte Taktänderung über 84 °C, dann unter 79 °C → 5 min keine Taktänderung
-PLUS_WAIT_FROM, PLUS_WAIT_S = 75, 3 * 60   # bei 75-78 °C: nächste Takterhöhung erst 3 min nach der letzten (Nutzer 26.10.)
-HEAT_FAN, HEAT_UNTIL = 1, CALM_LOW - 5      # Heizmodus beim Start: Lüfter Stufe 1, bis 5 °C unter 79 °C (Nutzer 26.10.)
-START_HOLD_S = 10 * 60        # Startpause: nach einem Start mit kalten Chips keine Takterhöhung bis 79 °C, höchstens 10 min
+CALM_AFTER_HOT_S = 5 * 60     # Taktsperre: letzte Taktänderung über U, dann unter L → 5 min keine Taktänderung
+PLUS_5_FROM, PLUS_20_FROM = 9, 19          # unter L: ab L−9 °C +5, ab L−19 °C +20, darunter +40 MHz (Nutzer 25./27.10.)
+PLUS_WAIT_FROM, PLUS_WAIT_S = 4, 3 * 60    # ab L−4 °C: nächste Takterhöhung erst 3 min nach der letzten (Nutzer 26./27.10.)
+HEAT_FAN = 1                  # Heizmodus beim Start: Lüfter Stufe 1, bis L (Nutzer 27.10.; vorher 74 °C)
+START_HOLD_S = 10 * 60        # Startpause: nach einem Start mit kalten Chips keine Takterhöhung bis L, höchstens 10 min
 RESTART_EXPECT_S = 5 * 60     # Neustart über den Knopf: so lange gilt „nicht erreichbar“ als erwartet (Nutzer 25.10.)
 RESTART_RELABEL_S = 3 * 60    # Neustart auf anderem Weg: „antwortet nicht/wieder“ der 3 min davor gehören zum Neustart
 WEB_DOWN_LOG_S = 2 * 60       # Einstellungsseite antwortet nicht (Mining-Schnittstelle ok): Eintrag erst nach 2 min
-RETURN_STABLE_S = 60          # Rückkehr zur Basisstufe nach 1 min stabil in 80-84 °C
+RETURN_STABLE_S = 60          # Rückkehr zur Basisstufe nach 1 min stabil in L-U (Nutzer 27.10.; vorher 80-84 °C)
 FAN_DOWN_DELAY_S = 30         # niedrigere Korrekturstufe erst, wenn die Tabelle sie 30 s lang verlangt
-EXC_BELOW = 70                # Ausnahme: unter 70 °C ...
+EXC_BELOW = 9                 # Ausnahme: unter L−9 °C ...
 EXC_STABLE_S = 180            # ... 3 min stabil (Nutzer 24.10.: 3 min für die Ausnahme)
 LEARN_S = 15 * 60             # Lernperiode
-LEARN_OUT_S = 60              # Ausflug aus 79-84 °C bis 60 s bricht die Lernperiode nicht ab (Nutzer 25.10.)
+LEARN_OUT_S = 60              # Ausflug aus L-U bis 60 s bricht die Lernperiode nicht ab (Nutzer 25.10.)
 FAN_MIN, FAN_MAX = 1, 10
 # --- bestehende Technik (unverändert übernommen) ---
 RESEND_S = 20                 # Modus-/Taktbefehl ohne Übernahme: erneut senden (wie Takt-Tabellen)
@@ -76,7 +84,7 @@ FAN_CONFIRM_S = 10            # the controller reports a new level only after > 
 FAN_WRITE_GAP_S = 20
 TEMP_KEEP_S = 60
 OWN_SWITCH_S = 120            # so lange nach einem eigenen Modusbefehl gilt ein Neustart als Folge davon
-TEST_START_AT = 80            # Temperatur-Test (Nutzer 25.10.): Beginn am Lernwert, warten bis Chiptemperatur ≤ 80 °C ...
+TEST_START_AT = 1             # Temperatur-Test (Nutzer 25.10.): Beginn am Lernwert, warten bis Chiptemperatur ≤ L+1 ...
 TEST_STEP_MHZ, TEST_STEPS = 30, 2     # ... dann zweimal +30 MHz ...
 TEST_WAIT_S = 120             # ... je nach Übernahme 2 min warten ...
 TEST_MEASURE_S = 20 * 60      # ... und 20 min messen
@@ -155,18 +163,20 @@ def points_for(stock, mhz):
     return [min(max(int(round(p * factor)), int(p * 0.15)), p) for p in stock]
 
 
-def high_rule(t):
-    for limit, fan_plus, minus in HIGH_TABLE:
+def high_rule(t, hi):
+    """Tabelle „Hohe Chiptemperaturen“ zur Obergrenze U = hi; jede Schwelle höchstens 96 °C, die stärkste zuerst."""
+    for plus, fan_plus, minus in HIGH_TABLE:
+        limit = min(hi + plus, HIGH_CAP)
         if t >= limit:
             return limit, fan_plus, minus
     return None
 
 
-def plus_size(t):
-    """Plus-Schritt unter 79 °C; kleinster Taktschritt 5 MHz (Nutzer 25.10.)."""
-    if t >= 70:
+def plus_size(t, lo):
+    """Plus-Schritt unter L = lo; kleinster Taktschritt 5 MHz (Nutzer 25.10.)."""
+    if t >= lo - PLUS_5_FROM:
         return 5
-    if t >= 60:
+    if t >= lo - PLUS_20_FROM:
         return 20
     return 40
 
@@ -252,6 +262,7 @@ class Round:
         self.row, self.now, self.ac, self.j = row, now, ac, journal
         self.st = dict(row['state'] or {})
         self.base = int(row['level'])
+        self.lo, self.hi = int(row['target_low']), int(row['target_high'])   # Zielbereich L-U (Nutzer 27.10.)
         self.decisions = []
         self.cycle_log = None
         self.m = None
@@ -268,6 +279,13 @@ class Round:
         self.decisions.append(text)
         if log_id and not self.cycle_log:
             self.cycle_log = log_id
+
+    def protection(self):
+        """Lüfterschutz (Schritt 1/2) als (L, U, ab hier hohe Chiptemperatur): Zielbereich L-U, ab U+1; während der
+        Takt-Messung fest wie bisher 80/84/85 °C (Nutzer 27.10.)."""
+        if self.st.get('cal'):
+            return CAL_LOW, CAL_HIGH, CAL_HOT
+        return self.lo, self.hi, self.hi + 1
 
     def phase(self):
         st = self.st
@@ -360,11 +378,11 @@ class Round:
         st.update({'corr': False, 'corr_dwell_s': None, 'exc_active': False, 'clock_set': target, 'queue': [], 'window_until': None,
                    'band_since': None, 'cold_since': None, 'down_since': None,
                    'clock_changed_at': _iso(self.now), 'clock_changed_t': self.t, 'start_reason': None})
-        # Heizmodus (Nutzer 26.10.): Lüfter Stufe 1, bis die Chiptemperatur 74 °C erreicht; schon so warm: Basisstufe
+        # Heizmodus (Nutzer 26./27.10.): Lüfter Stufe 1, bis die Chiptemperatur L erreicht; schon so warm: Basisstufe
         # (nicht während eines Temperatur-Tests: dort Lüfter auf der Basisstufe)
-        st['heat'] = not st.get('test') and (self.t is None or self.t < HEAT_UNTIL)
+        st['heat'] = not st.get('test') and (self.t is None or self.t < self.lo)
         if st['heat']:
-            self.set_fan_target(HEAT_FAN, 'Heizmodus: Stufe %d bis %d °C' % (HEAT_FAN, HEAT_UNTIL))
+            self.set_fan_target(HEAT_FAN, 'Heizmodus: Stufe %d bis %d °C' % (HEAT_FAN, self.lo))
         else:
             self.set_fan_target(self.base, 'Start: Basisstufe %d' % self.base)
         self.end_learning(None)
@@ -381,16 +399,17 @@ class Round:
                                                                         st['fan_target']))
         self.decide('Start (%s): %d MHz' % (reason, target), log_id)
         if st['heat']:
-            text = 'Heizmodus: Lüfter Stufe %d bis %d °C' % (HEAT_FAN, HEAT_UNTIL)
+            text = 'Heizmodus: Lüfter Stufe %d bis %d °C' % (HEAT_FAN, self.lo)
             self.base_event(kind='heizmodus', trigger=text, fan_old=old_fan, fan_new=HEAT_FAN,
-                            details={'bis': HEAT_UNTIL, 'basisstufe': self.base})
+                            details={'bis': self.lo, 'basisstufe': self.base})
             self.note(text + '.')
         if st.pop('start_cold', False):
             # die Chips waren aus (Neustart, Wartung, Over Hot – auch wenn in derselben Runde ein anderer Startgrund
             # dazukam): der erste Messwert ist kalt (25.10.: 26 °C → +40 MHz → 85 °C)
             until = self.now + timedelta(seconds=START_HOLD_S)
             st['start_hold'] = {'since': _iso(self.now), 'until': _iso(until)}
-            text = 'Startpause: keine Takterhöhung bis 79 °C, spätestens %s' % until.astimezone(LOCAL_TZ).strftime('%H:%M')
+            text = 'Startpause: keine Takterhöhung bis %d °C, spätestens %s' % (self.lo,
+                                                                               until.astimezone(LOCAL_TZ).strftime('%H:%M'))
             self.base_event(kind='startpause', trigger=text, details={'bis': _iso(until), 'grund': reason})
             self.note(text + '.')
 
@@ -466,7 +485,7 @@ class Round:
                     continue
                 if not m.get('conf_fresh', True):
                     # der Umschaltbefehl braucht die Einstellungsseite (Pool-Felder): nie mit alten Daten. Er wartet
-                    # außerhalb der Folge, die Taktbefehle laufen weiter – auch weitere Absenkungen ab 85 °C (Nutzer 26.10.)
+                    # außerhalb der Folge, die Taktbefehle laufen weiter – auch weitere Absenkungen ab U+1 (Nutzer 26.10.)
                     st['queue'].pop(0)
                     current = level_of(m['mode_key'])
                     if current is not None:
@@ -554,7 +573,7 @@ class Round:
 
     def clock_done(self, cmd):
         """Takt übernommen: Beobachtungsfenster beginnt. Eine übernommene Takterhöhung der Regelung startet die 3 min für
-        75-78 °C – ab der Übernahme, und nur wenn der Takt wirklich stieg (Review 26.10.)."""
+        L−4 bis L−1 – ab der Übernahme, und nur wenn der Takt wirklich stieg (Review 26.10.)."""
         st = self.st
         st['window_until'] = _iso(self.now + timedelta(seconds=WINDOW_S))
         if (cmd.get('step') or 0) > 0 and cmd.get('from') is not None and cmd['value'] > cmd['from']:
@@ -701,16 +720,17 @@ class Round:
 
     def learn(self):
         """Lernperiode 15 min auf derselben Lüfterstufe. Taktschritte setzen sie nicht zurück, kurze Ausflüge
-        aus 79-84 °C bis 60 s auch nicht (Nutzer 25.10.: sonst entstand nie ein Lernwert). Neu beginnt sie bei Wechsel der
-        Lüfterstufe, Moduswechsel, hoher Chiptemperatur (ab 85 °C) oder länger als 60 s außerhalb 79-84 °C (Lernbereich
+        aus L-U bis 60 s auch nicht (Nutzer 25.10.: sonst entstand nie ein Lernwert). Neu beginnt sie bei Wechsel der
+        Lüfterstufe, Moduswechsel, hoher Chiptemperatur (ab U+1) oder länger als 60 s außerhalb L-U (Lernbereich
         = Bereich ohne Taktänderung, Nutzer 25.10.).
         Gespeichert: Mittelwert des gesetzten Takts und der Chiptemperatur der 15 min."""
         st, t, now = self.st, self.t, self.now
+        lo, hi = self.lo, self.hi
         level = st.get('fan_target')
         mode_cmd = any(c.get('kind') == 'modus' for c in (st.get('queue') or [])) or \
             (st.get('pending') or {}).get('kind') == 'modus' or st.get('settle')
         reason = None
-        if t >= T_HOT:
+        if t > hi:
             reason = 'Chiptemperatur %d °C (hohe Chiptemperatur)' % t
         elif st.get('corr'):
             reason = 'Korrekturphase'
@@ -720,22 +740,22 @@ class Round:
             reason = 'Moduswechsel'
         elif st.get('learn_since') and st.get('learn_level') != level:
             reason = 'Lüfterstufe geändert'
-        if not (CALM_LOW <= t <= T_HIGH) and not reason:
+        if not (lo <= t <= hi) and not reason:
             st['learn_out_since'] = st.get('learn_out_since') or _iso(now)
             if _age(st['learn_out_since'], now) > LEARN_OUT_S:
-                reason = 'Chiptemperatur länger als 60 s außerhalb 79–84 °C (%d °C)' % t
-        elif CALM_LOW <= t <= T_HIGH:
+                reason = 'Chiptemperatur länger als 60 s außerhalb %d–%d °C (%d °C)' % (lo, hi, t)
+        elif lo <= t <= hi:
             st['learn_out_since'] = None
         if reason:
             self.end_learning(reason)
             st['learn_out_since'] = None
             return
         if not st.get('learn_since'):
-            if not (CALM_LOW <= t <= T_HIGH):
+            if not (lo <= t <= hi):
                 return                                   # eine Lernperiode beginnt nur im Zielbereich
             st.update({'learn_since': _iso(now), 'learn_level': level, 'learn_sum': 0, 'learn_n': 0,
                        'learn_clock_sum': 0.0, 'learn_out_since': None})
-            self.base_event(kind='lernen_start', trigger='Chiptemperatur %d °C in 79–84 °C' % t,
+            self.base_event(kind='lernen_start', trigger='Chiptemperatur %d °C in %d–%d °C' % (t, lo, hi),
                             details={'takt': st.get('clock_set'), 'luefterstufe': level})
         st['learn_sum'] += t
         st['learn_clock_sum'] = (st.get('learn_clock_sum') or 0.0) + float(st.get('clock_set') or 0)
@@ -755,6 +775,30 @@ class Round:
             self.note('Lernwert Stufe %s: %.1f MHz (Mittel), Ø %.1f °C (%d. Mal).' % (key, mhz, avg_t, entry['count']))
             self.decide('Lernwert gespeichert', log_id)
             st.update({'learn_since': _iso(now), 'learn_sum': 0, 'learn_n': 0, 'learn_clock_sum': 0.0})
+
+    # --- Zielbereich (Nutzer 27.10.)
+    def target_range(self):
+        """Neuer Zielbereich: neue Grenzen sofort – kein Start, kein Taktsprung, kein Heizmodus; Korrekturphase,
+        Taktsperre, Heizmodus und Startpause laufen mit den neuen Grenzen weiter. Lernwerte je Bereich gemerkt: zurück
+        im alten Bereich gelten wieder seine Lernwerte, ein neuer beginnt mit dem Initialwert. Lernperiode endet,
+        Aufenthalt in L-U wird neu gemessen. Ohne gemerkten Bereich (Stand vor dem 27.10.): die Lernwerte gehören zum
+        Startwert 82–85 – auch wenn bis zur ersten Runde schon ein anderer Bereich gewählt wurde."""
+        st = self.st
+        new, old = [self.lo, self.hi], st.get('zb')
+        if old is None:
+            old = st['zb'] = list(ZB_START)
+        if list(old) == new:
+            return
+        # neues dict: row['state'] bleibt bei einem Fehler später in der Runde unverändert (sonst ginge ein Archiv verloren)
+        archive = dict(st.get('learned_zb') or {})
+        archive['%d-%d' % tuple(old)] = st.get('learned') or {}
+        st['learned'] = archive.pop('%d-%d' % tuple(new), {})
+        st['learned_zb'] = archive
+        self.end_learning('Zielbereich geändert')
+        st['learn_out_since'] = None
+        st['band_in'] = st['band_dwell_s'] = None
+        st['zb'] = new
+        self.note('Zielbereich %d–%d °C übernommen.' % tuple(new))
 
     # --- Neustart sauber anzeigen (Nutzer 25.10.)
     def restart_expected(self):
@@ -823,12 +867,13 @@ class Round:
     def high_temperature(self):
         """Schritt 1: Lüfter = Basisstufe + 1/+2 sofort (niedrigere Korrekturstufe erst nach 30 s), Takt − Tabellenwert:
         beim Eintritt in die Korrekturphase sofort, danach erst nach dem Beobachtungsfenster und nur bei nicht
-        fallender Tendenz."""
+        fallender Tendenz. Tabelle zur Obergrenze U (Takt-Messung: fest 84 °C)."""
         st, t, now = self.st, self.t, self.now
-        limit, fan_plus, minus = high_rule(t)
+        hi = self.protection()[1]
+        limit, fan_plus, minus = high_rule(t, hi)
         first = not st.get('corr')
         if first:
-            # Aufenthalt in 79-84 °C vor dem Überschreiten von 84 °C: gilt für die ganze Korrekturphase (Nutzer 25.10.)
+            # Aufenthalt in L-U vor dem Überschreiten von U: gilt für die ganze Korrekturphase (Nutzer 25.10.)
             st['corr_dwell_s'] = st.get('band_dwell_s') or 0
         dwell = st.get('corr_dwell_s') or 0
         if minus is None:
@@ -863,25 +908,28 @@ class Round:
             return
         if first or (self.window_over() and not self.busy() and st['tendency'] >= 0):
             why = 'Chiptemperatur %d °C (ab %d °C): Takt −%d MHz' % (t, limit, minus)
-            if high_rule(t)[2] is None:
-                why = 'Chiptemperatur %d °C nach %d min in 79–84 °C: Takt −%d MHz' % (t, int(dwell // 60), minus)
+            if high_rule(t, hi)[2] is None:
+                why = 'Chiptemperatur %d °C nach %d min in %d–%d °C: Takt −%d MHz' % (t, int(dwell // 60), self.lo,
+                                                                                      self.hi, minus)
             if self.queue_clock(int(round(old)) - minus, why, hot=True, step=-minus):
                 self.note('Chiptemperatur %d °C: Takt %s → %d MHz.' % (t, old, int(round(old)) - minus))
 
     def correction_phase(self):
-        """Schritt 2: in der Korrekturphase zurück zur Basisstufe (1 min stabil in 80-84 °C oder unter 80 °C)."""
+        """Schritt 2: in der Korrekturphase zurück zur Basisstufe (1 min stabil in L-U oder unter L, Nutzer 27.10.;
+        Takt-Messung: fest 80-84 °C bzw. unter 80 °C)."""
         st, t, now = self.st, self.t, self.now
-        if t < T_LOW:
-            self.stability_end('rueckkehr', 'erfuellt', 'Chiptemperatur unter 80 °C')
-            self.return_to_base('Chiptemperatur %d °C unter 80 °C' % t)
+        lo, hi, _ = self.protection()
+        if t < lo:
+            self.stability_end('rueckkehr', 'erfuellt', 'Chiptemperatur unter %d °C' % lo)
+            self.return_to_base('Chiptemperatur %d °C unter %d °C' % (t, lo))
             return
         if not st.get('band_since'):
             st['band_since'] = _iso(now)
-            self.base_event(kind='stabilitaet_start', trigger='Rückkehr: Chiptemperatur %d °C in 80–84 °C' % t,
+            self.base_event(kind='stabilitaet_start', trigger='Rückkehr: Chiptemperatur %d °C in %d–%d °C' % (t, lo, hi),
                             details={'pruefung': 'rueckkehr', 'dauer_s': RETURN_STABLE_S})
         elif _age(st['band_since'], now) >= RETURN_STABLE_S:
-            self.stability_end('rueckkehr', 'erfuellt', '1 min stabil in 80–84 °C')
-            self.return_to_base('1 min stabil in 80–84 °C')
+            self.stability_end('rueckkehr', 'erfuellt', '1 min stabil in %d–%d °C' % (lo, hi))
+            self.return_to_base('1 min stabil in %d–%d °C' % (lo, hi))
 
     def stability_end(self, check, result, why):
         st = self.st
@@ -894,7 +942,7 @@ class Round:
     def return_to_base(self, why):
         st = self.st
         st['corr'] = False
-        st['corr_dwell_s'] = None                        # beim nächsten Überschreiten von 84 °C neu gemessen
+        st['corr_dwell_s'] = None                        # beim nächsten Überschreiten von U neu gemessen
         st['band_since'] = None
         st['down_since'] = None
         self.set_fan_target(self.base, 'Rückkehr zur Basisstufe: ' + why)
@@ -903,41 +951,41 @@ class Round:
         self.decide('Rückkehr zur Basisstufe', log_id)
 
     def fine_tuning(self):
-        """Schritt 3: 79-84 °C keine Taktänderung; darunter +5/+20/+40 MHz (nicht in der Korrekturphase, nicht bei
-        steigender Tendenz, nicht während der Taktsperre oder der Startpause; bei 75-78 °C erst 3 min nach der letzten
-        Takterhöhung)."""
+        """Schritt 3: L-U keine Taktänderung; darunter +5/+20/+40 MHz (nicht in der Korrekturphase, nicht bei
+        steigender Tendenz, nicht während der Taktsperre oder der Startpause; bei L−4 bis L−1 erst 3 min nach der
+        letzten Takterhöhung)."""
         st, t, d = self.st, self.t, self.st['tendency']
         old = st.get('clock_set')
-        if old is None or t >= CALM_LOW or st.get('corr') or st.get('calm') or d > 0:
+        if old is None or t >= self.lo or st.get('corr') or st.get('calm') or d > 0:
             return
         if st.get('start_hold'):
             return                                       # Startpause nach einem Start mit kalten Chips
         current = level_of(self.m['mode_key'])
         if st.get('mode_wait') is not None and current is not None and old >= MODE_TOP[current]:
             return                                       # mehr geht erst mit dem wartenden Moduswechsel
-        if t >= PLUS_WAIT_FROM and _age(st.get('last_plus_at'), self.now) < PLUS_WAIT_S:
-            return                                       # 75-78 °C: 3 min nach der letzten Takterhöhung warten
+        if t >= self.lo - PLUS_WAIT_FROM and _age(st.get('last_plus_at'), self.now) < PLUS_WAIT_S:
+            return                                       # L−4 bis L−1: 3 min nach der letzten Takterhöhung warten
         old = int(round(old))
         if old < CLOCK_MAX:
-            size = plus_size(t)
+            size = plus_size(t, self.lo)
             self.queue_clock(old + size, 'Chiptemperatur %d °C: +%d MHz' % (t, size), step=size)
 
     def calm_after_hot(self):
-        """Taktsperre (Nutzer 25.10.): war die letzte Taktänderung über 84 °C und fällt die Chiptemperatur unter 79 °C,
-        5 min keine Taktänderung – gezählt ab dem ersten Unterschreiten, einmal je Taktänderung; über 84 °C endet sie."""
+        """Taktsperre (Nutzer 25.10.): war die letzte Taktänderung über U und fällt die Chiptemperatur unter L,
+        5 min keine Taktänderung – gezählt ab dem ersten Unterschreiten, einmal je Taktänderung; über U endet sie."""
         st, t, now = self.st, self.t, self.now
         calm = st.get('calm')
         if calm:
-            if t > T_HIGH:
+            if t > self.hi:
                 st['calm'] = None
-                self.base_event(kind='taktsperre_ende', trigger='Taktsperre beendet (Chiptemperatur %d °C, über 84 °C)' % t,
-                                details={'seit': calm['since']})
+                self.base_event(kind='taktsperre_ende', trigger='Taktsperre beendet (Chiptemperatur %d °C, über %d °C)'
+                                % (t, self.hi), details={'seit': calm['since']})
                 self.note('Taktsperre beendet (%d °C).' % t)
             elif _age(calm['until'], now) >= 0:
                 st['calm'] = None                        # abgelaufen: der Eintrag zum Beginn nennt das Ende
             return
         changed_at = st.get('clock_changed_at')
-        if (t < CALM_LOW and (st.get('clock_changed_t') or 0) > T_HIGH and changed_at
+        if (t < self.lo and (st.get('clock_changed_t') or 0) > self.hi and changed_at
                 and st.get('calm_for') != changed_at):
             until = now + timedelta(seconds=CALM_AFTER_HOT_S)
             st['calm'] = {'since': _iso(now), 'until': _iso(until)}
@@ -948,26 +996,27 @@ class Round:
             self.note(text + '.')
 
     def exception(self):
-        """Schritt 5: Takt 440 und 3 min stabil unter 70 °C → aktive Lüfterstufe − 1; Ende über 70 °C."""
+        """Schritt 5: Takt 440 und 3 min stabil unter L−9 → aktive Lüfterstufe − 1; Ende über L−9."""
         st, t, now = self.st, self.t, self.now
-        if st.get('exc_active') and t > EXC_BELOW:
+        below = self.lo - EXC_BELOW
+        if st.get('exc_active') and t > below:
             st['exc_active'] = False
-            self.base_event(kind='ausnahme_ende', trigger='Chiptemperatur %d °C über 70 °C' % t,
+            self.base_event(kind='ausnahme_ende', trigger='Chiptemperatur %d °C über %d °C' % (t, below),
                             details={'luefterstufe_bleibt': st.get('fan_target')})
             self.note('Ausnahme beendet (%d °C), Lüfter bleibt auf Stufe %s.' % (t, st.get('fan_target')))
         at_max = int(round(st.get('clock_set') or 0)) >= CLOCK_MAX and not self.busy()
-        if at_max and t < EXC_BELOW:
+        if at_max and t < below:
             if not st.get('cold_since'):
                 st['cold_since'] = _iso(now)
                 self.base_event(kind='stabilitaet_start', trigger='Ausnahme: Takt 440 MHz, Chiptemperatur %d °C' % t,
                                 details={'pruefung': 'ausnahme', 'dauer_s': EXC_STABLE_S})
             elif _age(st['cold_since'], now) >= EXC_STABLE_S:
                 active = st.get('fan_target') or self.base
-                self.stability_end('ausnahme', 'erfuellt', '3 min stabil unter 70 °C')
+                self.stability_end('ausnahme', 'erfuellt', '3 min stabil unter %d °C' % below)
                 if active > FAN_MIN:
-                    self.set_fan_target(active - 1, 'Ausnahme: 440 MHz und 3 min unter 70 °C')
+                    self.set_fan_target(active - 1, 'Ausnahme: 440 MHz und 3 min unter %d °C' % below)
                     st['exc_active'] = True
-                    log_id = self.base_event(kind='ausnahme', trigger='Takt 440 MHz, 3 min stabil unter 70 °C',
+                    log_id = self.base_event(kind='ausnahme', trigger='Takt 440 MHz, 3 min stabil unter %d °C' % below,
                                              fan_old=active, fan_new=active - 1)
                     self.note('Ausnahme: Lüfter Stufe %d → %d.' % (active, active - 1))
                     self.decide('Ausnahme: Lüfter −1', log_id)
@@ -976,7 +1025,7 @@ class Round:
                                     details={'pruefung': 'ausnahme', 'dauer_s': EXC_STABLE_S})
         elif st.get('cold_since'):
             self.stability_end('ausnahme', 'abgebrochen',
-                               'Chiptemperatur %d °C' % t if t >= EXC_BELOW else 'Takt nicht mehr 440 MHz')
+                               'Chiptemperatur %d °C' % t if t >= below else 'Takt nicht mehr 440 MHz')
 
     def end_heat(self, why):
         """Heizmodus beenden: Lüfter auf die Basisstufe (Nutzer 26.10.)."""
@@ -1011,15 +1060,15 @@ class Round:
 
     def rules(self):
         st = self.st
-        if st.get('heat') and self.t >= HEAT_UNTIL:
-            self.end_heat('%d °C erreicht' % HEAT_UNTIL)
+        if st.get('heat') and self.t >= self.lo:
+            self.end_heat('%d °C erreicht' % self.lo)
         hold = st.get('start_hold')
-        if hold and (self.t >= CALM_LOW or _age(hold['until'], self.now) >= 0):
-            st['start_hold'] = None                      # Startpause endet bei 79 °C, spätestens nach 10 min
+        if hold and (self.t >= self.lo or _age(hold['until'], self.now) >= 0):
+            st['start_hold'] = None                      # Startpause endet bei L, spätestens nach 10 min
             since = hold.get('since') or _iso(datetime.fromisoformat(hold['until']) - timedelta(seconds=START_HOLD_S))
             mins = int(_age(since, self.now) // 60)
-            if self.t >= CALM_LOW:
-                text = 'Startpause beendet: 79 °C erreicht (nach %d min)' % mins
+            if self.t >= self.lo:
+                text = 'Startpause beendet: %d °C erreicht (nach %d min)' % (self.lo, mins)
             else:
                 text = 'Startpause beendet: 10 min vorbei (Chiptemperatur %d °C)' % self.t
             self.base_event(kind='startpause_ende', trigger=text, details={'seit': since})
@@ -1029,7 +1078,7 @@ class Round:
             return
         if not st.get('cal'):
             self.calm_after_hot()                        # Takt-Messung: Taktregelung pausiert
-        if self.t >= T_HOT:
+        if self.t >= self.protection()[2]:               # ab U+1 (Takt-Messung: ab 85 °C)
             # Sicherheit zuerst: beim Eintritt in die Korrekturphase ersetzt die Taktsenkung einen laufenden Befehl
             if not st.get('corr') and not st.get('cal') and (st.get('queue') or st.get('pending')):
                 self.drop_pending('abgelöst: hohe Chiptemperatur')
@@ -1048,7 +1097,7 @@ class Round:
 
     # --- Temperatur-Test (Nutzer 25.10., v2.0.6)
     def temp_test(self, valid, over_hot, cal):
-        """Takt auf den Lernwert der Basisstufe, warten bis die Chiptemperatur ≤ 80 °C ist; dann zweimal +30 MHz (Modus
+        """Takt auf den Lernwert der Basisstufe, warten bis die Chiptemperatur ≤ L+1 ist; dann zweimal +30 MHz (Modus
         nach der allgemeinen Regel), je nach Übernahme 2 min warten und 20 min messen; danach Normalbetrieb (Start mit
         dem Lernwert). Während des Tests fester Takt, Lüfter auf der Basisstufe, kein Lernen. Abbruch ab 96 °C, bei
         Over Hot, Takt-Messung, Neustart des Miners oder Wechsel der Basisstufe; danach gelten die normalen Regeln."""
@@ -1102,10 +1151,10 @@ class Round:
         st['test'] = {'started': started.isoformat(), 'step': 0, 'steps': TEST_STEPS, 'clock': clock,
                       'phase': 'einstellen', 'wait_ends': None, 'measure_from': None, 'measure_ends': None}
         self.queue_clock(clock, why)
-        self.note(why + ', dann warten bis ≤ %d °C.' % TEST_START_AT)
+        self.note(why + ', dann warten bis ≤ %d °C.' % (self.lo + TEST_START_AT))
 
     def test_rules(self):
-        """Ablauf des Temperatur-Tests (nach der Übernahme-Prüfung der Runde): einstellen → (Beginn: warten bis ≤ 80 °C)
+        """Ablauf des Temperatur-Tests (nach der Übernahme-Prüfung der Runde): einstellen → (Beginn: warten bis ≤ L+1)
         bzw. 2 min warten → 20 min messen → nächster Schritt; das Ende nach dem letzten Schritt prüft temp_test."""
         st, now = self.st, self.now
         tt = st['test']
@@ -1117,7 +1166,7 @@ class Round:
             else:
                 tt.update({'phase': 'warten', 'wait_ends': _iso(now + timedelta(seconds=TEST_WAIT_S))})
                 self.note('Temperatur-Test Schritt %d/%d: %d MHz übernommen, 2 min warten.' % (tt['step'], TEST_STEPS, tt['clock']))
-        if tt['phase'] == 'beginn' and self.t <= TEST_START_AT:
+        if tt['phase'] == 'beginn' and self.t <= self.lo + TEST_START_AT:
             self.test_step(1)
         elif tt['phase'] == 'warten' and _age(tt['wait_ends'], now) >= 0:
             ends = now + timedelta(seconds=TEST_MEASURE_S)
@@ -1159,7 +1208,7 @@ class Round:
         if st.pop('off', False) or st.get('v') != STATE_VERSION:
             # Automatik ein bzw. Umstellung auf die neue Regelung (startet ohne Lernwerte, Plan Kapitel 7)
             keep = ('log', 'stock', 'fan_set', 'fan_read', 'fan_read_at', 'fan_set_at', 'elapsed', 'mode_key',
-                    'maint', 'maint_ended_at', 'offline', 'over_hot', 'test', 'restart_req_seen')
+                    'maint', 'maint_ended_at', 'offline', 'over_hot', 'test', 'restart_req_seen', 'zb', 'learned_zb')
             new = {k: st[k] for k in keep if k in st}
             new['learned'] = (st.get('learned') or {}) if st.get('v') == STATE_VERSION else {}
             if new.get('stock') is None:
@@ -1168,6 +1217,7 @@ class Round:
                         'fan_target': st.get('fan_set') or self.base})
             st = self.st = new
             self.note('Automatik ein (Basisstufe %d).' % self.base)
+        self.target_range()
 
         req = row.get('restart_req_at')
         if req is not None and str(req) != st.get('restart_req_seen'):
@@ -1296,15 +1346,15 @@ class Round:
             st['t'] = self.t
             st['tendency'], self.ref = self.tendency()
             temps.append([_iso(now), self.t])
-            # Aufenthalt in 79-84 °C seit dem letzten Eintritt (von unten oder oben); beim ersten Wert über 84 °C gemessen
-            if self.t > T_HIGH:
+            # Aufenthalt in L-U seit dem letzten Eintritt (von unten oder oben); beim ersten Wert über U gemessen
+            if self.t > self.hi:
                 if not st.get('above'):
                     st['band_dwell_s'] = _age(st['band_in'], now) if st.get('band_in') else 0
                     st['above'] = True
                 st['band_in'] = None
             else:
                 st['above'] = False
-                st['band_in'] = (st.get('band_in') or _iso(now)) if self.t >= CALM_LOW else None
+                st['band_in'] = (st.get('band_in') or _iso(now)) if self.t >= self.lo else None
             self.update_thermal()
         if st.get('fan_target') is None:
             st['fan_target'] = st.get('fan_set') or self.base
@@ -1391,6 +1441,7 @@ def run_fan_automation(database_url, ac=None):
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 "SELECT f.id, f.enabled, f.ac_dev_id, f.ac_port, f.level, f.level_at, f.maintenance_at, f.temp_test_at, f.state, "
+                "f.target_low, f.target_high, "
                 "d.id AS device_id, d.ip_address, d.port, "
                 "(SELECT max(l.recorded_at) FROM automation_log l WHERE l.device_id = d.id AND l.kind = 'neustart_nutzer') "
                 "AS restart_req_at, "

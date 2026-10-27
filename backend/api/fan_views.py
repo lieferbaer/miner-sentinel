@@ -21,12 +21,15 @@ READ_BACK_S = 5       # user choice (was 10); measured: the controller reports a
 STATE_KEYS = ('phase', 't', 'tendency', 'boards', 'clock_set', 'clock_changed_at', 'clock_now', 'mode_key',
               'stock_mhz', 'fan_target', 'fan_set', 'fan_read', 'fan_read_at', 'fan_set_at', 'window_until',
               'window_active', 'learn_since', 'cal', 'over_hot', 'offline', 'ac_error', 'last_error', 'seen_at',
-              'exc_active', 'calm', 'start_hold', 'restart_req', 'heat')
+              'exc_active', 'calm', 'start_hold', 'restart_req', 'heat', 'zb')
 PENDING_KEYS = ('kind', 'value', 'sent_at', 'attempt')
 STATE_FRESH_S = 15    # the data-service writes the state every 5 s (only while it reads the miner)
 TMAX_FRESH_S = 30     # the collector writes the chip temperatures every 10 s
 # actions that set or clear FanAutomation.temp_test_at (Temperatur-Test, 25.10.)
-TEST_ACTIONS = ('temp_test_start', 'temp_test_abort', 'disable', 'maintenance_start')
+TEST_ACTIONS = ('temp_test_start', 'temp_test_abort', 'disable', 'maintenance_start', 'target')
+# Zielbereich (Nutzer 27.10.): lower edge from 76, upper edge up to 92 °C, 2–4 Grad (counted inclusive: 82–83 = 2 Grad)
+TARGET_MIN, TARGET_MAX = 76, 92
+TARGET_ERROR = 'Zielbereich 76–92 °C mit 2 bis 4 Grad wählen.'
 
 
 def _a15():
@@ -74,6 +77,7 @@ def automation_payload():
         'device': {'id': dev.id, 'name': dev.name}, 'enabled': auto.enabled, 'dev_id': auto.ac_dev_id,
         'maintenance_at': auto.maintenance_at, 'maintenance': st.get('maint') or None,
         'temp_test_at': auto.temp_test_at,
+        'target_low': auto.target_low, 'target_high': auto.target_high,
         'port': auto.ac_port, 'level': auto.level,
         'state': state,
         # learned values per fan level ({"<stufe>": {mhz, temp_avg, at, count}}); the former per-mode values
@@ -152,9 +156,19 @@ def _temp_test_refusal(dev, auto):
 
 
 def _test_end(reason):
-    """User event: a running Temperatur-Test is aborted (by the user, Automatik aus or Wartung)."""
+    """User event: a running Temperatur-Test is aborted (by the user, Automatik aus, Wartung or a new Zielbereich)."""
     trigger = 'Nutzer: Temperatur-Test abgebrochen' + ('' if reason == 'Nutzer' else ' (%s)' % reason)
     return ('test_ende', trigger, {'details': {'ergebnis': 'abgebrochen', 'grund': reason}})
+
+
+def _whole_number(value):
+    """Whole number from the request (JSON number or text such as '82'); None for anything else (82.5, True, 'x')."""
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
 
 
 def _error(exc):
@@ -189,7 +203,8 @@ def fans_status(request):
 def fans_automation(request):
     """Temperatur-Automatik (A15). GET: settings + state. POST {action: enable, dev_id, port, level} |
     {action: level, level} | {action: disable} | {action: maintenance_start|maintenance_end} |
-    {action: temp_test_start|temp_test_abort}. The data-service applies the changes."""
+    {action: temp_test_start|temp_test_abort} | {action: target, low, high} (Zielbereich, also with the automation off,
+    during Wartung or Takt-Messung; ends a running Temperatur-Test). The data-service applies the changes."""
     dev, auto = _automation()
     if not auto:
         return Response({'error': 'Kein Avalon A15 gefunden.'}, status=status.HTTP_404_NOT_FOUND)
@@ -248,10 +263,25 @@ def fans_automation(request):
             # no test (already over): no entry
             events = [_test_end('Nutzer')] if auto.temp_test_at else []
             auto.temp_test_at = None
+        elif action == 'target':
+            # Zielbereich (Nutzer 27.10.): the data-service takes it over in its next round; a running test ends
+            low, high = _whole_number(request.data.get('low')), _whole_number(request.data.get('high'))
+            if low is None or high is None or not (TARGET_MIN <= low and high <= TARGET_MAX and 1 <= high - low <= 3):
+                return Response({'error': TARGET_ERROR}, status=status.HTTP_400_BAD_REQUEST)
+            old_low, old_high = auto.target_low, auto.target_high
+            if (low, high) == (old_low, old_high):
+                return Response(automation_payload())                 # same range: no entry
+            events = [('zielbereich', 'Nutzer: Zielbereich %d–%d °C gewählt (vorher %d–%d °C)'
+                       % (low, high, old_low, old_high),
+                       {'details': {'alt': '%d–%d °C' % (old_low, old_high), 'neu': '%d–%d °C' % (low, high)}})]
+            if auto.temp_test_at:
+                events.append(_test_end('Zielbereich geändert'))
+            auto.target_low, auto.target_high, auto.temp_test_at = low, high, None
         else:
             return Response({'error': 'Diese Aktion ist gerade nicht möglich.'}, status=status.HTTP_400_BAD_REQUEST)
         auto.updated_at = timezone.now()
-        fields = ['enabled', 'ac_dev_id', 'ac_port', 'level', 'level_at', 'maintenance_at', 'updated_at']
+        fields = ['enabled', 'ac_dev_id', 'ac_port', 'level', 'level_at', 'maintenance_at', 'target_low', 'target_high',
+                  'updated_at']
         if action in TEST_ACTIONS:
             fields.append('temp_test_at')     # other actions never write back a test the data-service just ended
         auto.save(update_fields=fields)

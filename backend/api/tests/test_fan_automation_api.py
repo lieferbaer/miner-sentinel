@@ -339,3 +339,89 @@ def test_restart_of_the_a15_is_logged(client, a15):
     assert len(events) == 1 and events[0].device_id == a15.id and events[0].source == 'nutzer'
     assert events[0].trigger == 'Nutzer: A15-Neustart gesendet' and events[0].ok is True
     assert events[0].request == 'ascset|0,reboot,0'
+
+
+def test_target_range_stored_with_event(client, a15, backup):
+    """Zielbereich (Nutzer 27.10.): 76–92 °C, 2–4 Grad; stored, user event with old and new range, in the payload."""
+    url = '/api/fans/automation/'
+    client.post(url, {'action': 'enable', 'dev_id': 'dev1', 'port': 1, 'level': 3}, format='json')
+    auto = FanAutomation.objects.get(device=a15)
+    assert (auto.target_low, auto.target_high) == (82, 85)                    # start value
+    auto.state = {'v': 2, 'phase': 'normal', 'zb': [82, 85]}
+    auto.save()
+    res = client.post(url, {'action': 'target', 'low': 80, 'high': 83}, format='json')
+    assert res.status_code == 200 and (res.data['target_low'], res.data['target_high']) == (80, 83)
+    assert res.data['state']['zb'] == [82, 85]                                 # not yet taken over
+    auto.refresh_from_db()
+    assert (auto.target_low, auto.target_high, auto.level, auto.enabled) == (80, 83, 3, True)
+    live = client.get('/api/live/').data['automation']
+    assert (live['target_low'], live['target_high']) == (80, 83)
+    for low, high in ((76, 79), (91, 92)):                                     # edges: 4 and 2 Grad
+        assert client.post(url, {'action': 'target', 'low': low, 'high': high}, format='json').status_code == 200
+    events = list(AutomationLog.objects.filter(kind='zielbereich').order_by('id'))
+    assert [(e.trigger, e.source, e.details) for e in events] == [
+        ('Nutzer: Zielbereich 80–83 °C gewählt (vorher 82–85 °C)', 'nutzer', {'alt': '82–85 °C', 'neu': '80–83 °C'}),
+        ('Nutzer: Zielbereich 76–79 °C gewählt (vorher 80–83 °C)', 'nutzer', {'alt': '80–83 °C', 'neu': '76–79 °C'}),
+        ('Nutzer: Zielbereich 91–92 °C gewählt (vorher 76–79 °C)', 'nutzer', {'alt': '76–79 °C', 'neu': '91–92 °C'})]
+    assert events[0].phase == 'normal'
+
+
+@pytest.mark.parametrize('low, high', [
+    (75, 78), (90, 93), (82, 82), (82, 86), (85, 82), ('x', 85), (82.5, 85), (82, None), (True, 85)])
+def test_target_range_invalid(client, a15, backup, low, high):
+    url = '/api/fans/automation/'
+    client.post(url, {'action': 'enable', 'dev_id': 'dev1', 'port': 1, 'level': 3}, format='json')
+    res = client.post(url, {'action': 'target', 'low': low, 'high': high}, format='json')
+    assert res.status_code == 400 and res.data == {'error': 'Zielbereich 76–92 °C mit 2 bis 4 Grad wählen.'}
+    auto = FanAutomation.objects.get(device=a15)
+    assert (auto.target_low, auto.target_high) == (82, 85)
+    assert not AutomationLog.objects.filter(kind='zielbereich').exists()
+
+
+def test_target_range_allowed_with_automation_off_wartung_and_takt_messung(client, a15):
+    from api.models import CalibrationRun
+    url = '/api/fans/automation/'
+    FanAutomation.objects.create(device=a15, ac_dev_id='dev1', ac_port=1, level=3, enabled=False)
+    res = client.post(url, {'action': 'target', 'low': 79, 'high': 84}, format='json')
+    assert res.status_code == 400                                              # 6 Grad
+    res = client.post(url, {'action': 'target', 'low': 81, 'high': 84}, format='json')
+    assert res.status_code == 200 and res.data['enabled'] is False and res.data['target_low'] == 81
+    auto = FanAutomation.objects.get(device=a15)
+    auto.maintenance_at = timezone.now()
+    auto.save()
+    assert client.post(url, {'action': 'target', 'low': 80, 'high': 83}, format='json').status_code == 200
+    auto.maintenance_at = None
+    auto.save()
+    CalibrationRun.objects.create(device=a15, kind='step', modes=['2/L4'], status='running', state={})
+    assert client.post(url, {'action': 'target', 'low': 79, 'high': 82}, format='json').status_code == 200
+    auto.refresh_from_db()
+    assert (auto.target_low, auto.target_high, auto.enabled) == (79, 82, False)
+    assert AutomationLog.objects.filter(kind='zielbereich').count() == 3
+
+
+def test_target_range_same_range_no_entry(client, a15, backup):
+    url = '/api/fans/automation/'
+    client.post(url, {'action': 'enable', 'dev_id': 'dev1', 'port': 1, 'level': 3}, format='json')
+    client.post(url, {'action': 'temp_test_start'}, format='json')
+    updated = FanAutomation.objects.get(device=a15).updated_at
+    res = client.post(url, {'action': 'target', 'low': 82, 'high': 85}, format='json')
+    assert res.status_code == 200 and (res.data['target_low'], res.data['target_high']) == (82, 85)
+    assert res.data['temp_test_at']                                            # the test goes on
+    auto = FanAutomation.objects.get(device=a15)
+    assert auto.temp_test_at and auto.updated_at == updated
+    assert not AutomationLog.objects.filter(kind__in=('zielbereich', 'test_ende')).exists()
+
+
+def test_target_range_ends_running_test(client, a15, backup):
+    url = '/api/fans/automation/'
+    client.post(url, {'action': 'enable', 'dev_id': 'dev1', 'port': 1, 'level': 2}, format='json')
+    client.post(url, {'action': 'temp_test_start'}, format='json')
+    start = AutomationLog.objects.get(kind='test_start').id
+    res = client.post(url, {'action': 'target', 'low': 80, 'high': 82}, format='json')
+    assert res.status_code == 200 and res.data['temp_test_at'] is None
+    auto = FanAutomation.objects.get(device=a15)
+    assert (auto.temp_test_at, auto.target_low, auto.target_high) == (None, 80, 82)
+    events = list(AutomationLog.objects.filter(id__gt=start).order_by('id'))
+    assert [e.kind for e in events] == ['zielbereich', 'test_ende']
+    assert events[1].trigger == 'Nutzer: Temperatur-Test abgebrochen (Zielbereich geändert)'
+    assert events[1].details == {'ergebnis': 'abgebrochen', 'grund': 'Zielbereich geändert'}

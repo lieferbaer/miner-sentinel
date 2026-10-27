@@ -413,6 +413,8 @@ const DETAILS = {
   pruefung: ['Prüfung', (v) => CHECK_TEXT[v] || v],
   dauer_s: ['Dauer', (v) => fmt(v, 0, ' s')],
   berechnet: ['berechnet', mhzText],
+  alt: ['vorher'],     // Zielbereich (Nutzer 27.10.)
+  neu: ['neu'],
 }
 
 function detailRow([key, value]) {

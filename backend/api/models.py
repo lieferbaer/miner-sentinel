@@ -758,8 +758,12 @@ class FanAutomation(models.Model):
     level_at = models.DateTimeField(blank=True, null=True)   # last click on a level (also the same level again)
     maintenance_at = models.DateTimeField(blank=True, null=True)   # Wartung announced (A15 is switched off by hand)
     # Temperatur-Test (25.10.): start of the test, null = no test; the backend sets it (start) and clears it (abort,
-    # Automatik aus, Wartung), the data-service clears it at the end of the test or on a safety abort
+    # Automatik aus, Wartung, Zielbereich), the data-service clears it at the end of the test or on a safety abort
     temp_test_at = models.DateTimeField(blank=True, null=True)
+    # Zielbereich (Nutzer 27.10.): hottest chip (TMax, whole degrees) 76–92 °C, 2–4 Grad (82–85 = 4 Grad); the backend
+    # writes it, the data-service takes it over (state.zb)
+    target_low = models.IntegerField(default=82)
+    target_high = models.IntegerField(default=85)
     state = models.JSONField(default=dict, blank=True)
     updated_at = models.DateTimeField(default=timezone.now)
 

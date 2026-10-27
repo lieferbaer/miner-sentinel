@@ -93,10 +93,10 @@ def miner(monkeypatch):
 
 
 def row(state=None, level=5, enabled=True, cal=False, level_at=None, maintenance_at=None, temp_test_at=None,
-        restart_req_at=None):
+        restart_req_at=None, target_low=79, target_high=84):
     return {'id': 1, 'device_id': 3, 'enabled': enabled, 'ac_dev_id': 'dev', 'ac_port': 1, 'level': level,
             'level_at': level_at, 'maintenance_at': maintenance_at, 'temp_test_at': temp_test_at, 'state': state or {},
-            'restart_req_at': restart_req_at,
+            'restart_req_at': restart_req_at, 'target_low': target_low, 'target_high': target_high,
             'ip_address': '10.0.0.15', 'port': 4028, 'cal_active': cal,
             'connection_config': {'throttle': {'profiles': PROFILES}}}
 
@@ -124,11 +124,15 @@ class Run:
         return [e for e in self.j.events if e['kind'] == kind]
 
 
-def started(miner, ac, level=5, tmax=82, learned=None):
-    """Automatik ein (Basisstufe `level`) and the start clock taken over."""
+def started(miner, ac, level=5, tmax=82, learned=None, zb=None):
+    """Automatik ein (Basisstufe `level`, Zielbereich `zb`, sonst 79–84 °C) and the start clock taken over."""
     r = Run(miner, ac, level)
+    if zb:
+        r.kw.update(target_low=zb[0], target_high=zb[1])
     if learned:
-        r.st = {'v': fa.STATE_VERSION, 'seen_at': T0.isoformat(), 'learned': learned, 'level_seen': 'x'}
+        # Lernwerte des eingestellten Bereichs (ohne gemerkten Bereich gehörten sie zum Startwert 82–85)
+        r.st = {'v': fa.STATE_VERSION, 'seen_at': T0.isoformat(), 'learned': learned, 'level_seen': 'x',
+                'zb': list(zb or (79, 84))}
         r.kw['level_at'] = 'klick'
     miner.tmax = tmax
     r.go(10)
@@ -261,11 +265,14 @@ def test_return_after_one_minute_in_band(miner):
     assert r.events('rueckkehr')
 
 
-def test_return_at_once_below_80(miner):
+def test_return_at_once_below_the_target_range(miner):
+    """Nutzer 27.10.: Rückkehrbereich = ganzer Zielbereich (hier 79–84 °C) – sofort erst unter 79 °C (vorher 80 °C)."""
     ac = FakeAC(level=5)
     r = started(miner, ac, level=5, learned={'5': {'mhz': 300, 'temp_avg': 82, 'at': 'x', 'count': 1}})
     r.go(5, temp=85)
     r.go(5, temp=79)
+    assert r.st['phase'] == 'korrektur'                           # 79 °C: im Rückkehrbereich, 1 min warten
+    r.go(5, temp=78)
     assert r.st['phase'] == 'normal' and r.st['fan_target'] == 5
 
 
@@ -1371,7 +1378,7 @@ def test_plus_wait_counts_from_the_takeover_and_only_real_increases(miner):
 
 # ---------------------------------------------------------------- Heizmodus beim Start (Nutzer 26.10.)
 
-def test_heat_mode_after_a_cold_start_fan_1_until_74(miner):
+def test_heat_mode_after_a_cold_start_fan_1_until_79(miner):
     ac = FakeAC(level=3)
     r = started(miner, ac, level=3, learned={'3': {'mhz': 300, 'temp_avg': 82, 'at': 'x', 'count': 1}})
     r.go(30, temp=82)
@@ -1379,12 +1386,12 @@ def test_heat_mode_after_a_cold_start_fan_1_until_74(miner):
     miner.elapsed = 10                                            # Neustart: Chips kalt
     r.go(10, temp=26)
     assert ac.level == 1 and r.st['heat']
-    assert r.events('heizmodus')[-1]['trigger'] == 'Heizmodus: Lüfter Stufe 1 bis 74 °C'
-    r.go(120, temp=73)
+    assert r.events('heizmodus')[-1]['trigger'] == 'Heizmodus: Lüfter Stufe 1 bis 79 °C'
+    r.go(120, temp=78)
     assert ac.level == 1
-    r.go(15, temp=74)
+    r.go(15, temp=79)
     assert ac.level == 3 and not r.st['heat']
-    assert r.events('heizmodus_ende')[-1]['trigger'] == 'Heizmodus beendet: 74 °C erreicht, Lüfter Stufe 3'
+    assert r.events('heizmodus_ende')[-1]['trigger'] == 'Heizmodus beendet: 79 °C erreicht, Lüfter Stufe 3'
 
 
 def test_no_heat_mode_when_already_warm(miner):
@@ -1496,3 +1503,308 @@ def test_heat_mode_also_when_the_temperature_is_unknown_at_the_start(miner):
     r.go(30, temp=80)
     assert not r.st['heat'] and ac.level == 4
 
+
+# ---------------------------------------------------------------- Zielbereich wählbar (Nutzer 27.10.)
+
+LW = {'mhz': 300, 'temp_avg': 82, 'at': 'x', 'count': 1}
+
+
+def test_high_table_follows_the_upper_edge_capped_at_96():
+    assert fa.high_rule(84, 84) is None and fa.high_rule(85, 84) == (85, 1, None)       # 79–84 °C wie bisher
+    assert fa.high_rule(88, 84) == (88, 2, 30) and fa.high_rule(94, 84) == (94, 2, 100)
+    assert fa.high_rule(85, 85) is None and fa.high_rule(86, 85) == (86, 1, None)
+    assert fa.high_rule(87, 85) == (87, 1, None) and fa.high_rule(89, 85) == (89, 2, 30)
+    assert fa.high_rule(91, 85) == (91, 2, 50) and fa.high_rule(93, 85) == (93, 2, 80)
+    assert fa.high_rule(95, 85) == (95, 2, 100)
+    assert fa.high_rule(92, 92) is None and fa.high_rule(93, 92) == (93, 1, None)       # 89–92 °C: Deckel 96 °C
+    assert fa.high_rule(95, 92) == (94, 1, None) and fa.high_rule(96, 92) == (96, 2, 100)
+    assert fa.high_rule(95, 89) == (95, 2, 50) and fa.high_rule(96, 89) == (96, 2, 100)
+    assert fa.high_rule(78, 77) == (78, 1, None) and fa.high_rule(81, 77) == (81, 2, 30)
+
+
+def test_plus_size_follows_the_lower_edge():
+    assert [fa.plus_size(t, 82) for t in (81, 73, 72, 63, 62)] == [5, 5, 20, 20, 40]
+    assert [fa.plus_size(t, 76) for t in (75, 67, 66, 57, 56)] == [5, 5, 20, 20, 40]
+
+
+def test_range_82_85_no_clock_change_inside_learning_until_85(miner):
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, learned={'5': LW}, zb=(82, 85))
+    sets = list(miner.clock_sets)
+    for temp in (82, 85, 83, 85, 82):
+        r.go(60, temp=temp)
+    assert miner.clock_sets == sets and r.st['phase'] == 'normal' and ac.level == 5
+    assert r.st['learn_since'] and r.events('lernen_start')[0]['trigger'] == 'Chiptemperatur 82 °C in 82–85 °C'
+    r.go(5, temp=86)                                              # ab U+1: hohe Chiptemperatur, Lernen bricht ab
+    assert r.st['phase'] == 'korrektur' and ac.level == 6 and r.st['clock_set'] == 295 and not r.st['learn_since']
+    assert r.events('takt')[-1]['trigger'] == 'Chiptemperatur 86 °C nach 5 min in 82–85 °C: Takt −5 MHz'
+
+
+def test_range_82_85_plus_steps(miner):
+    """+5 ab L−9 (73 °C), +20 ab L−19 (63 °C), darunter +40."""
+    for temp, step in ((82, 0), (81, 5), (73, 5), (72, 20), (63, 20), (62, 40)):
+        miner.clock_sets.clear()
+        ac = FakeAC(level=5)
+        r = started(miner, ac, level=5, tmax=temp, learned={'5': {'mhz': 200, 'temp_avg': 82, 'at': 'x', 'count': 1}},
+                    zb=(82, 85))
+        r.go(40, temp=temp)
+        assert miner.clock() == 200 + step, temp
+
+
+def test_range_82_85_wait_3_min_from_78(miner):
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, tmax=78, learned={'5': {'mhz': 250, 'temp_avg': 82, 'at': 'x', 'count': 1}},
+                zb=(82, 85))
+    r.go(35, temp=78)
+    assert r.st['clock_set'] == 255
+    r.go(170, temp=78)
+    assert r.st['clock_set'] == 255                               # ab L−4 = 78 °C: 3 min nach der letzten Erhöhung
+    r.go(15, temp=78)
+    assert r.st['clock_set'] == 260
+    r.go(40, temp=77)
+    assert r.st['clock_set'] == 265                               # unter 78 °C: nach dem 30-s-Fenster
+
+
+def test_range_82_85_return_band(miner):
+    """Rückkehr nach 1 min stabil in 82–85 °C, sofort unter 82 °C."""
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, learned={'5': LW}, zb=(82, 85))
+    r.go(5, temp=86)
+    assert ac.level == 6
+    r.go(55, temp=85)
+    assert ac.level == 6 and r.st['phase'] == 'korrektur'
+    assert r.events('stabilitaet_start')[-1]['trigger'] == 'Rückkehr: Chiptemperatur 85 °C in 82–85 °C'
+    r.go(15, temp=85)
+    assert ac.level == 5 and r.st['phase'] == 'normal'
+    assert r.events('rueckkehr')[-1]['trigger'] == '1 min stabil in 82–85 °C'
+    r.go(5, temp=86)
+    r.go(5, temp=81)
+    assert r.st['phase'] == 'normal' and r.events('rueckkehr')[-1]['trigger'] == 'Chiptemperatur 81 °C unter 82 °C'
+
+
+def test_range_89_92_high_from_93_and_96_cap(miner):
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, tmax=90, learned={'5': LW}, zb=(89, 92))
+    r.go(60, temp=92)
+    assert r.st['clock_set'] == 300 and r.st['phase'] == 'normal'
+    r.go(5, temp=93)
+    assert ac.level == 6 and r.st['clock_set'] == 290             # U+1: Lüfter +1, kurzer Aufenthalt −10
+    r.go(40, temp=96)
+    assert ac.level == 7 and r.st['clock_set'] == 190             # ab 96 °C: Lüfter +2, Takt −100
+    assert r.events('takt')[-1]['trigger'].startswith('Chiptemperatur 96 °C (ab 96 °C): Takt −100 MHz')
+
+
+def test_narrow_range_76_77(miner):
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, tmax=77, learned={'5': LW}, zb=(76, 77))
+    sets = list(miner.clock_sets)
+    r.go(60, temp=76)
+    r.go(60, temp=77)
+    assert miner.clock_sets == sets and r.st['phase'] == 'normal'
+    r.go(5, temp=78)                                              # ab 78 °C hoch
+    assert ac.level == 6 and r.st['clock_set'] == 290
+    r.go(5, temp=77)
+    assert r.st['phase'] == 'korrektur'                           # in 76–77 °C: 1 min warten
+    r.go(5, temp=75)
+    assert r.st['phase'] == 'normal' and ac.level == 5            # unter 76 °C sofort zurück
+
+
+def test_narrow_range_76_77_plus_steps_and_wait_from_72(miner):
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, tmax=75, learned={'5': LW}, zb=(76, 77))
+    r.go(40, temp=75)
+    assert r.st['clock_set'] == 305
+    r.go(60, temp=72)
+    assert r.st['clock_set'] == 305                               # ab L−4 = 72 °C: 3 min warten
+    r.go(5, temp=71)
+    assert r.st['clock_set'] == 310
+
+
+def test_heat_mode_and_start_hold_end_at_the_lower_edge(miner):
+    ac = FakeAC(level=3)
+    r = started(miner, ac, level=3, learned={'3': LW}, zb=(82, 85))
+    r.go(30, temp=84)
+    miner.elapsed = 10                                            # Neustart: Chips kalt
+    r.go(10, temp=26)
+    assert ac.level == 1 and r.st['heat'] and r.st.get('start_hold')
+    assert r.events('heizmodus')[-1]['trigger'] == 'Heizmodus: Lüfter Stufe 1 bis 82 °C'
+    assert r.events('startpause')[-1]['trigger'].startswith('Startpause: keine Takterhöhung bis 82 °C, spätestens ')
+    r.go(120, temp=81)
+    assert ac.level == 1 and r.st['heat'] and r.st.get('start_hold') and r.st['clock_set'] == 300
+    r.go(15, temp=82)
+    assert ac.level == 3 and not r.st['heat'] and not r.st.get('start_hold')
+    assert r.events('heizmodus_ende')[-1]['trigger'] == 'Heizmodus beendet: 82 °C erreicht, Lüfter Stufe 3'
+    assert r.events('startpause_ende')[-1]['trigger'] == 'Startpause beendet: 82 °C erreicht (nach 2 min)'
+
+
+def test_exception_below_l_minus_9(miner):
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, learned={'5': {'mhz': 440, 'temp_avg': 82, 'at': 'x', 'count': 1}}, zb=(82, 85))
+    r.go(185, temp=73)
+    assert ac.level == 5 and not r.events('ausnahme')             # 73 °C ist nicht unter L−9
+    r.go(185, temp=72)
+    assert ac.level == 4 and r.st['phase'] == 'ausnahme'
+    assert r.events('ausnahme')[-1]['trigger'] == 'Takt 440 MHz, 3 min stabil unter 73 °C'
+    r.go(10, temp=74)
+    assert r.st['phase'] == 'normal' and r.events('ausnahme_ende')[-1]['trigger'] == 'Chiptemperatur 74 °C über 73 °C'
+
+
+def test_temp_test_begins_at_l_plus_1(miner):
+    ac = FakeAC(level=2)
+    r = started(miner, ac, level=2, learned={'2': {'mhz': 319.2, 'temp_avg': 82, 'at': 'x', 'count': 1}}, zb=(82, 85))
+    r.kw['temp_test_at'] = r.now.isoformat()
+    r.go(70, temp=84)
+    assert r.st['test']['step'] == 0 and r.st['test']['phase'] == 'beginn'
+    assert any(n[1].endswith('dann warten bis ≤ 83 °C.') for n in r.st['log'])
+    r.go(5, temp=83)
+    assert r.st['test']['step'] == 1 and r.st['clock_set'] == 349
+
+
+def test_takt_messung_keeps_the_fixed_protection_with_a_high_range(miner):
+    """Takt-Messung: Lüfterschutz wie bisher ab 85 °C, Rückkehr nach 1 min in 80–84 °C – unabhängig vom Zielbereich."""
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, tmax=90, learned={'5': LW}, zb=(89, 92))
+    r.go(10, temp=84, cal=True)
+    sends = len(miner.clock_sets)
+    assert not r.st.get('corr')
+    r.go(5, temp=86)                                              # unter dem Zielbereich, in der Messung aber hoch
+    assert r.st['corr'] and ac.level == 6 and len(miner.clock_sets) == sends
+    r.go(5, temp=88)
+    assert ac.level == 7
+    r.go(30, temp=83)
+    assert r.st['corr']                                           # 83 °C: im Rückkehrbereich 80–84 °C, nicht sofort
+    r.go(35, temp=83)
+    assert not r.st['corr'] and ac.level == 5
+
+
+def test_takt_messung_keeps_the_fixed_protection_with_a_low_range(miner):
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, tmax=77, learned={'5': LW}, zb=(76, 77))
+    r.go(10, temp=77, cal=True)
+    r.go(30, temp=84)
+    assert not r.st.get('corr') and ac.level == 5                 # ohne Takt-Messung wäre 84 °C hoch
+    r.go(5, temp=85)
+    assert r.st['corr'] and ac.level == 6
+    r.go(5, temp=79)
+    assert not r.st['corr']                                       # unter 80 °C sofort zurück
+
+
+def _without_range(miner, ac, lo, hi, tmax):
+    """Zustand vor dem 27.10.: Lernwerte, aber kein gemerkter Bereich."""
+    r = Run(miner, ac, 5)
+    r.st = {'v': fa.STATE_VERSION, 'seen_at': T0.isoformat(), 'learned': {'5': LW}, 'level_seen': 'x'}
+    r.kw.update(level_at='klick', target_low=lo, target_high=hi)
+    miner.tmax = tmax
+    return r.go(10)
+
+
+def test_first_round_without_a_range_keeps_the_learned_values(miner):
+    """Stand vor dem 27.10. (kein gemerkter Bereich): die Lernwerte gehören zum Startwert 82–85, kein Eintrag."""
+    ac = FakeAC(level=5)
+    r = _without_range(miner, ac, 82, 85, 83)
+    assert r.st['zb'] == [82, 85] and r.st['learned'] == {'5': LW} and 'learned_zb' not in r.st
+    assert not [n for n in r.st['log'] if 'Zielbereich' in n[1]]
+    assert r.events('start')[-1]['details']['quelle'] == 'Lernwert' and r.st['clock_set'] == 300
+
+
+def test_first_round_without_a_range_but_another_range_chosen(miner):
+    """Review 27.10.: vor der ersten Runde schon ein anderer Bereich gewählt (z. B. bei Automatik aus) – die Lernwerte
+    bleiben beim Startwert 82–85, der neue Bereich beginnt mit dem Initialwert."""
+    ac = FakeAC(level=5)
+    r = _without_range(miner, ac, 76, 77, 70)
+    assert r.st['zb'] == [76, 77] and r.st['learned_zb'] == {'82-85': {'5': LW}}
+    assert r.events('start')[-1]['details']['quelle'] == 'Initialwert'
+
+
+def test_range_change_leaves_the_saved_state_untouched(miner):
+    """Review 27.10.: scheitert die Runde nach dem Wechsel, speichert run_fan_automation den alten Zustand – dessen
+    Archiv bleibt vollständig."""
+    other = {'mhz': 340, 'temp_avg': 84, 'at': 'x', 'count': 1}
+    state = {'v': fa.STATE_VERSION, 'zb': [82, 85], 'learned': {'5': other}, 'learned_zb': {'79-84': {'5': LW}}}
+    rnd = fa.Round(row(state, level=5, target_low=79, target_high=84), T0, FakeAC(level=5),
+                   automation_journal.MemoryJournal())
+    rnd.target_range()
+    assert rnd.st['learned'] == {'5': LW} and rnd.st['learned_zb'] == {'82-85': {'5': other}}
+    assert state['learned_zb'] == {'79-84': {'5': LW}}
+
+
+def test_range_change_takes_the_new_limits_at_once_without_a_start(miner):
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, learned={'5': LW})
+    r.go(60, temp=83)
+    assert r.st['zb'] == [79, 84] and r.st['learn_since']
+    sets, starts = list(miner.clock_sets), len(r.events('start'))
+    r.kw.update(target_low=82, target_high=85)
+    r.go(5, temp=83)
+    assert r.st['zb'] == [82, 85] and r.st['learned'] == {} and r.st['learned_zb'] == {'79-84': {'5': LW}}
+    assert r.events('lernen_ende')[-1]['details']['grund'] == 'Zielbereich geändert'
+    assert r.st['band_in'] == (r.now - timedelta(seconds=5)).isoformat()    # Aufenthalt neu gemessen
+    assert any(n[1] == 'Zielbereich 82–85 °C übernommen.' for n in r.st['log'])
+    assert len(r.events('start')) == starts and miner.clock_sets == sets and not r.st.get('heat') and ac.level == 5
+    r.go(40, temp=81)                                             # 81 °C liegt jetzt unter dem Zielbereich: +5
+    assert r.st['clock_set'] == 305
+
+
+def test_learned_values_are_kept_per_range(miner):
+    """Nutzer 27.10.: zurück im alten Bereich gelten wieder seine Lernwerte; ein neuer Bereich beginnt mit dem
+    Initialwert."""
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, learned={'5': LW})
+    r.go(30, temp=83)
+    r.kw.update(target_low=82, target_high=85, level_at='neu')
+    r.go(10, temp=83)
+    assert r.events('start')[-1]['details']['quelle'] == 'Initialwert' and r.st['clock_set'] == 140
+    r.go(15 * 60 + 30, temp=83)
+    assert r.st['learned']['5']['mhz'] == 140
+    r.kw.update(target_low=79, target_high=84)
+    r.go(5, temp=83)
+    assert r.st['learned'] == {'5': LW} and r.st['learned_zb']['82-85']['5']['mhz'] == 140
+    r.kw['level_at'] = 'neu2'
+    r.go(10, temp=83)
+    assert r.events('start')[-1]['details']['quelle'] == 'Lernwert' and r.st['clock_set'] == 300
+
+
+def test_automatik_off_on_keeps_the_range_and_the_learned_values_per_range(miner):
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, learned={'5': LW})
+    r.go(30, temp=83)
+    r.kw.update(target_low=82, target_high=85)
+    r.go(5, temp=83)
+    r.kw['enabled'] = False
+    r.go(10)
+    r.kw['enabled'] = True
+    r.go(10, temp=83)
+    assert r.st['zb'] == [82, 85] and r.st['learned_zb'] == {'79-84': {'5': LW}}
+    assert len([n for n in r.st['log'] if 'Zielbereich' in n[1]]) == 1
+    r.kw.update(target_low=79, target_high=84)
+    r.go(5, temp=83)
+    assert r.st['learned'] == {'5': LW}
+
+
+def test_select_reads_the_target_range(monkeypatch):
+    seen = []
+
+    class Cur:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def execute(self, sql, args=None):
+            seen.append(sql)
+
+        def fetchall(self):
+            return []
+
+    class Conn:
+        def cursor(self, cursor_factory=None):
+            return Cur()
+
+        def close(self):
+            pass
+
+    monkeypatch.setenv('MINERSENTINEL_ENV', 'Live')
+    monkeypatch.setattr(fa.psycopg2, 'connect', lambda url: Conn())
+    fa.run_fan_automation('postgresql://x', ac=FakeAC())
+    assert 'f.target_low' in seen[0] and 'f.target_high' in seen[0]
