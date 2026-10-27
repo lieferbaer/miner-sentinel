@@ -329,16 +329,52 @@ def test_restart_of_the_a15_is_logged(client, a15):
     automation it is a user event in the protocol."""
     nano = Device.objects.create(make='avalon', device_id='N3S', name='Avalon Nano 3S', ip_address='10.0.0.16',
                                  port=4028, protocol=Device.PROTOCOL_CGMINER_TCP)
-    with patch('api.views._cgminer_command', side_effect=OSError('timed out')):
+    with patch('api.views.socket.create_connection', side_effect=OSError('timed out')):
         assert client.post('/api/devices/%d/restart/' % a15.id).status_code == 502
-    with patch('api.views._cgminer_command', return_value='STATUS=S,Msg=ASC 0 set info: reboot') as cmd:
+    with patch('api.views.socket.create_connection', return_value=_Sock([b'STATUS=S,Msg=ASC 0 set info: reboot'])) as conn:
         assert client.post('/api/devices/%d/restart/' % a15.id).status_code == 200
         assert client.post('/api/devices/%d/restart/' % nano.id).status_code == 200
-    assert [c.args[2] for c in cmd.call_args_list] == ['ascset|0,reboot,0'] * 2
+    assert conn.return_value.sent == [b'ascset|0,reboot,0'] * 2
     events = list(AutomationLog.objects.filter(kind='neustart_nutzer'))
     assert len(events) == 1 and events[0].device_id == a15.id and events[0].source == 'nutzer'
     assert events[0].trigger == 'Nutzer: A15-Neustart gesendet' and events[0].ok is True
     assert events[0].request == 'ascset|0,reboot,0'
+
+
+class _Sock:
+    """Fake miner socket: replies with `chunks`, then the connection closes (or `error` is raised)."""
+
+    def __init__(self, chunks=(), error=None):
+        self.chunks, self.error, self.sent = list(chunks), error, []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def sendall(self, data):
+        self.sent.append(data)
+
+    def recv(self, size):
+        if self.chunks:
+            return self.chunks.pop(0)
+        if self.error:
+            raise self.error
+        return b''
+
+
+def test_restart_without_reply_counts_as_sent(client, a15):
+    """Nutzer 27.10.: the A15 restarts without answering – no "Miner nicht erreichbar: timed out", but the restart
+    entry (so the page shows "A15 startet neu")."""
+    import socket
+    with patch('api.views.socket.create_connection', return_value=_Sock(error=socket.timeout('timed out'))):
+        r = client.post('/api/devices/%d/restart/' % a15.id)
+    assert r.status_code == 200 and r.data['device_reply'] == 'keine Antwort – Miner startet neu'
+    events = list(AutomationLog.objects.filter(kind='neustart_nutzer'))
+    assert len(events) == 1 and events[0].ok is True and events[0].response == 'keine Antwort – Miner startet neu'
+    with patch('api.views.socket.create_connection', return_value=_Sock(error=ConnectionResetError('reset'))):
+        assert client.post('/api/devices/%d/restart/' % a15.id).status_code == 200
 
 
 def test_target_range_stored_with_event(client, a15, backup):

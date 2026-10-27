@@ -76,7 +76,10 @@ function logicText(lo, hi) {
     (lo - 4) + '–' + (lo - 1) + ' °C erst 3 min nach der letzten Takterhöhung). Ab ' + (hi + 1) +
     ' °C Lüfter +1 bzw. +2 und Takt runter (Korrekturphase; bei ' + (hi + 1) + '–' + (hi + 3) +
     ' °C −10 MHz, wenn sie vorher unter 5 min in ' + range + ' lag, sonst −5 MHz); zurück zur Basisstufe nach ' +
-    '1 min in ' + range + ' oder sobald unter ' + lo + ' °C. War die letzte Taktänderung über ' + hi +
+    '1 min in ' + range + ' oder sobald unter ' + lo + ' °C. Ab ' + (hi + 1) + ' °C zuerst zwei Lüfterstöße ' +
+    '(Basisstufe +1 für 6 s, dann zurück), erst danach Lüfter +1 und Takt runter; zurück im Ziel: keine Senkung; ab ' +
+    (hi + 4) + ' °C sofort nach Tabelle; höchstens ein Stoßpaar je 10 min, neue erst nach ' + (hi - 1) +
+    ' °C oder weniger. War die letzte Taktänderung über ' + hi +
     ' °C und fällt die Temperatur unter ' + lo + ' °C: 5 min keine Taktänderung (endet über ' + hi + ' °C). ' +
     'Nach Neustart, Wartung oder Over Hot keine Takterhöhung bis ' + lo + ' °C, höchstens 10 min (Startpause). ' +
     'Bei jedem Start Lüfter Stufe 1, bis die Chiptemperatur ' + lo + ' °C erreicht (Heizmodus). ' +
@@ -174,8 +177,13 @@ function AutomationCards({ auto, st, roomTemp, lo, hi }) {
   const running = st.fan_set ?? st.fan_read
   const confirmed = st.fan_read === st.fan_set ||
     (st.fan_read_at && st.fan_set_at && Date.parse(st.fan_read_at) >= Date.parse(st.fan_set_at) + 10000)
+  // Wartung, Takt-Messung, Over Hot, miner silent: the data-service leaves these fields as they were
+  const regulating = REGULATING.has(st.phase) && !st.offline && !st.over_hot
+  // Lüfterstoß (Nutzer 27.10.): ab hi+1 zuerst zwei Stöße, noch keine Korrekturphase; Status wie beim Heizmodus
+  const pulse = regulating ? st.stoss : null
   const fanSub = [
     running === base ? '= Basisstufe' : 'Basisstufe ' + base,
+    pulse ? 'Lüfterstoß ' + pulse.n + '/2' : null,
     st.phase === 'korrektur' && running > base ? 'Korrektur +' + (running - base) : null,
     st.phase === 'ausnahme' ? 'Ausnahme' + (running != null && running < base ? ' −' + (base - running) : '') : null,
     // after the Ausnahme the fan stays on the reduced level (plan, step 5); judged by the target: fan_set lags
@@ -192,14 +200,15 @@ function AutomationCards({ auto, st, roomTemp, lo, hi }) {
       ' wird übernommen' + (st.pending.attempt > 1 ? ' (Versuch ' + st.pending.attempt + ')' : '')
     : null
   const windowOpen = st.window_until && Date.parse(st.window_until) > Date.now()
-  // Wartung, Takt-Messung, Over Hot, miner silent: the data-service leaves these fields as they were
-  const regulating = REGULATING.has(st.phase) && !st.offline && !st.over_hot
   const restarting = Boolean(st.restart_req) || st.offline === 'neustart'
+  // Heizmodus (Nutzer 27.10.): als Status statt „Normalbetrieb“
+  const heating = regulating && st.phase === 'normal' && st.heat
   const statusSub = !regulating ? phase.sub : [
+    pulse ? (pulse.step === 'an' ? 'Lüfter Stufe ' + pulse.level + ' für 6 s' : 'zurück auf Basisstufe') : null,
+    heating ? 'Lüfter Stufe 1 bis ' + lo + ' °C' : null,
     pending,
     windowOpen ? 'Beobachtungsfenster bis ' + clockTime(st.window_until, true) : null,
     st.calm && Date.parse(st.calm.until) > Date.now() ? 'Taktsperre bis ' + clockTime(st.calm.until) : null,
-    st.heat ? 'Heizmodus bis ' + lo + ' °C (Lüfter Stufe 1)' : null,
     st.start_hold && Date.parse(st.start_hold.until) > Date.now()
       ? 'keine Takterhöhung bis ' + lo + ' °C, spätestens ' + clockTime(st.start_hold.until) : null,
     st.learn_since ? 'lernt seit ' + clockTime(st.learn_since) : null,
@@ -225,7 +234,8 @@ function AutomationCards({ auto, st, roomTemp, lo, hi }) {
           : fanSub, roomTemp != null ? 'Raum ' + fmt(roomTemp, 1, ' °C') : null].filter(Boolean).join(' · ')} />
       {/* Neustart (Knopf oder nicht erreichbar während der Startpause): kein Fehler, sondern ein erwarteter Zustand */}
       <MetricCard variant="hero" layout="icon-left" icon={Activity} label="Status"
-        tone={st.phase === 'normal' && !restarting ? 'default' : 'warning'} value={restarting ? 'Neustart' : phase.value}
+        tone={st.phase === 'normal' && !restarting ? 'default' : 'warning'}
+        value={restarting ? 'Neustart' : pulse ? 'Lüfterstoß ' + pulse.n + '/2' : heating ? 'Heizmodus' : phase.value}
         subtitle={restarting ? 'A15 startet neu' + (st.restart_req ? ' · gesendet ' + clockTime(st.restart_req) : '')
           : statusSub} />
     </div>
@@ -239,11 +249,12 @@ const RECENT_KINDS = ['takt', 'modus', 'luefter', 'hohe_temperatur', 'rueckkehr'
   'messung_ende', 'fehler', 'basisstufe', 'automatik_ein', 'automatik_aus', 'wartung_start', 'wartung_ende',
   'test_start', 'test_stufe', 'test_ziel', 'test_schritt', 'test_messung', 'test_ende', 'neustart_nutzer', 'taktsperre',
   'taktsperre_ende', 'startpause', 'startpause_ende', 'neustart_offline', 'neustart_online',
-  'einstellungsseite_aus', 'einstellungsseite_an', 'modus_wartet', 'heizmodus', 'heizmodus_ende', 'zielbereich']
+  'einstellungsseite_aus', 'einstellungsseite_an', 'modus_wartet', 'heizmodus', 'heizmodus_ende', 'zielbereich',
+  'luefterstoss', 'luefterstoss_ende']
 const RECENT_COUNT = 20
 const RECENT_REFRESH_MS = 10000
 const RECENT_LABEL = { takt: 'Takt', modus: 'Modus', luefter: 'Lüfter', start: 'Start' }
-const FAN_KINDS = new Set(['luefter', 'hohe_temperatur', 'rueckkehr', 'ausnahme', 'ausnahme_ende'])
+const FAN_KINDS = new Set(['luefter', 'hohe_temperatur', 'rueckkehr', 'ausnahme', 'ausnahme_ende', 'luefterstoss'])
 const USER_KINDS = new Set(['basisstufe', 'automatik_ein', 'automatik_aus', 'wartung_start', 'wartung_ende',
   'zielbereich'])
 

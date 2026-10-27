@@ -15,6 +15,8 @@ export const KIND_LABEL = {
   modus: 'Modusbefehl',
   luefter: 'Lüfterbefehl',
   hohe_temperatur: 'Hohe Chiptemperatur',
+  luefterstoss: 'Lüfterstoß',
+  luefterstoss_ende: 'Lüfterstöße beendet',
   rueckkehr: 'Rückkehr zur Basisstufe',
   ausnahme: 'Ausnahme: Lüfter −1',
   ausnahme_ende: 'Ausnahme beendet',

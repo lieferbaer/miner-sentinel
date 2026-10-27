@@ -97,6 +97,27 @@ def _cgminer_command(ip_address, port, command, timeout=10):
             chunks.append(chunk)
     return b''.join(chunks).decode('utf-8', 'ignore').replace('\x00', '').strip()
 
+
+REBOOT_NO_REPLY = 'keine Antwort – Miner startet neu'
+
+
+def _reboot_command(ip_address, port, timeout=8):
+    """Send the reboot command. Not reachable (connect/send fails) raises OSError; once it is sent, a missing or broken
+    reply means the miner is already restarting (Nutzer 27.10.: the A15 answered nothing → "timed out" was shown)."""
+    with socket.create_connection((ip_address, port or 4028), timeout) as sock:
+        sock.sendall(b'ascset|0,reboot,0')
+        chunks = []
+        try:
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+        except OSError:
+            if not chunks:
+                return REBOOT_NO_REPLY
+    return b''.join(chunks).decode('utf-8', 'ignore').replace('\x00', '').strip() or REBOOT_NO_REPLY
+
 class DeviceViewSet(viewsets.ModelViewSet):
     """Unified device registry CRUD (sole device store after Release C)."""
     queryset = Device.objects.all().order_by('make', 'name')
@@ -372,7 +393,7 @@ class DeviceViewSet(viewsets.ModelViewSet):
         if device.protocol != Device.PROTOCOL_CGMINER_TCP:
             return Response({'error': 'Neustart ist nur für Avalon-Miner möglich.'}, status=status.HTTP_400_BAD_REQUEST)
         try:
-            reply = _cgminer_command(device.ip_address, device.port, 'ascset|0,reboot,0', timeout=8)
+            reply = _reboot_command(device.ip_address, device.port)
         except OSError as exc:
             return Response({'error': 'Miner nicht erreichbar: {}'.format(exc)}, status=status.HTTP_502_BAD_GATEWAY)
         # the A15 of the Temperatur-Automatik: user event in its protocol (Nutzer 25.10.)
