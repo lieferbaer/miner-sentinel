@@ -397,7 +397,7 @@ const DETAILS = {
   meldung: ['Meldung'],
   nicht_erreichbar_s: ['nicht erreichbar', (v) => fmt(v, 0, ' s')],
   von: ['von', when],
-  bis: ['bis', when],
+  bis: ['bis', (v) => (typeof v === 'number' ? fmt(v, 0, ' °C') : when(v))],   // Heizmodus: Temperatur, sonst Zeitpunkt
   lernperiode_neu_gestartet: ['Lernperiode neu gestartet'],
   ergebnis: ['Ergebnis', (v) => RESULT_TEXT[v] || v],
   seit: ['seit'],

@@ -1407,6 +1407,19 @@ def test_heat_mode_ends_when_a_temperature_test_begins(miner):
     assert ev['trigger'] == 'Heizmodus beendet: Temperatur-Test, Lüfter Stufe 2' and ev['fan_old'] == 1
 
 
+def test_no_heat_mode_for_a_start_while_a_temperature_test_runs(miner):
+    """Review 26.10.: Neustart und Test-Beginn in derselben Runde – der Start schaltet den Heizmodus nicht wieder ein."""
+    ac = FakeAC(level=3)
+    r = started(miner, ac, level=3, learned={'3': {'mhz': 300, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    r.go(30, temp=82)
+    miner.elapsed = 10
+    r.kw['temp_test_at'] = r.now.isoformat()
+    r.go(5, temp=30)
+    assert r.st['test'] and not r.st['heat'] and ac.level == 3
+    r.go(300, temp=69)
+    assert r.st['test'] and not r.st['heat'] and ac.level == 3
+
+
 def test_heat_mode_ends_with_a_start_during_takt_messung(miner):
     ac = FakeAC(level=5)
     r = started(miner, ac, level=5, tmax=40, learned={'5': {'mhz': 300, 'temp_avg': 82, 'at': 'x', 'count': 1}})
@@ -1437,6 +1450,7 @@ def test_heat_mode_ends_at_once_when_automation_is_turned_off(miner):
     r.go(60, temp=60)
     assert ac.level == 3 and not r.st.get('heat_fan_due') and r.st['phase'] == 'aus'
     assert r.events('heizmodus_ende')[-1]['trigger'] == 'Heizmodus beendet: Automatik aus, Lüfter Stufe 3'
+    assert r.events('luefter')[-1]['takeover_state'] == 'nicht gemessen' and not r.st['fan_pending']
     writes = list(ac.writes)
     r.go(60, temp=60)
     assert ac.writes == writes                                    # danach kein Lüfterbefehl mehr bei Automatik aus

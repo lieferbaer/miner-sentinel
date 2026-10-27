@@ -361,7 +361,8 @@ class Round:
                    'band_since': None, 'cold_since': None, 'down_since': None,
                    'clock_changed_at': _iso(self.now), 'clock_changed_t': self.t, 'start_reason': None})
         # Heizmodus (Nutzer 26.10.): Lüfter Stufe 1, bis die Chiptemperatur 74 °C erreicht; schon so warm: Basisstufe
-        st['heat'] = self.t is None or self.t < HEAT_UNTIL
+        # (nicht während eines Temperatur-Tests: dort Lüfter auf der Basisstufe)
+        st['heat'] = not st.get('test') and (self.t is None or self.t < HEAT_UNTIL)
         if st['heat']:
             self.set_fan_target(HEAT_FAN, 'Heizmodus: Stufe %d bis %d °C' % (HEAT_FAN, HEAT_UNTIL))
         else:
@@ -996,10 +997,17 @@ class Round:
         if st.get('heat'):
             self.end_heat(why)
             st['heat_fan_due'] = True
-        if st.get('heat_fan_due'):
-            self.write_fan()
-            if st.get('fan_set') == st.get('fan_target'):
-                st.pop('heat_fan_due')
+        if not st.get('heat_fan_due'):
+            return
+        self.write_fan()
+        if st.get('fan_set') == st.get('fan_target'):
+            st.pop('heat_fan_due')
+            fp = st.get('fan_pending')
+            if fp and not self.row['enabled']:
+                # Automatik aus: die Lüfterstufe wird nicht mehr gelesen – Übernahme nicht gemessen
+                if fp.get('log_id'):
+                    self.j.update(fp['log_id'], takeover_state='nicht gemessen')
+                st['fan_pending'] = None
 
     def rules(self):
         st = self.st
@@ -1389,7 +1397,8 @@ def run_fan_automation(database_url, ac=None):
                 "d.connection_config, EXISTS (SELECT 1 FROM calibration_runs r WHERE r.device_id = d.id "
                 "AND r.status IN ('running', 'cancelling', 'finishing')) AS cal_active "
                 "FROM fan_automation f JOIN devices d ON d.id = f.device_id "
-                "WHERE f.enabled OR NOT COALESCE((f.state->>'off')::boolean, false)")
+                "WHERE f.enabled OR NOT COALESCE((f.state->>'off')::boolean, false) "
+                "OR COALESCE((f.state->>'heat_fan_due')::boolean, false)")      # Automatik aus: Lüfterbefehl wiederholen
             rows = cur.fetchall()
         jconn = automation_journal.connect(database_url) if rows else None
         for row in rows:
