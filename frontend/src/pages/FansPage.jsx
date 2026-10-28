@@ -151,6 +151,7 @@ function LearnedTable({ learned, caps, zb, level, lo, hi }) {
             <th className="pr-3 font-medium">Gesetzter Takt (Ø)</th>
             <th className="pr-3 font-medium">Ø Temperatur</th>
             <th className="pr-3 font-medium">Ø Hashrate</th>
+            <th className="pr-3 font-medium">Effizienz</th>
             <th className="pr-3 font-medium">Anzahl</th>
             <th className={withCaps ? 'pr-3 font-medium' : 'font-medium'}>Zeit</th>
             {withCaps && <th className="font-medium">Obergrenze</th>}
@@ -166,6 +167,7 @@ function LearnedTable({ learned, caps, zb, level, lo, hi }) {
                 <td className="pr-3 tabular-nums">{fmt(v.mhz, 0, ' MHz')}</td>
                 <td className="pr-3 tabular-nums">{fmt(v.temp_avg, 1, ' °C')}</td>
                 <td className="whitespace-nowrap pr-3 tabular-nums">{fmt(v.ths_avg, 1, ' TH/s')}</td>
+                <td className="whitespace-nowrap pr-3 tabular-nums">{fmt(v.j_th, 1, ' J/TH')}</td>
                 <td className="pr-3 tabular-nums">{v.count ?? '—'}</td>
                 <td className={withCaps ? 'pr-3 text-muted-foreground' : 'text-muted-foreground'}>{when(v.at)}</td>
                 {withCaps && <td className="tabular-nums">{fmt(limits[lv], 0, ' MHz')}</td>}

@@ -7,6 +7,8 @@ import api from '@/lib/api'
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react'
 
 export const LIVE_REFRESH_MS = 5000
+// a request without an answer (e.g. while the server is updated) must not stop the poll for good (Nutzer 28.10.)
+export const LIVE_TIMEOUT_MS = 15000
 
 const LiveContext = createContext(null)
 
@@ -18,7 +20,7 @@ export function LiveProvider({ children }) {
     if (busy.current) return
     busy.current = true
     try {
-      const { data } = await api.get('/api/live/')
+      const { data } = await api.get('/api/live/', { timeout: LIVE_TIMEOUT_MS })
       setState({ data, error: null, loadedAt: Date.now() })
     } catch (error) {
       setState((prev) => ({ ...prev, error }))

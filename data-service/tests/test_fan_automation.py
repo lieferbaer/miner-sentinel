@@ -390,6 +390,7 @@ def test_learns_after_15_minutes_unchanged(miner):
     lw = r.st['learned']['4']
     assert lw['mhz'] == 280 and lw['count'] == 2 and lw['temp_avg'] == 82.0
     assert lw['ths_avg'] == 150.0                                 # Ø Hashrate der 15 min (Nutzer 28.10.)
+    assert lw['j_th'] == 13.3                                     # Effizienz: 2000 W / 150 TH/s
     assert r.events('lernwert')
 
 

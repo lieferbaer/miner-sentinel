@@ -850,13 +850,15 @@ class Round:
         st['learn_sum'], st['learn_n'], st['learn_clock_sum'] = 0, 0, 0.0
         st['learn_dh_sum'], st['learn_dh_n'] = 0.0, 0
         st['learn_ths_sum'], st['learn_ths_n'] = 0.0, 0
+        st['learn_w_sum'], st['learn_w_n'] = 0.0, 0
 
     def learn(self):
         """Lernperiode 15 min auf derselben Lüfterstufe. Taktschritte setzen sie nicht zurück, kurze Ausflüge
         aus L-U bis 60 s auch nicht (Nutzer 25.10.: sonst entstand nie ein Lernwert). Neu beginnt sie bei Wechsel der
         Lüfterstufe, Moduswechsel, hoher Chiptemperatur (ab U+1) oder länger als 60 s außerhalb L-U (Lernbereich
         = Bereich ohne Taktänderung, Nutzer 25.10.).
-        Gespeichert: Mittelwert des gesetzten Takts, der Chiptemperatur und der Hashrate der 15 min – nur bei mittlerer
+        Gespeichert: Mittelwert des gesetzten Takts, der Chiptemperatur und der Hashrate der 15 min, dazu die Effizienz
+        (Ø Leistung / Ø Hashrate, J/TH) – nur bei mittlerer
         Fehlerrate unter 4 %, sonst verworfen und neu begonnen (Nutzer 28.10.)."""
         st, t, now = self.st, self.t, self.now
         lo, hi = self.lo, self.hi
@@ -889,7 +891,7 @@ class Round:
                 return                                   # eine Lernperiode beginnt nur im Zielbereich
             st.update({'learn_since': _iso(now), 'learn_level': level, 'learn_sum': 0, 'learn_n': 0,
                        'learn_clock_sum': 0.0, 'learn_dh_sum': 0.0, 'learn_dh_n': 0, 'learn_ths_sum': 0.0,
-                       'learn_ths_n': 0, 'learn_out_since': None})
+                       'learn_ths_n': 0, 'learn_w_sum': 0.0, 'learn_w_n': 0, 'learn_out_since': None})
             self.base_event(kind='lernen_start', trigger='Chiptemperatur %d °C in %d–%d °C' % (t, lo, hi),
                             details={'takt': st.get('clock_set'), 'luefterstufe': level})
         st['learn_sum'] += t
@@ -901,6 +903,9 @@ class Round:
         if self.m.get('ghsspd'):
             st['learn_ths_sum'] = (st.get('learn_ths_sum') or 0.0) + float(self.m['ghsspd']) / 1000.0
             st['learn_ths_n'] = (st.get('learn_ths_n') or 0) + 1
+        if self.m.get('power'):
+            st['learn_w_sum'] = (st.get('learn_w_sum') or 0.0) + float(self.m['power'])
+            st['learn_w_n'] = (st.get('learn_w_n') or 0) + 1
         if _age(st['learn_since'], now) >= LEARN_S:
             n = max(st['learn_n'], 1)
             avg_t = round(st['learn_sum'] / n, 1)
@@ -921,6 +926,9 @@ class Round:
                 entry = {'mhz': mhz, 'temp_avg': avg_t, 'at': _iso(now), 'count': (prev or {}).get('count', 0) + 1}
                 if st.get('learn_ths_n'):
                     entry['ths_avg'] = round(st['learn_ths_sum'] / st['learn_ths_n'], 1)   # Ø Hashrate (Nutzer 28.10.)
+                    if st.get('learn_w_n'):                   # Effizienz J/TH (Nutzer 28.10.)
+                        entry['j_th'] = round(st['learn_w_sum'] / st['learn_w_n'] * st['learn_ths_n']
+                                              / st['learn_ths_sum'], 1)
                 st.setdefault('learned', {})[key] = entry
                 log_id = self.base_event(kind='lernwert', trigger='15 min auf Stufe %s, Ø %.1f °C' % (key, avg_t),
                                          details={'luefterstufe': level, 'takt': mhz, 'temp_mittel': avg_t,
@@ -929,7 +937,8 @@ class Round:
                 self.note('Lernwert Stufe %s: %.1f MHz (Mittel), Ø %.1f °C (%d. Mal).' % (key, mhz, avg_t, entry['count']))
                 self.decide('Lernwert gespeichert', log_id)
             st.update({'learn_since': _iso(now), 'learn_sum': 0, 'learn_n': 0, 'learn_clock_sum': 0.0,
-                       'learn_dh_sum': 0.0, 'learn_dh_n': 0, 'learn_ths_sum': 0.0, 'learn_ths_n': 0})
+                       'learn_dh_sum': 0.0, 'learn_dh_n': 0, 'learn_ths_sum': 0.0, 'learn_ths_n': 0,
+                       'learn_w_sum': 0.0, 'learn_w_n': 0})
 
     # --- Zielbereich (Nutzer 27.10.)
     def target_range(self):

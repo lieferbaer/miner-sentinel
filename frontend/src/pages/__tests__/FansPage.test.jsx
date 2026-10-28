@@ -95,8 +95,8 @@ describe('FansPage Obergrenzen', () => {
     const table = (await screen.findByRole('columnheader', { name: 'Obergrenze' })).closest('table')
     const rows = within(table).getAllByRole('row').slice(1).map((r) => within(r).getAllByRole('cell').map((c) => c.textContent))
     expect(rows).toEqual([
-      ['3', '82–85 °C', '320 MHz', '83,2 °C', '—', '2', expect.any(String), '325 MHz'],
-      ['5', '—', '—', '—', '—', '—', '—', '395 MHz'],
+      ['3', '82–85 °C', '320 MHz', '83,2 °C', '—', '—', '2', expect.any(String), '325 MHz'],
+      ['5', '—', '—', '—', '—', '—', '—', '—', '395 MHz'],
     ])
   })
 
@@ -108,7 +108,7 @@ describe('FansPage Obergrenzen', () => {
     renderPage()
     const table = (await screen.findByRole('columnheader', { name: 'Obergrenze' })).closest('table')
     const rows = within(table).getAllByRole('row').slice(1).map((r) => within(r).getAllByRole('cell').map((c) => c.textContent))
-    expect(rows).toEqual([['3', '—', '—', '—', '—', '—', '—', '325 MHz']])
+    expect(rows).toEqual([['3', '—', '—', '—', '—', '—', '—', '—', '325 MHz']])
     await user.click(screen.getByRole('button', { name: 'Obergrenzen löschen' }))
     await user.click(screen.getByRole('button', { name: 'Ja' }))
     expect(api.post).toHaveBeenCalledWith('/api/fans/automation/', expect.objectContaining({ action: 'caps_clear' }))
@@ -130,15 +130,16 @@ describe('FansPage Lernwerte', () => {
   })
 
   it('Bereich right after Stufe (range of the learned values = state.zb), Takt as Gesetzter Takt (Ø)', async () => {
-    const learned = { 2: { mhz: 275, temp_avg: 82, ths_avg: 133.4, at: '2026-10-28T12:39:51Z', count: 13 } }
+    const learned = { 2: { mhz: 275, temp_avg: 82, ths_avg: 133.4, j_th: 16.9, at: '2026-10-28T12:39:51Z', count: 13 } }
     // Zielbereich 83–86 gewählt, der data-service hat noch 82–85: die Lernwerte gehören zu 82–85
     mockApi({ ...automation({ zb: [82, 85] }), target_low: 83, target_high: 86, learned })
     renderPage()
     const table = (await screen.findByRole('columnheader', { name: 'Bereich' })).closest('table')
     const heads = within(table).getAllByRole('columnheader').map((c) => c.textContent)
-    expect(heads).toEqual(['Stufe', 'Bereich', 'Gesetzter Takt (Ø)', 'Ø Temperatur', 'Ø Hashrate', 'Anzahl', 'Zeit'])
+    expect(heads).toEqual(['Stufe', 'Bereich', 'Gesetzter Takt (Ø)', 'Ø Temperatur', 'Ø Hashrate', 'Effizienz', 'Anzahl',
+      'Zeit'])
     const cells = within(within(table).getAllByRole('row')[1]).getAllByRole('cell').map((c) => c.textContent)
-    expect(cells.slice(0, 6)).toEqual(['2', '82–85 °C', '275 MHz', '82,0 °C', '133,4 TH/s', '13'])
+    expect(cells.slice(0, 7)).toEqual(['2', '82–85 °C', '275 MHz', '82,0 °C', '133,4 TH/s', '16,9 J/TH', '13'])
   })
 
   it('Bereich unknown without state.zb', async () => {
