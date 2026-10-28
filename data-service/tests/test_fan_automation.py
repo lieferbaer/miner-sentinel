@@ -146,13 +146,12 @@ def started(miner, ac, level=5, tmax=82, learned=None, zb=None):
     return r
 
 
-def _pulses(r, temp):
-    """Lüfterstöße (Nutzer 27.10.): ab U+1 bis U+3 aus L-U oder darunter zuerst zwei Stöße, kein Takt – bei gleicher
-    Temperatur bis zur Runde vor dem Ende (70 s); in der nächsten Runde beginnt die Korrekturphase wie bisher."""
+def _hot_wait(r, temp):
+    """Takt erst nach 60 s (Nutzer 28.10.): ab U+1 bis U+3 Korrekturphase mit Lüfter +1 sofort, aber noch kein Takt –
+    bei gleicher Temperatur bis zur Runde vor den 60 s; in der nächsten Runde die erste Taktsenkung wie bisher."""
     sets, clock = list(r.miner.clock_sets), r.st.get('clock_set')
-    r.go(70, temp=temp)
-    ps = r.st['stoss']
-    assert ps['n'] == 2 and ps['step'] == 'aus' and not r.st.get('corr')
+    r.go(60, temp=temp)
+    assert r.st['corr'] and r.st['corr_wait'] and r.st['fan_target'] == r.level + 1
     assert r.st.get('clock_set') == clock and r.miner.clock_sets == sets
     return r
 
@@ -274,7 +273,7 @@ def test_high_temperature_with_mode_change_clock_first_then_mode_then_clock(mine
 def test_return_after_one_minute_in_band(miner):
     ac = FakeAC(level=5)
     r = started(miner, ac, level=5, learned={'5': {'mhz': 300, 'temp_avg': 82, 'at': 'x', 'count': 1}})
-    _pulses(r, 85)
+    _hot_wait(r, 85)
     r.go(5, temp=85)
     assert ac.level == 6
     r.go(55, temp=83)
@@ -288,7 +287,7 @@ def test_return_at_once_below_the_target_range(miner):
     """Nutzer 27.10.: Rückkehrbereich = ganzer Zielbereich (hier 79–84 °C) – sofort erst unter 79 °C (vorher 80 °C)."""
     ac = FakeAC(level=5)
     r = started(miner, ac, level=5, learned={'5': {'mhz': 300, 'temp_avg': 82, 'at': 'x', 'count': 1}})
-    _pulses(r, 85)
+    _hot_wait(r, 85)
     r.go(5, temp=85)
     r.go(5, temp=79)
     assert r.st['phase'] == 'korrektur'                           # 79 °C: im Rückkehrbereich, 1 min warten
@@ -299,7 +298,7 @@ def test_return_at_once_below_the_target_range(miner):
 def test_no_plus_steps_in_correction_phase(miner):
     ac = FakeAC(level=5)
     r = started(miner, ac, level=5, learned={'5': {'mhz': 300, 'temp_avg': 82, 'at': 'x', 'count': 1}})
-    _pulses(r, 86)
+    _hot_wait(r, 86)
     r.go(5, temp=86)
     clock = miner.clock()
     r.go(50, temp=82)                                             # in 80-84, noch keine Minute: keine Plus-Schritte
@@ -511,10 +510,9 @@ def test_automation_off_sends_no_clock(miner):
 def test_fan_error_retried_until_it_works(miner):
     ac = FakeAC(level=5)
     r = started(miner, ac, level=5, learned={'5': {'mhz': 250, 'temp_avg': 82, 'at': 'x', 'count': 1}})
-    _pulses(r, 86)
     ac.fail = True
-    r.go(5, temp=86)
-    assert ac.level == 5 and r.st['ac_error']
+    r.go(5, temp=86)                                              # Lüfter +1 sofort (Nutzer 28.10.): schlägt fehl
+    assert ac.level == 5 and r.st['ac_error'] and r.st['corr']
     r.go(25, temp=86)
     ac.fail = False
     r.go(25, temp=86)
@@ -599,8 +597,10 @@ def test_simulation_reaches_band_and_stays_safe(miner):
 
 
 def test_simulation_room_plus_15_corrects(miner):
+    """Nutzer 28.10.: Ausflüge unter 60 s über U senken den Takt nicht – im Schätzmodell pendelt der Lüfter danach
+    zwischen Basisstufe und +1 (vorher mit Lüfterstößen: zurück auf die Basisstufe, Takt gesenkt)."""
     r, peak, mn = _sim(5, room=lambda run: 15 if run.now >= T0 + timedelta(hours=1) else 0)
-    assert peak < 88 and r.st['fan_target'] == 5
+    assert peak < 88 and r.st['fan_target'] in (5, 6)
 
 
 # ---------------------------------------------------------------- Befunde der Prüfung (25.10.)
@@ -615,12 +615,15 @@ def test_start_after_restart_even_with_invalid_temperature(miner):
     assert r.events('start')[-1]['trigger'] == 'Neustart des Miners' and miner.clock() == 250
 
 
-def test_alternating_84_85_corrects_at_most_once_per_window(miner):
+def test_alternating_84_85_no_clock_change_fan_stays_plus_1(miner):
+    """Nutzer 28.10.: jeder Ausflug auf 85 °C ist nach 5 s wieder ≤ 84 °C – keine Taktsenkung; die Korrekturphase
+    (Lüfter +1) läuft weiter, weil die Temperatur nie 1 min in 79–84 °C bleibt."""
     ac = FakeAC(level=5)
     r = started(miner, ac, level=5, learned={'5': {'mhz': 300, 'temp_avg': 82, 'at': 'x', 'count': 1}})
     r.go(30, temp=lambda r: 85 if int((r.now - T0).total_seconds() // 5) % 2 else 84)
-    assert miner.clock() == 290                                   # nur die erste Korrektur, danach Fenster/Tendenz
-    assert len(r.events('luefterstoss')) == 1                     # Stoß beim ersten 85, beim zweiten gleich korrigiert
+    assert miner.clock() == 300 and r.st['clock_set'] == 300 and r.st['corr'] and ac.level == 6
+    assert len([n for n in r.st['log'] if n[1] == 'Chiptemperatur wieder 84 °C nach 5 s: keine Taktsenkung.']) == 2
+    assert len(r.events('hohe_temperatur')) == 1 and not r.events('luefterstoss')
 
 
 def test_entering_band_from_below_is_no_minus_step(miner):
@@ -671,7 +674,7 @@ def test_missing_stock_clock_is_estimated_and_never_blocks(miner):
     miner.level, miner.points = 1, list(STOCK['2/L1'])           # mode 01: kein Profil, kein gemerkter Standardtakt
     r = started(miner, ac, level=5, learned={'5': {'mhz': 410, 'temp_avg': 82, 'at': 'x', 'count': 1}})
     assert miner.clock() == 410
-    _pulses(r, 86)
+    _hot_wait(r, 86)
     r.go(5, temp=86)                                              # kurz in 79–84 °C: −10
     assert miner.clock() == 400 and r.events('fehler')[0]['details']['grund'] == 'standardtakt_fehlt'
 
@@ -734,7 +737,7 @@ def test_calm_5_min_after_a_hot_reduction(miner):
     Unterschreiten), danach wieder Plus-Schritte."""
     ac = FakeAC(level=5)
     r = started(miner, ac, level=5, learned={'5': {'mhz': 300, 'temp_avg': 82, 'at': 'x', 'count': 1}})
-    _pulses(r, 85)
+    _hot_wait(r, 85)
     r.go(10, temp=85)
     assert r.st['clock_set'] == 290                               # ab 85 °C −10
     r.go(40, temp=82)
@@ -753,19 +756,21 @@ def test_calm_5_min_after_a_hot_reduction(miner):
 def test_calm_ends_above_84(miner):
     ac = FakeAC(level=5)
     r = started(miner, ac, level=5, learned={'5': {'mhz': 300, 'temp_avg': 82, 'at': 'x', 'count': 1}})
-    _pulses(r, 85)
+    _hot_wait(r, 85)
     r.go(10, temp=85)
     r.go(40, temp=82)
     r.go(60, temp=78)
     assert r.st.get('calm')
-    r.go(5, temp=85)                                              # keine 10 min seit den Stößen: gleich korrigiert
-    assert not r.st.get('calm') and r.events('taktsperre_ende') and r.st['clock_set'] == 280   # wieder −10
+    r.go(5, temp=85)                                              # über 84 °C: Sperre endet sofort
+    assert not r.st.get('calm') and r.events('taktsperre_ende') and r.st['clock_set'] == 290
+    r.go(60, temp=85)                                             # neue Korrekturphase: Takt nach 60 s über 84 °C
+    assert r.st['clock_set'] == 280                               # wieder −10
 
 
 def test_calm_only_once_per_hot_change_and_not_after_a_plus_step(miner):
     ac = FakeAC(level=5)
     r = started(miner, ac, level=5, learned={'5': {'mhz': 300, 'temp_avg': 82, 'at': 'x', 'count': 1}})
-    _pulses(r, 85)
+    _hot_wait(r, 85)
     r.go(10, temp=85)
     r.go(40, temp=82)
     r.go(60, temp=78)
@@ -926,7 +931,12 @@ def test_temp_test_ended_by_user(miner):
     assert r.st['phase'] == 'normal'
     r.kw['temp_test_at'] = None
     r.go(5, temp=86)
-    assert 'test' not in r.st and r.st['stoss']['n'] == 1         # 86 °C ist ohne Test wieder „hoch“: erst Lüfterstöße
+    # 86 °C ist ohne Test wieder „hoch“: Korrekturphase, Lüfter +1 sofort; Takt 60 s nach Lüfter +1 (Review 28.10.)
+    assert 'test' not in r.st and r.st['corr'] and ac.level == 3 and r.st['clock_set'] == 349
+    r.go(55, temp=86)
+    assert r.st['clock_set'] == 349
+    r.go(5, temp=86)
+    assert r.st['clock_set'] == 339
 
 
 def test_temp_test_state_before_v206_begins_new(miner):
@@ -942,7 +952,7 @@ def test_no_calm_during_takt_messung(miner):
     """Review 25.10.: während der Takt-Messung ist die Taktregelung pausiert – keine Taktsperre."""
     ac = FakeAC(level=5)
     r = started(miner, ac, level=5, learned={'5': {'mhz': 300, 'temp_avg': 82, 'at': 'x', 'count': 1}})
-    _pulses(r, 85)
+    _hot_wait(r, 85)
     r.go(10, temp=85)
     r.go(40, temp=82)
     r.kw['cal'] = True
@@ -958,7 +968,7 @@ def test_85_after_short_stay_in_band_minus_10(miner):
     r.go(60, temp=75)                                             # unter 79 °C
     clock = r.st['clock_set']
     r.go(4 * 60, temp=82)                                         # 4 min in 79–84 °C (Grenze 5 min, Nutzer 26.10.)
-    _pulses(r, 85)
+    _hot_wait(r, 85)
     r.go(5, temp=85)
     assert r.st['clock_set'] == clock - 10 and ac.level == 6
     takt = r.events('takt')[-1]
@@ -972,7 +982,7 @@ def test_85_and_86_after_long_stay_minus_5_for_the_whole_correction_phase(miner)
     ac = FakeAC(level=5)
     r = started(miner, ac, level=5, learned={'5': {'mhz': 300, 'temp_avg': 82, 'at': 'x', 'count': 1}})
     r.go(11 * 60, temp=82)
-    _pulses(r, 85)
+    _hot_wait(r, 85)
     r.go(5, temp=85)
     assert r.st['clock_set'] == 295                               # −5
     r.go(35, temp=85)
@@ -989,7 +999,7 @@ def test_jump_from_below_79_to_85_counts_as_no_stay(miner):
     r = started(miner, ac, level=5, tmax=75, learned={'5': {'mhz': 300, 'temp_avg': 82, 'at': 'x', 'count': 1}})
     r.go(60, temp=75)
     clock = r.st['clock_set']
-    _pulses(r, 85)
+    _hot_wait(r, 85)
     r.go(5, temp=85)
     assert r.st['clock_set'] == clock - 10
 
@@ -998,13 +1008,14 @@ def test_new_measurement_after_the_correction_phase(miner):
     ac = FakeAC(level=5)
     r = started(miner, ac, level=5, learned={'5': {'mhz': 300, 'temp_avg': 82, 'at': 'x', 'count': 1}})
     r.go(11 * 60, temp=82)
-    _pulses(r, 85)
+    _hot_wait(r, 85)
     r.go(5, temp=85)
     assert r.st['clock_set'] == 295                               # 11 min → −5
     r.go(70, temp=82)                                             # 1 min stabil: Rückkehr, Korrekturphase endet
     assert r.st['phase'] == 'normal'
     r.go(2 * 60, temp=83)
-    r.go(5, temp=85)                                              # jetzt nur ~3 min in 79–84 °C → −10 (keine Stöße: < 10 min)
+    _hot_wait(r, 85)
+    r.go(5, temp=85)                                              # jetzt nur ~3 min in 79–84 °C → −10
     assert r.st['clock_set'] == 285
 
 
@@ -1053,7 +1064,7 @@ def test_start_hold_keeps_high_temperature_rules(miner):
     r.go(30, temp=82)
     miner.elapsed = 10
     r.go(30, temp=70)
-    _pulses(r, 85)
+    _hot_wait(r, 85)
     r.go(5, temp=85)
     assert r.st['clock_set'] == 290 and r.st['phase'] == 'korrektur'   # Absenkung ab 85 °C gilt weiter
 
@@ -1273,14 +1284,14 @@ def test_settings_page_down_regulation_goes_on(miner):
     miner.web_down = True
     r.go(60, temp=82)
     assert not r.events('einstellungsseite_aus') and not r.events('miner_offline')
-    _pulses(r, 85)
+    _hot_wait(r, 85)
     r.go(5, temp=85)
     assert r.st['clock_set'] == 290 and r.st['phase'] == 'korrektur'   # regelt weiter (Absenkung ab 85 °C)
     r.go(60, temp=82)
     ev = r.events('einstellungsseite_aus')
     assert len(ev) == 1 and ev[0]['ok'] is None and ev[0]['trigger'] == ('A15-Einstellungsseite antwortet nicht – '
                                                                        'Mining-Schnittstelle ok')
-    miner.web_down = False                                        # (die 60 s davor stecken in den Lüfterstößen)
+    miner.web_down = False                                        # (dazu die 60 s über 84 °C bis zur Taktsenkung)
     r.go(5, temp=82)
     assert r.events('einstellungsseite_an')[0]['trigger'] == 'A15-Einstellungsseite wieder erreichbar nach 3 min'
     assert not r.events('miner_offline')
@@ -1351,7 +1362,7 @@ def test_settings_never_read_keeps_the_last_known_mode(miner):
     r = started(miner, ac, level=5, learned={'5': {'mhz': 300, 'temp_avg': 82, 'at': 'x', 'count': 1}})
     r.go(30, temp=82)
     miner.web_down = miner.never_read = True
-    _pulses(r, 85)
+    _hot_wait(r, 85)
     r.go(5, temp=85)
     assert not r.events('miner_offline') and r.st['mode_key'] == '2/L4' and r.st['clock_set'] == 290
 
@@ -1404,7 +1415,7 @@ def test_dwell_limit_is_5_min(miner):
     r.go(60, temp=75)
     clock = r.st['clock_set']
     r.go(5 * 60, temp=82)                                         # 5 min in 79–84 °C
-    _pulses(r, 85)
+    _hot_wait(r, 85)
     r.go(5, temp=85)
     assert r.st['clock_set'] == clock - 5
 
@@ -1582,7 +1593,7 @@ def test_range_82_85_no_clock_change_inside_learning_until_85(miner):
         r.go(60, temp=temp)
     assert miner.clock_sets == sets and r.st['phase'] == 'normal' and ac.level == 5
     assert r.st['learn_since'] and r.events('lernen_start')[0]['trigger'] == 'Chiptemperatur 82 °C in 82–85 °C'
-    _pulses(r, 86)
+    _hot_wait(r, 86)
     r.go(5, temp=86)                                              # ab U+1: hohe Chiptemperatur, Lernen bricht ab
     assert r.st['phase'] == 'korrektur' and ac.level == 6 and r.st['clock_set'] == 295 and not r.st['learn_since']
     assert r.events('takt')[-1]['trigger'] == 'Chiptemperatur 86 °C nach 5 min in 82–85 °C: Takt −5 MHz'
@@ -1617,7 +1628,7 @@ def test_range_82_85_return_band(miner):
     """Rückkehr nach 1 min stabil in 82–85 °C, sofort unter 82 °C."""
     ac = FakeAC(level=5)
     r = started(miner, ac, level=5, learned={'5': LW}, zb=(82, 85))
-    _pulses(r, 86)
+    _hot_wait(r, 86)
     r.go(5, temp=86)
     assert ac.level == 6
     r.go(55, temp=85)
@@ -1626,7 +1637,8 @@ def test_range_82_85_return_band(miner):
     r.go(15, temp=85)
     assert ac.level == 5 and r.st['phase'] == 'normal'
     assert r.events('rueckkehr')[-1]['trigger'] == '1 min stabil in 82–85 °C'
-    r.go(5, temp=86)                                              # keine 10 min seit den Stößen: gleich korrigiert
+    r.go(5, temp=86)                                              # neue Korrekturphase: Lüfter +1, Takt erst nach 60 s
+    assert r.st['phase'] == 'korrektur' and r.st['clock_set'] == 290
     r.go(5, temp=81)
     assert r.st['phase'] == 'normal' and r.events('rueckkehr')[-1]['trigger'] == 'Chiptemperatur 81 °C unter 82 °C'
 
@@ -1636,7 +1648,7 @@ def test_range_89_92_high_from_93_and_96_cap(miner):
     r = started(miner, ac, level=5, tmax=90, learned={'5': LW}, zb=(89, 92))
     r.go(60, temp=92)
     assert r.st['clock_set'] == 300 and r.st['phase'] == 'normal'
-    _pulses(r, 93)
+    _hot_wait(r, 93)
     r.go(5, temp=93)
     assert ac.level == 6 and r.st['clock_set'] == 290             # U+1: Lüfter +1, kurzer Aufenthalt −10
     r.go(40, temp=96)
@@ -1651,7 +1663,7 @@ def test_narrow_range_76_77(miner):
     r.go(60, temp=76)
     r.go(60, temp=77)
     assert miner.clock_sets == sets and r.st['phase'] == 'normal'
-    _pulses(r, 78)
+    _hot_wait(r, 78)
     r.go(5, temp=78)                                              # ab 78 °C hoch
     assert ac.level == 6 and r.st['clock_set'] == 290
     r.go(5, temp=77)
@@ -1863,10 +1875,10 @@ def test_select_reads_the_target_range(monkeypatch):
     assert 'f.target_low' in seen[0] and 'f.target_high' in seen[0]
 
 
-# ---------------------------------------------------------------- Lüfterstöße (Nutzer 27.10.)
+# ---------------------------------------------------------------- Takt erst nach 60 s über U (Nutzer 28.10.)
+# ersetzt die Lüfterstöße oben vom 27.10.
 
 ZB = [None, (82, 85)]                                             # Testbereich 79–84 und Startwert des Nutzers 82–85
-STOSS_WEITER = 'Lüfterstoß: keine Bestätigung nach 30 s – weiter.'
 
 
 def _hot(zb, plus=1):
@@ -1874,225 +1886,291 @@ def _hot(zb, plus=1):
     return (zb or (79, 84))[1] + plus
 
 
+def _no_clock_note(r):
+    return not any('keine Taktsenkung' in n[1] for n in r.st['log'])
+
+
 @pytest.mark.parametrize('zb', ZB)
-def test_pulses_first_then_correction_phase_after_70_s(miner, zb):
-    """Ab U+1 zuerst zwei Lüfterstöße: Basisstufe + 1, 6 s ab der Bestätigung (Lüftersteuerung meldet die Stufe, gelesen
-    10 s nach dem Befehl), dann zurück; kein Takt. Danach Korrekturphase wie bisher – erste Taktsenkung 70 s nach dem
-    ersten Wert über U."""
+def test_u_plus_1_fan_at_once_clock_only_after_60_s(miner, zb):
+    """Ab U+1 bis U+3: Korrekturphase mit Lüfter +1 sofort (Ereignis hohe_temperatur wie bisher), aber noch kein Takt;
+    nach 60 s ununterbrochen über U die erste Taktsenkung nach der Aufenthaltsregel. Keine Lüfterstöße mehr."""
     ac = FakeAC(level=5)
     r = started(miner, ac, level=5, learned={'5': LW}, zb=zb)
     r.go(30, temp=83)
     hot, start, n = _hot(zb), r.now, len(ac.writes)
     r.go(5, temp=hot)
-    assert r.st['stoss'] == {'n': 1, 'step': 'an', 'at': start.isoformat(), 'level': 6}
-    assert ac.level == 6 and r.st['phase'] == 'normal' and not r.st['corr'] and not r.st['learn_since']
-    ev = r.events('luefterstoss')[-1]
-    assert ev['trigger'] == 'Lüfterstoß 1/2: Stufe 6 für 6 s (Chiptemperatur %d °C)' % hot
-    assert ev['fan_old'] == 5 and ev['fan_new'] == 6
-    r.go(15, temp=hot)
-    assert r.st['stoss']['step'] == 'an' and r.st['stoss']['ok'] == (start + timedelta(seconds=10)).isoformat()
-    r.go(5, temp=hot)                                             # 6 s nach der Bestätigung: zurück
-    assert r.st['stoss'] == {'n': 1, 'step': 'aus', 'at': (start + timedelta(seconds=20)).isoformat(), 'level': 5}
-    assert ac.level == 5
-    r.go(15, temp=hot)                                            # „aus“ bestätigt: Stoß 2
-    assert r.st['stoss']['n'] == 2 and r.st['stoss']['step'] == 'an' and ac.level == 6
-    assert r.events('luefterstoss')[-1]['trigger'] == 'Lüfterstoß 2/2: Stufe 6 für 6 s (Chiptemperatur %d °C)' % hot
-    r.go(20, temp=hot)
-    assert r.st['stoss']['n'] == 2 and r.st['stoss']['step'] == 'aus' and ac.level == 5
-    r.go(10, temp=hot)
-    assert r.st['stoss'] and not r.st['corr'] and r.st['clock_set'] == 300 and miner.clock() == 300
-    r.go(5, temp=hot)                                             # Stoß 2 „aus“ bestätigt: fertig, Korrekturphase
-    assert not r.st['stoss'] and r.st['corr'] and ac.level == 6 and r.st['clock_set'] == 290 and miner.clock() == 290
-    assert ac.writes[n:] == [6, 5, 6, 5, 6]
-    assert r.events('luefterstoss_ende')[-1]['trigger'] == 'Lüfterstöße fertig: %d °C, Takt wird gesenkt' % hot
+    assert r.st['corr'] and r.st['corr_wait'] and r.st['hot_wait'] == start.isoformat()
+    assert ac.level == 6 and r.st['phase'] == 'korrektur' and not r.st['learn_since'] and r.st['clock_set'] == 300
+    ev = r.events('hohe_temperatur')[-1]
+    assert ev['trigger'] == 'Chiptemperatur %d °C (Tabelle ab %d °C)' % (hot, hot) and ev['fan_new'] == 6
+    assert ev['details']['takt_minus'] == 10
+    r.go(55, temp=hot)                                            # 55 s über U: noch kein Takt
+    assert r.st['clock_set'] == 300 and miner.clock() == 300
+    assert not [e for e in r.events('takt') if e['recorded_at'] >= start]
+    r.go(5, temp=hot)                                             # 60 s über U: −10 (unter 5 min in L-U)
+    assert r.st['clock_set'] == 290 and miner.clock() == 290 and not r.st['corr_wait'] and not r.st['hot_wait']
     takt = r.events('takt')[-1]
-    assert takt['recorded_at'] - start == timedelta(seconds=70)
+    assert takt['recorded_at'] - start == timedelta(seconds=60)
     assert takt['trigger'] == 'Chiptemperatur %d °C nach 0 min in %d–%d °C: Takt −10 MHz' % (hot, *(zb or (79, 84)))
-    assert all(e['takeover_state'] == 'gemessen' for e in r.events('luefter')[-5:-1])
+    assert ac.writes[n:] == [6] and not r.st.get('stoss') and not r.events('luefterstoss') and _no_clock_note(r)
+
+
+@pytest.mark.parametrize('stay, minus', [(4 * 60, 10), (5 * 60, 5)])
+def test_still_above_u_after_60_s_exactly_one_reduction_by_the_dwell_rule(miner, stay, minus):
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, learned={'5': LW})            # 82 °C ab T0
+    r.go(stay - 10, temp=82)                                      # `stay` s in 79–84 °C bis zum ersten Wert über 84 °C
+    start = r.now
+    r.go(60, temp=85)
+    assert r.st['clock_set'] == 300 and r.events('hohe_temperatur')[-1]['details']['aufenthalt_s'] == stay
+    r.go(5, temp=85)
+    assert r.st['clock_set'] == 300 - minus and miner.clock() == 300 - minus
+    r.go(25, temp=85)                                             # Beobachtungsfenster: genau eine Senkung
+    cuts = [e for e in r.events('takt') if e['recorded_at'] >= start]
+    assert len(cuts) == 1 and r.st['clock_set'] == 300 - minus
+    assert cuts[0]['trigger'] == 'Chiptemperatur 85 °C nach %d min in 79–84 °C: Takt −%d MHz' % (stay // 60, minus)
+
+
+def test_later_reductions_as_before_only_after_the_first(miner):
+    """Nach der ersten Senkung wie bisher: nach dem Beobachtungsfenster und bei nicht fallender Tendenz; ein neuer
+    Ausflug in derselben Korrekturphase wartet dann nicht noch einmal 60 s."""
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, learned={'5': LW})
+    _hot_wait(r, 85)
+    r.go(5, temp=85)
+    assert r.st['clock_set'] == 290                               # erste Senkung nach 60 s
+    r.go(30, temp=85)
+    assert r.st['clock_set'] == 290                               # Beobachtungsfenster 30 s ab der Übernahme
+    r.go(5, temp=85)
+    assert r.st['clock_set'] == 280                               # nicht fallend: wieder −10
+    r.go(40, temp=84)                                             # kurz in 79–84 °C, Korrekturphase läuft weiter
+    assert r.st['corr'] and r.st['clock_set'] == 280
+    r.go(5, temp=85)                                              # neuer Ausflug, Fenster vorbei: gleich −10
+    assert r.st['clock_set'] == 270 and len(r.events('hohe_temperatur')) == 1 and _no_clock_note(r)
 
 
 @pytest.mark.parametrize('zb', ZB)
-@pytest.mark.parametrize('secs, n', [(10, 1), (40, 2)])
-def test_pulses_end_back_in_the_target_range_without_clock_change(miner, zb, secs, n):
-    """Zurück in L-U während Stoß 1 oder 2: Ende, Lüfter Basisstufe, kein Takt, keine Korrekturphase; danach die
-    normalen Regeln (unter L +5)."""
+@pytest.mark.parametrize('secs', [15, 55])
+def test_back_at_u_before_60_s_no_clock_change_fan_back_by_the_return_rule(miner, zb, secs):
+    """Vor Ablauf der 60 s ein Wert ≤ U: keine Taktsenkung für diesen Ausflug (Hinweis), Lüfter zurück nach der
+    Rückkehr-Regel (1 min stabil in L-U); danach die normalen Regeln, keine Taktsperre (keine Taktänderung über U)."""
     ac = FakeAC(level=5)
     r = started(miner, ac, level=5, learned={'5': LW}, zb=zb)
-    hot, hi = _hot(zb), _hot(zb, 0)
+    lo, hi = zb or (79, 84)
     sets = list(miner.clock_sets)
-    r.go(5 + secs, temp=hot)
-    assert r.st['stoss']['n'] == n and r.st['stoss']['step'] == 'an' and ac.level == 6
+    r.go(secs, temp=hi + 1)
+    assert r.st['corr'] and ac.level == 6
     r.go(5, temp=hi)
-    assert not r.st['stoss'] and not r.st['corr'] and r.st['phase'] == 'normal' and ac.level == 5
-    assert r.events('luefterstoss_ende')[-1]['trigger'] == 'Lüfterstöße beendet: wieder im Zielbereich (%d °C)' % hi
-    r.go(120, temp=hi)
-    assert miner.clock_sets == sets and r.st['clock_set'] == 300 and not r.events('hohe_temperatur')
-    r.go(65, temp=(zb or (79, 84))[0] - 2)                       # nach 60 s unter L (bei L−1 kämen Lüfterstöße unten)
-    assert r.st['clock_set'] == 305 and miner.clock() == 305
+    assert r.st['phase'] == 'korrektur' and ac.level == 6 and not r.st.get('hot_wait') and r.st['corr_wait']
+    assert any(n[1] == 'Chiptemperatur wieder %d °C nach %d s: keine Taktsenkung.' % (hi, secs) for n in r.st['log'])
+    r.go(55, temp=hi)
+    assert r.st['corr'] and ac.level == 6
+    r.go(5, temp=hi)                                              # 1 min stabil in L-U: Rückkehr zur Basisstufe
+    assert not r.st['corr'] and ac.level == 5 and r.events('rueckkehr')[-1]['trigger'] == '1 min stabil in %d–%d °C' % (lo, hi)
+    assert miner.clock_sets == sets and r.st['clock_set'] == 300
+    r.go(65, temp=lo - 2)                                         # nach 60 s unter L: +5
+    assert r.st['clock_set'] == 305 and miner.clock() == 305 and not r.events('taktsperre')
+
+
+def test_taktsperre_only_after_a_real_clock_change_above_u(miner):
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, learned={'5': LW})
+    r.go(30, temp=85)                                             # 30 s über 84 °C: keine Taktsenkung
+    r.go(5, temp=78)                                              # unter 79 °C: Rückkehr, aber keine Taktsperre
+    assert not r.st['corr'] and not r.st.get('calm') and not r.events('taktsperre') and r.st['clock_set'] == 300
+    _hot_wait(r, 85)
+    r.go(5, temp=85)                                              # 60 s über 84 °C: −10 bei 85 °C
+    assert r.st['clock_set'] == 290
+    r.go(5, temp=78)
+    assert r.st.get('calm') and len(r.events('taktsperre')) == 1
 
 
 @pytest.mark.parametrize('zb', ZB)
-def test_pulses_abort_at_u_plus_4_table_at_once(miner, zb):
+def test_u_plus_4_during_the_wait_reduces_at_once(miner, zb):
     ac = FakeAC(level=5)
     r = started(miner, ac, level=5, learned={'5': LW}, zb=zb)
     r.go(30, temp=_hot(zb))
-    assert r.st['stoss']['n'] == 1 and r.st['stoss']['step'] == 'aus'
+    assert r.st['corr'] and r.st['corr_wait'] and ac.level == 6 and r.st['clock_set'] == 300
     r.go(5, temp=_hot(zb, 4))
-    assert not r.st['stoss'] and r.st['corr'] and ac.level == 7 and r.st['clock_set'] == 270 and miner.clock() == 270
-    assert r.events('luefterstoss_ende')[-1]['trigger'] == 'Lüfterstöße abgebrochen: %d °C – Tabelle' % _hot(zb, 4)
-    assert r.events('hohe_temperatur')[-1]['details']['takt_minus'] == 30
+    assert ac.level == 7 and r.st['clock_set'] == 270 and miner.clock() == 270
+    assert not r.st['corr_wait'] and not r.st['hot_wait'] and len(r.events('hohe_temperatur')) == 1
+    assert r.events('takt')[-1]['trigger'] == 'Chiptemperatur %d °C (ab %d °C): Takt −30 MHz' % (_hot(zb, 4), _hot(zb, 4))
 
 
 @pytest.mark.parametrize('zb', ZB)
-def test_jump_to_u_plus_4_no_pulses(miner, zb):
+def test_jump_to_u_plus_4_reduces_at_once(miner, zb):
     ac = FakeAC(level=5)
     r = started(miner, ac, level=5, learned={'5': LW}, zb=zb)
     r.go(5, temp=_hot(zb, 4))
-    assert not r.events('luefterstoss') and not r.st.get('stoss')
-    assert r.st['corr'] and ac.level == 7 and r.st['clock_set'] == 270
+    assert r.st['corr'] and ac.level == 7 and r.st['clock_set'] == 270 and not r.st['corr_wait']
+    assert r.events('hohe_temperatur')[-1]['details']['takt_minus'] == 30
 
 
-def test_pulses_up_to_95_with_range_89_92_table_from_96(miner):
-    """Deckel 96 °C: bei 89–92 °C sind 93–95 °C die Zeilen ohne Taktwert (Lüfterstöße), ab 96 °C gilt die Tabelle."""
+def test_wait_up_to_95_with_range_89_92_table_from_96(miner):
+    """Deckel 96 °C: bei 89–92 °C sind 93–95 °C die Zeilen ohne Taktwert (Takt erst nach 60 s), ab 96 °C sofort."""
     ac = FakeAC(level=5)
     r = started(miner, ac, level=5, tmax=90, learned={'5': LW}, zb=(89, 92))
     r.go(10, temp=92)
     r.go(5, temp=95)
-    assert r.st['stoss'] and r.st['clock_set'] == 300
+    assert r.st['corr'] and ac.level == 6 and r.st['clock_set'] == 300
     r.go(5, temp=96)
-    assert not r.st['stoss'] and ac.level == 7 and r.st['clock_set'] == 200
-
-
-def test_pulses_without_confirmation_go_on_after_30_s(miner):
-    """Lüftersteuerung übernimmt nicht (Befehl schlägt fehl): jeder Schritt nach 30 s weiter, dann Korrekturphase."""
-    ac = FakeAC(level=5)
-    r = started(miner, ac, level=5, learned={'5': LW})
-    r.go(30, temp=82)
-    ac.fail = True
-    start = r.now
-    r.go(30, temp=85)
-    assert r.st['stoss']['n'] == 1 and r.st['stoss']['step'] == 'an' and ac.level == 5
-    r.go(5, temp=85)
-    assert r.st['stoss']['step'] == 'aus' and r.st['log'][-1][1] == STOSS_WEITER
-    r.go(85, temp=85)
-    assert r.st['stoss']['n'] == 2 and r.st['clock_set'] == 300
-    r.go(5, temp=85)
-    assert not r.st['stoss'] and r.st['corr'] and r.st['clock_set'] == 290 and miner.clock() == 290
-    assert r.events('takt')[-1]['recorded_at'] - start == timedelta(seconds=120)
-    assert len([x for x in r.st['log'] if x[1] == STOSS_WEITER]) == 4
+    assert ac.level == 7 and r.st['clock_set'] == 200
 
 
 @pytest.mark.parametrize('zb', ZB)
-def test_pending_command_goes_on_when_pulses_start(miner, zb):
-    """Review 27.10.: der Stoßbeginn verwirft nichts (sonst liefen gesetzter Takt und Miner auseinander); verworfen wird
-    erst beim Eintritt in die Korrekturphase."""
+def test_new_excursion_in_the_correction_phase_waits_60_s_again(miner, zb):
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, learned={'5': LW}, zb=zb)
+    hot, hi = _hot(zb), _hot(zb, 0)
+    r.go(30, temp=hot)                                            # 30 s über U
+    r.go(10, temp=hi)                                             # wieder ≤ U: keine Senkung, Korrekturphase läuft
+    assert r.st['corr'] and r.st['corr_wait'] and ac.level == 6
+    assert any(n[1] == 'Chiptemperatur wieder %d °C nach 30 s: keine Taktsenkung.' % hi for n in r.st['log'])
+    start = r.now
+    r.go(60, temp=hot)                                            # neuer Ausflug: 55 s (105 s seit dem ersten Wert über U)
+    assert r.st['clock_set'] == 300 and r.st['hot_wait'] == start.isoformat()
+    r.go(5, temp=hot)                                             # 60 s seit dem neuen Ausflug: −10
+    assert r.st['clock_set'] == 290 and miner.clock() == 290 and len(r.events('hohe_temperatur')) == 1
+
+
+@pytest.mark.parametrize('zb', ZB)
+def test_pending_command_goes_on_during_the_wait(miner, zb):
+    """Review 27.10.: der Beginn der Korrekturphase ohne Taktsenkung verwirft nichts (sonst liefen gesetzter Takt und
+    Miner auseinander); verworfen wird erst bei der ersten Taktsenkung."""
     ac = FakeAC(level=5)
     r = started(miner, ac, level=5, tmax=78, learned={'5': LW}, zb=zb)
     miner.ignore_clock = True
     r.go(115, temp=78)                                            # +5 gesendet, Miner übernimmt nicht: offen
     assert r.st['pending']['value'] == 305
     r.go(5, temp=_hot(zb))
-    assert r.st['stoss'] and r.st['pending']['value'] == 305 and r.st['clock_set'] == 305
-    r.go(70, temp=_hot(zb))                                       # Stöße fertig, Korrekturphase: Befehl abgelöst, 305 − 10
-    assert r.st['corr'] and r.st['clock_set'] == 295
+    assert r.st['corr'] and r.st['pending']['value'] == 305 and r.st['clock_set'] == 305
+    r.go(55, temp=_hot(zb))
+    assert r.st['pending']['value'] == 305 and r.st['clock_set'] == 305
+    r.go(5, temp=_hot(zb))                                        # 60 s: Befehl abgelöst, 305 − 10
+    assert r.st['corr'] and r.st['clock_set'] == 295 and r.st['pending']['value'] == 295
 
 
 def test_start_in_the_round_of_the_crossing_sends_its_clock(miner):
-    """Review 27.10.: Basisstufe gewählt in der Runde 83 → 85 °C – der Starttakt wird trotz Lüfterstößen gesendet."""
+    """Review 27.10.: Basisstufe gewählt in der Runde 83 → 85 °C – der Starttakt wird gesendet (Takt erst nach 60 s)."""
     ac = FakeAC(level=5)
     r = started(miner, ac, level=5, learned={'5': LW, '7': dict(LW, mhz=330)})
     r.go(30, temp=83)
     r.level = 7
     r.go(5, temp=85, level_at='neu')
-    assert r.st['stoss'] and r.st['clock_set'] == 330
+    assert r.st['corr'] and r.st['clock_set'] == 330 and ac.level == 8
     r.go(15, temp=85)
     assert round(miner.clock()) == 330
 
 
 @pytest.mark.parametrize('zb', ZB)
-def test_new_pulses_only_after_u_minus_1_and_10_min(miner, zb):
-    """Nutzer 27.10. (gegen Pendeln an U, „Beides“): neue Stöße erst nach einem Wert ≤ U−1 und höchstens ein Stoßpaar
-    je 10 min; sonst gleich die Korrekturphase."""
-    ac = FakeAC(level=5)
-    r = started(miner, ac, level=5, learned={'5': LW}, zb=zb)
-    r.go(50, temp=_hot(zb))                                       # Stoß 2 läuft
-    r.go(5, temp=_hot(zb, 0))                                     # U: Stöße enden, kein ≤ U−1
-    assert not r.st['stoss'] and not r.st['corr']
-    r.go(5, temp=_hot(zb))
-    assert r.st['corr'] and not r.st['stoss'] and len(r.events('luefterstoss')) == 2   # gleich korrigiert
-    r.go(70, temp=_hot(zb, -1))                                   # U−1: Rückkehr, wieder frei – aber keine 10 min
-    assert not r.st['corr'] and r.st['stoss_frei']
-    r.go(5, temp=_hot(zb))
-    assert r.st['corr'] and len(r.events('luefterstoss')) == 2
-    r.go(70, temp=_hot(zb, -1))
-    r.go(10 * 60, temp=_hot(zb, -2))                              # 10 min seit dem letzten Stoßpaar
-    r.go(5, temp=_hot(zb))
-    assert r.st['stoss']['n'] == 1 and len(r.events('luefterstoss')) == 3 and not r.st['corr']
-
-
-@pytest.mark.parametrize('zb', ZB)
-def test_no_pulses_during_takt_messung(miner, zb):
+def test_takt_messung_fan_at_once_never_a_clock_change(miner, zb):
     ac = FakeAC(level=5)
     r = started(miner, ac, level=5, learned={'5': LW}, zb=zb)
     r.go(10, temp=84, cal=True)
-    r.go(5, temp=86)                                              # Takt-Messung: Lüfterschutz fest ab 85 °C, sofort
-    assert not r.events('luefterstoss') and r.st['corr'] and ac.level == 6
+    sends = len(miner.clock_sets)
+    r.go(90, temp=86)                                             # Takt-Messung: Lüfterschutz fest ab 85 °C, sofort
+    assert r.st['corr'] and ac.level == 6 and len(miner.clock_sets) == sends and not r.st.get('hot_wait')
+    r.go(5, temp=84)
+    assert _no_clock_note(r) and len(miner.clock_sets) == sends
 
 
-def test_takt_messung_beginning_ends_the_pulses(miner):
+def test_takt_messung_beginning_during_the_wait_no_clock_change(miner):
     ac = FakeAC(level=5)
     r = started(miner, ac, level=5, learned={'5': LW})
     r.go(10, temp=85)
-    assert r.st['stoss'] and ac.level == 6
-    r.go(10, temp=84, cal=True)
-    assert not r.st['stoss'] and ac.level == 5 and not r.st['corr'] and not r.events('luefterstoss_ende')
+    assert r.st['corr'] and r.st['hot_wait'] and ac.level == 6
+    sends = len(miner.clock_sets)
+    r.go(90, temp=85, cal=True)                                   # Takt-Messung: nur der Lüfter, auch nach 60 s kein Takt
+    assert r.st['corr'] and ac.level == 6 and len(miner.clock_sets) == sends and r.st['clock_set'] == 300
+    r.go(5, temp=84)
+    assert _no_clock_note(r)
 
 
-def test_no_pulses_during_a_temperature_test_and_its_beginning_ends_them(miner):
+def test_temperature_test_beginning_ends_the_wait_and_no_correction_in_the_test(miner):
     ac = FakeAC(level=2)
     r = started(miner, ac, level=2, learned={'2': {'mhz': 319.2, 'temp_avg': 82, 'at': 'x', 'count': 1}})
     r.go(10, temp=85)
-    assert r.st['stoss'] and ac.level == 3
+    assert r.st['corr'] and ac.level == 3
     r.kw['temp_test_at'] = r.now.isoformat()
     r.go(5, temp=85)
-    assert not r.st['stoss'] and r.st['test'] and ac.level == 2 and not r.events('luefterstoss_ende')
+    assert not r.st['corr'] and not r.st.get('hot_wait') and r.st['test'] and ac.level == 2
     r.go(10, temp=83)
-    r.go(60, temp=86)
-    assert len(r.events('luefterstoss')) == 1 and ac.level == 2 and not r.st['corr']
+    r.go(60, temp=86)                                             # im Test: fester Takt, Lüfter auf der Basisstufe
+    assert ac.level == 2 and not r.st['corr'] and r.st['clock_set'] == 319 and _no_clock_note(r)
 
 
-def test_restart_during_pulses_clears_them(miner):
+def test_restart_during_the_wait_clears_it(miner):
     ac = FakeAC(level=5)
     r = started(miner, ac, level=5, learned={'5': LW})
     r.go(10, temp=85)
-    assert r.st['stoss']
+    assert r.st['hot_wait']
     miner.elapsed = 10                                            # Neustart: Chips kalt
     r.go(5, temp=26)
-    assert not r.st['stoss'] and r.st['heat'] and ac.level == 1 and not r.events('luefterstoss_ende')
-    assert r.events('start')[-1]['trigger'] == 'Neustart des Miners'
+    assert not r.st['corr'] and not r.st.get('corr_wait') and not r.st.get('hot_wait') and r.st['heat'] and ac.level == 1
+    assert r.events('start')[-1]['trigger'] == 'Neustart des Miners' and _no_clock_note(r)
 
 
-def test_start_during_pulses_no_new_pulses_within_10_min(miner):
-    """Basisstufe gewählt während der Stöße bei 85 °C: Stöße enden; neue erst nach ≤ U−1 und 10 min – also gleich die
-    Korrekturphase (Starttakt −10)."""
+def test_start_during_the_wait_counts_from_the_new_correction_phase(miner):
+    """Basisstufe gewählt nach 10 s bei 85 °C: Starttakt (Stufe 3: 330 MHz), Korrekturphase neu mit Lüfter +1; die 60 s
+    zählen ab diesem Lüfter +1 (Review 28.10.), dann Starttakt −10."""
     ac = FakeAC(level=5)
     r = started(miner, ac, level=5, learned={'5': LW})
     r.go(10, temp=85)
     r.level = 3
     r.go(5, temp=85, level_at='neu')
-    assert not r.st['stoss'] and r.st['corr'] and ac.level == 4 and r.st['clock_set'] == 320
-    assert len(r.events('luefterstoss')) == 1
+    corr = r.now - timedelta(seconds=5)
+    assert r.st['corr'] and ac.level == 4 and r.st['clock_set'] == 330
+    r.go(55, temp=85)
+    assert r.st['clock_set'] == 330
+    r.go(5, temp=85)
+    assert r.st['clock_set'] == 320 and r.events('takt')[-1]['recorded_at'] - corr == timedelta(seconds=60)
 
 
-def test_automatik_off_on_does_not_keep_the_pulses(miner):
+def test_no_measurement_gap_counts_as_above_u(miner):
+    """Review 28.10.: 10 s bei 85 °C, dann 60 s keine Antwort – danach zählen die 60 s neu."""
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, learned={'5': LW})
+    r.go(10, temp=85)
+    miner.offline = True
+    r.go(60, temp=85)
+    miner.offline = False
+    r.go(5, temp=85)
+    assert r.st['clock_set'] == 300
+    r.go(50, temp=85)
+    assert r.st['clock_set'] == 300
+    r.go(10, temp=85)
+    assert r.st['clock_set'] == 290
+
+
+def test_automatik_off_on_while_hot_waits_60_s_from_then(miner):
     ac = FakeAC(level=5)
     r = started(miner, ac, level=5, learned={'5': LW})
     r.go(10, temp=85)
     r.go(10, enabled=False)
+    on = r.now
     r.go(5, temp=85, enabled=True)
-    # Automatik ein: Stöße von vorher vergessen, auch die 10-min-Sperre – auch beim Start im heißen Zustand erst Stöße
-    assert r.st['stoss']['n'] == 1 and r.st['stoss']['at'] == (r.now - timedelta(seconds=5)).isoformat()
-    assert not r.st.get('corr') and ac.level == 6 and len(r.events('luefterstoss')) == 2
+    # Automatik ein: Zustand neu, die 60 s beginnen beim ersten Wert über 84 °C danach
+    assert r.st['corr'] and r.st['hot_wait'] == on.isoformat() and ac.level == 6 and r.st['clock_set'] == 300
+
+
+@pytest.mark.parametrize('temp, fan', [(83, 5), (85, 6)])
+def test_old_state_with_hot_pulses_is_cleaned_up(miner, temp, fan):
+    """Zustand vor dem Update mit laufendem Lüfterstoß oben (ohne 'dir'): beendet, Lüfter zurück auf die Basisstufe
+    (bei 85 °C gleich die Korrekturphase mit Lüfter +1), die Sperre der Stöße entfällt; kein Start, kein Takt."""
+    ac = FakeAC(level=6)
+    miner.points = fa.points_for(STOCK['2/L4'], 300)
+    old = {'v': fa.STATE_VERSION, 'seen_at': T0.isoformat(), 'level_seen': 'x', 'zb': [79, 84], 'learned': {'5': LW},
+           'clock_set': 300, 'fan_target': 6, 'fan_set': 6, 'fan_read': 6, 'elapsed': 900, 'start_at': T0.isoformat(),
+           'stoss': {'n': 1, 'step': 'an', 'at': T0.isoformat(), 'level': 6, 'ok': T0.isoformat()},
+           'stoss_at': T0.isoformat(), 'stoss_frei': False}
+    r = Run(miner, ac, 5, state=old)
+    r.go(5, temp=temp)
+    assert r.st['stoss'] is None and 'stoss_at' not in r.st and 'stoss_frei' not in r.st
+    assert r.st['fan_target'] == fan and ac.level == fan and bool(r.st.get('corr')) == (temp == 85)
+    assert r.st['clock_set'] == 300 and miner.clock_sets == [] and not r.events('start')
+    assert not r.events('luefterstoss_ende') and not r.st.get('last_error')
+    r.go(60, temp=temp)
+    assert r.st.get('stoss') is None and 'stoss_frei' not in r.st
 
 
 # ---------------------------------------------------------------- Initialwerte, 60 s unter L, Lüfterstöße unten (Nutzer 28.10.)
@@ -2261,14 +2339,6 @@ def test_no_cold_pulses_at_the_cap(miner):
     r.go(30, temp=82)
     r.go(300, temp=78)
     assert r.st['clock_set'] == 300 and not r.events('luefterstoss')
-
-
-def test_hot_pulses_keep_their_texts_and_state(miner):
-    ac = FakeAC(level=5)
-    r = started(miner, ac, level=5, learned={'5': LW})
-    r.go(5, temp=85)
-    assert 'dir' not in r.st['stoss']
-    assert r.events('luefterstoss')[-1]['trigger'] == 'Lüfterstoß 1/2: Stufe 6 für 6 s (Chiptemperatur 85 °C)'
 
 
 # ---------------------------------------------------------------- Fehlerrate: Obergrenze (Nutzer 28.10.: 4 %, vorher 3)

@@ -69,8 +69,8 @@ const REGULATING = new Set(['normal', 'korrektur', 'ausnahme'])
 const MODE_LABEL = { '2/L4': 'mode 04', '2/L3': 'mode 03', '2/L2': 'mode 02', '2/L1': 'mode 01', '2/L0': 'mode 00',
   '1/-': 'High Performance' }
 // the regulation in short (plan of 24.10.), for the Zielbereich lo–hi (Nutzer 27.10.); Plus-Schritte erst nach 60 s
-// unter lo, Lüfterstöße unten, Ertrags-Prüfung, Obergrenze (4 %) und automatischer Neustart nach der Fehlerrate
-// (Nutzer 28.10.)
+// unter lo, Lüfterstöße unten, Takt bei hi+1 bis hi+3 erst nach 60 s (statt der Lüfterstöße oben), Ertrags-Prüfung,
+// Obergrenze (4 %) und automatischer Neustart nach der Fehlerrate (Nutzer 28.10.)
 function logicText(lo, hi) {
   const range = lo + '–' + hi + ' °C'
   return 'Der Lüfter läuft fest auf der gewählten Basisstufe, der Takt hält den heißesten Chip bei ' + range +
@@ -82,10 +82,9 @@ function logicText(lo, hi) {
     ' °C oder mehr. Ab ' + (hi + 1) +
     ' °C Lüfter +1 bzw. +2 und Takt runter (Korrekturphase; bei ' + (hi + 1) + '–' + (hi + 3) +
     ' °C −10 MHz, wenn sie vorher unter 5 min in ' + range + ' lag, sonst −5 MHz); zurück zur Basisstufe nach ' +
-    '1 min in ' + range + ' oder sobald unter ' + lo + ' °C. Ab ' + (hi + 1) + ' °C zuerst zwei Lüfterstöße ' +
-    '(Basisstufe +1 für 6 s, dann zurück), erst danach Lüfter +1 und Takt runter; zurück im Ziel: keine Senkung; ab ' +
-    (hi + 4) + ' °C sofort nach Tabelle; höchstens ein Stoßpaar je 10 min, neue erst nach ' + (hi - 1) +
-    ' °C oder weniger. War die letzte Taktänderung über ' + hi +
+    '1 min in ' + range + ' oder sobald unter ' + lo + ' °C. Bei ' + (hi + 1) + '–' + (hi + 3) +
+    ' °C Lüfter +1 sofort, den Takt erst, wenn die Temperatur nach 60 s noch über ' + hi + ' °C liegt (vorher ' +
+    'zurück: keine Senkung); ab ' + (hi + 4) + ' °C sofort nach Tabelle. War die letzte Taktänderung über ' + hi +
     ' °C und fällt die Temperatur unter ' + lo + ' °C: 5 min keine Taktänderung (endet über ' + hi + ' °C). ' +
     'Nach Neustart, Wartung oder Over Hot keine Takterhöhung bis ' + lo + ' °C, höchstens 10 min (Startpause). ' +
     'Bei jedem Start Lüfter Stufe 1, bis die Chiptemperatur ' + lo + ' °C erreicht (Heizmodus). ' +
@@ -239,9 +238,9 @@ function AutomationCards({ auto, st, roomTemp, lo, hi }) {
     (st.fan_read_at && st.fan_set_at && Date.parse(st.fan_read_at) >= Date.parse(st.fan_set_at) + 10000)
   // Wartung, Takt-Messung, Over Hot, miner silent: the data-service leaves these fields as they were
   const regulating = REGULATING.has(st.phase) && !st.offline && !st.over_hot
-  // Lüfterstoß (Nutzer 27.10.): ab hi+1 zuerst zwei Stöße, noch keine Korrekturphase; Status wie beim Heizmodus;
-  // unten (Nutzer 28.10., dir 'down'): bei lo−1 Basisstufe −1 statt der Takterhöhung, gleiche Anzeige
-  const pulse = regulating ? st.stoss : null
+  // Lüfterstöße unten (Nutzer 28.10., dir 'down'): bei lo−1 Basisstufe −1 statt der Takterhöhung; Status wie beim
+  // Heizmodus. Die Lüfterstöße oben entfallen (Nutzer 28.10.)
+  const pulse = regulating && st.stoss?.dir === 'down' ? st.stoss : null
   const fanSub = [
     running === base ? '= Basisstufe' : 'Basisstufe ' + base,
     pulse ? 'Lüfterstoß ' + pulse.n + '/2' : null,

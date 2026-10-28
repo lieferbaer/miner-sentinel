@@ -11,9 +11,9 @@ Regelungslogik nach dem Plan vom 24.10.2026 (docs/claude/Regelungslogik-Luefter-
   * Schritt 1 - hohe Chiptemperatur (ab U+1): Lüfter = Basisstufe + 1/+2 (Korrekturphase), Takt -5 ... -100 MHz;
     bei U+1 bis U+3 nach dem Aufenthalt in L-U davor: unter 5 min -10, sonst -5 (Nutzer 26.10.; vorher 10 min).
     Schwellen der Tabelle höchstens 96 °C: ab 96 °C immer Lüfter +2, Takt -100 (Nutzer 27.10.).
-  * Lüfterstöße (Nutzer 27.10.): überschreitet die Chiptemperatur U aus L-U oder darunter und liegt bei U+1 bis U+3,
-    zuerst zwei Lüfterstöße (Basisstufe + 1 für 6 s ab der Bestätigung, dann zurück; ohne Bestätigung nach 30 s weiter),
-    kein Takt; danach Schritt 1. Zurück in L-U: Ende ohne Taktänderung; ab U+4: Abbruch, Tabelle.
+  * Takt erst nach 60 s (Nutzer 28.10., ersetzt die Lüfterstöße oben vom 27.10.): bei U+1 bis U+3 Lüfter +1 sofort, die
+    erste Taktsenkung der Korrekturphase erst nach 60 s ununterbrochen über U; vorher wieder ≤ U: keine Taktänderung
+    für diesen Ausflug, ein neuer Ausflug wartet neu. Ab U+4 sofort nach Tabelle (auch während der 60 s).
   * Schritt 2 - Korrekturphase: keine Plus-Schritte; zurück zur Basisstufe nach 1 min stabil in L-U oder unter L
     (Nutzer 27.10.; vorher 80-84 °C bzw. unter 80 °C).
   * Schritt 3 - Feintuning: unter L ab L-9 +5; ab L-19 +20; darunter +40 (kleinster Schritt 5 MHz, Nutzer 25.10.);
@@ -21,7 +21,8 @@ Regelungslogik nach dem Plan vom 24.10.2026 (docs/claude/Regelungslogik-Luefter-
     Taktsperre: war die letzte Taktänderung über U und fällt die Chiptemperatur unter L, 5 min keine Taktänderung
     (einmal je Änderung; endet über U).
   * Lüfterstöße unten (Nutzer 28.10.): wäre bei genau L-1 ein Plus-Schritt fällig, zuerst zwei Stöße mit Basisstufe - 1
-    (wie oben); zurück in L-U: Ende ohne Takterhöhung; ab L-2: Abbruch, Plus-Schritt; danach noch L-1: +5.
+    (6 s ab der Bestätigung, dann zurück; ohne Bestätigung nach 30 s weiter); zurück in L-U: Ende ohne Takterhöhung;
+    ab L-2: Abbruch, Plus-Schritt; danach noch L-1: +5.
   * Fehlerrate (Nutzer 28.10.): 5 min über 4 % beim selben gesetzten Takt -> Obergrenze der Basisstufe = gesetzter
     Takt - 5 (Takt bleibt) und sofort automatischer Neustart (frühestens 30 min nach einem Start, höchstens einer je
     3 h; gesperrt: nur die Obergrenze; vorher erst 5 min ab 10 %). Obergrenzen löscht nur der Nutzer.
@@ -70,11 +71,12 @@ HIGH_CAP = 96                 # jede Schwelle höchstens 96 °C: ab 96 °C immer
 ZB_START = (82, 85)           # Zielbereich bei Einführung (Startwert des Nutzers, 27.10.): die Lernwerte von davor gehören dazu
 CAL_LOW, CAL_HIGH, CAL_HOT = 80, 84, 85   # Takt-Messung: Lüfterschutz wie bisher, unabhängig vom Zielbereich (Nutzer 27.10.)
 DWELL_S, DWELL_MINUS = 300, (10, 5)   # U+1 bis U+3 (None): vorher unter 5 min in L-U → −10, sonst −5 (Nutzer 26.10.)
-PULSE_ON_S = 6                # Lüfterstoß: Basisstufe + 1 für 6 s ab der Bestätigung (Nutzer 27.10.)
+HOT_CLOCK_WAIT_S = 60         # U+1 bis U+3: erste Taktsenkung erst nach 60 s ununterbrochen über U (Nutzer 28.10.; alle 41
+                              # Ausflüge seit 25.10. waren mit Lüfter +1 nach höchstens 60 s wieder ≤ U)
+PULSE_ON_S = 6                # Lüfterstoß unten: Basisstufe − 1 für 6 s ab der Bestätigung (Nutzer 27./28.10.)
 PULSE_CONFIRM_MAX_S = 30      # ... ohne Bestätigung der Lüftersteuerung nach 30 s weiter (Nutzer 27.10.)
-PULSE_GAP_S, PULSE_REARM = 10 * 60, 1   # gegen Pendeln an U: höchstens ein Stoßpaar je 10 min, und neue Stöße erst nach
-                                        # einem Wert ≤ U−1; sonst gleich die Korrekturphase (Nutzer 27.10.)
-                                        # Lüfterstöße unten ebenso, eigene Sperre: neue erst nach einem Wert ≥ L+1 (Nutzer 28.10.)
+PULSE_GAP_S, PULSE_REARM = 10 * 60, 1   # gegen Pendeln an L: höchstens ein Stoßpaar je 10 min, und neue Stöße erst nach
+                                        # einem Wert ≥ L+1 (Nutzer 28.10.)
 START_CLOCK = {1: 170, 2: 250, 3: 330, 4: 380, 5: 400, 6: 420, 7: 440, 8: 440, 9: 440, 10: 440}   # Nutzer 28.10.
 CLOCK_MIN, CLOCK_MAX = 100, 440
 MODE_TOP = {4: 360, 3: 380, 2: 400, 1: 420, 0: 440}   # oberer Takt je Modus (mode 04 ... mode 00)
@@ -301,10 +303,11 @@ def _maintenance(row, st, now, ac, journal):
 class Round:
     """One regulation round for one automation row.
 
-    Flags in the state: corr (Korrekturphase), exc_active (Ausnahme läuft), cal (Takt-Messung), start_reason (Start
-    nach Kapitel 4 steht aus), stoss (Lüfterstöße laufen; 'dir': 'down' = Lüfterstöße unten). The shown phase is
-    derived from them at the end of the round. caps = Obergrenzen je Lüfterstufe, ertrag = laufende Ertrags-Prüfung,
-    ths = Hashrate der letzten 20 min (Nutzer 28.10.)."""
+    Flags in the state: corr (Korrekturphase), corr_wait (Korrekturphase noch ohne Taktsenkung), hot_wait (seit dann
+    laufen die 60 s über U), exc_active (Ausnahme läuft), cal (Takt-Messung), start_reason (Start nach Kapitel 4 steht
+    aus), stoss (Lüfterstöße unten laufen, 'dir': 'down'). The shown phase is derived from them at the end of the round.
+    caps = Obergrenzen je Lüfterstufe, ertrag = laufende Ertrags-Prüfung, ths = Hashrate der letzten 20 min
+    (Nutzer 28.10.)."""
 
     def __init__(self, row, now, ac, journal):
         self.row, self.now, self.ac, self.j = row, now, ac, journal
@@ -527,7 +530,8 @@ class Round:
         target = min(max(target, CLOCK_MIN), CLOCK_MAX)
         old_fan, old_clock = st.get('fan_target'), st.get('clock_set')
         self.drop_pending('Start (%s)' % reason)
-        st.update({'corr': False, 'corr_dwell_s': None, 'exc_active': False, 'clock_set': target, 'queue': [], 'window_until': None,
+        st.update({'corr': False, 'corr_dwell_s': None, 'corr_wait': None, 'hot_wait': None, 'exc_active': False,
+                   'clock_set': target, 'queue': [], 'window_until': None,
                    'band_since': None, 'cold_since': None, 'down_since': None, 'stoss': None,
                    'clock_changed_at': _iso(self.now), 'clock_changed_t': self.t, 'start_reason': None,
                    'start_at': _iso(self.now),        # Fehlerrate: Obergrenze erst 10 min, Neustart 30 min danach
@@ -1075,11 +1079,13 @@ class Round:
 
     def high_temperature(self):
         """Schritt 1: Lüfter = Basisstufe + 1/+2 sofort (niedrigere Korrekturstufe erst nach 30 s), Takt − Tabellenwert:
-        beim Eintritt in die Korrekturphase sofort, danach erst nach dem Beobachtungsfenster und nur bei nicht
-        fallender Tendenz. Tabelle zur Obergrenze U (Takt-Messung: fest 84 °C)."""
+        die erste Taktsenkung der Korrekturphase ab U+4 sofort, bei U+1 bis U+3 erst nach 60 s ununterbrochen über U
+        (Nutzer 28.10.); danach erst nach dem Beobachtungsfenster und nur bei nicht fallender Tendenz, jeweils vom dann
+        gesetzten Takt. Tabelle zur Obergrenze U (Takt-Messung: fest 84 °C, nur der Lüfter)."""
         st, t, now = self.st, self.t, self.now
         hi = self.protection()[1]
         limit, fan_plus, minus = high_rule(t, hi)
+        table = minus is not None                        # ab U+4: Takt nach Tabelle
         first = not st.get('corr')
         if first:
             # Aufenthalt in L-U vor dem Überschreiten von U: gilt für die ganze Korrekturphase (Nutzer 25.10.)
@@ -1103,6 +1109,10 @@ class Round:
             self.stability_end('rueckkehr', 'abgebrochen', 'Chiptemperatur %d °C' % t)
         if first:
             st['corr'] = True
+            st['corr_wait'] = True                       # die erste Taktsenkung steht aus (Nutzer 28.10.)
+            # die 60 s zählen ab Lüfter +1, also ab dem Beginn der Korrekturphase – auch wenn sie erst nach einem Start,
+            # dem Ende eines Tests oder der Takt-Messung beginnt (Review 28.10.)
+            st['above_at'] = _iso(now)
             st['exc_active'] = False
             if st.get('cold_since'):
                 self.stability_end('ausnahme', 'abgebrochen', 'Chiptemperatur %d °C' % t)
@@ -1115,13 +1125,25 @@ class Round:
         old = st.get('clock_set')
         if old is None:
             return
-        if first or (self.window_over() and not self.busy() and st['tendency'] >= 0):
-            why = 'Chiptemperatur %d °C (ab %d °C): Takt −%d MHz' % (t, limit, minus)
-            if high_rule(t, hi)[2] is None:
-                why = 'Chiptemperatur %d °C nach %d min in %d–%d °C: Takt −%d MHz' % (t, int(dwell // 60), self.lo,
-                                                                                      self.hi, minus)
-            if self.queue_clock(int(round(old)) - minus, why, hot=True, step=-minus):
-                self.note('Chiptemperatur %d °C: Takt %s → %d MHz.' % (t, old, int(round(old)) - minus))
+        if st.get('corr_wait'):
+            since = st.get('above_at')                   # erster Wert über U dieses Ausflugs
+            if not table and _age(since, now) < HOT_CLOCK_WAIT_S:
+                st['hot_wait'] = since                   # U+1 bis U+3: Takt erst nach 60 s über U (Nutzer 28.10.)
+                return
+            # erste Taktsenkung (ab U+4 sofort, sonst nach 60 s über U): Sicherheit zuerst – sie ersetzt einen laufenden
+            # Befehl; bis dahin gingen laufende Befehle (z. B. der Starttakt) weiter (Review 27.10.)
+            st['corr_wait'] = st['hot_wait'] = None
+            if st.get('queue') or st.get('pending'):
+                self.drop_pending('abgelöst: hohe Chiptemperatur')
+                st['queue'] = []
+        elif not (self.window_over() and not self.busy() and st['tendency'] >= 0):
+            return
+        why = 'Chiptemperatur %d °C (ab %d °C): Takt −%d MHz' % (t, limit, minus)
+        if not table:
+            why = 'Chiptemperatur %d °C nach %d min in %d–%d °C: Takt −%d MHz' % (t, int(dwell // 60), self.lo,
+                                                                                  self.hi, minus)
+        if self.queue_clock(int(round(old)) - minus, why, hot=True, step=-minus):
+            self.note('Chiptemperatur %d °C: Takt %s → %d MHz.' % (t, old, int(round(old)) - minus))
 
     def correction_phase(self):
         """Schritt 2: in der Korrekturphase zurück zur Basisstufe (1 min stabil in L-U oder unter L, Nutzer 27.10.;
@@ -1152,6 +1174,7 @@ class Round:
         st = self.st
         st['corr'] = False
         st['corr_dwell_s'] = None                        # beim nächsten Überschreiten von U neu gemessen
+        st['corr_wait'] = st['hot_wait'] = None
         st['band_since'] = None
         st['down_since'] = None
         self.set_fan_target(self.base, 'Rückkehr zur Basisstufe: ' + why)
@@ -1159,38 +1182,31 @@ class Round:
         self.note('Rückkehr zur Basisstufe %d (%s).' % (self.base, why))
         self.decide('Rückkehr zur Basisstufe', log_id)
 
-    # --- Lüfterstöße (Nutzer 27.10.)
-    def pulse_start(self, n, down=False):
-        """Lüfterstoß n/2: Lüfter Basisstufe + 1, kein Takt; Lüfterstoß unten (Nutzer 28.10.): Basisstufe − 1."""
+    # --- Lüfterstöße unten (Nutzer 28.10.; die Lüfterstöße oben vom 27.10. sind entfallen, Nutzer 28.10.)
+    def pulse_start(self, n):
+        """Lüfterstoß unten n/2: Lüfter Basisstufe − 1, kein Takt."""
         st = self.st
-        level = max(self.base - 1, FAN_MIN) if down else min(self.base + 1, FAN_MAX)
+        level = max(self.base - 1, FAN_MIN)
         old = st.get('fan_target')
-        name = 'Lüfterstoß unten' if down else 'Lüfterstoß'
-        text = '%s %d/2: Stufe %d für %d s (Chiptemperatur %d °C)' % (name, n, level, PULSE_ON_S, self.t)
+        text = 'Lüfterstoß unten %d/2: Stufe %d für %d s (Chiptemperatur %d °C)' % (n, level, PULSE_ON_S, self.t)
         self.set_fan_target(level, text)
-        st['stoss'] = {'n': n, 'step': 'an', 'at': _iso(self.now), 'level': level}
-        if down:
-            st['stoss']['dir'] = 'down'
+        st['stoss'] = {'n': n, 'step': 'an', 'at': _iso(self.now), 'level': level, 'dir': 'down'}
         if n == 1:
-            if down:
-                st['stoss_unten_at'], st['stoss_unten_frei'] = _iso(self.now), False
-            else:
-                st['stoss_at'], st['stoss_frei'] = _iso(self.now), False
+            st['stoss_unten_at'], st['stoss_unten_frei'] = _iso(self.now), False
         log_id = self.base_event(kind='luefterstoss', trigger=text, fan_old=old, fan_new=level)
         self.note(text + '.')
-        self.decide('%s %d/2' % (name, n), log_id)
+        self.decide('Lüfterstoß unten %d/2' % n, log_id)
 
     def pulses(self):
-        """Laufende Lüfterstöße: ein Schritt gilt als bestätigt, wenn die Lüftersteuerung nach dem Befehl seine Stufe
-        meldet (Zeit des Lesens); „an“ 6 s ab der Bestätigung, dann „aus“ (Basisstufe); nach „aus“ von Stoß 1 Stoß 2,
-        nach Stoß 2 fertig. Ohne Bestätigung nach 30 s weiter. Zurück in L-U: Ende ohne Taktänderung; ab U+4: Abbruch.
-        Lüfterstöße unten (Nutzer 28.10.): ab L Ende ohne Takterhöhung; ab L−2 Abbruch – danach in derselben Runde die
-        Plus-Schritt-Regel, wie nach dem Ende bei L−1 (+5). True, solange sie laufen (keine andere Regel in dieser Runde)."""
+        """Laufende Lüfterstöße unten: ein Schritt gilt als bestätigt, wenn die Lüftersteuerung nach dem Befehl seine
+        Stufe meldet (Zeit des Lesens); „an“ 6 s ab der Bestätigung, dann „aus“ (Basisstufe); nach „aus“ von Stoß 1
+        Stoß 2, nach Stoß 2 fertig. Ohne Bestätigung nach 30 s weiter. Ab L Ende ohne Takterhöhung; ab L−2 Abbruch –
+        danach in derselben Runde die Plus-Schritt-Regel, wie nach dem Ende bei L−1 (+5). True, solange sie laufen
+        (keine andere Regel in dieser Runde)."""
         st, t, now = self.st, self.t, self.now
         ps = st['stoss']
-        down = ps.get('dir') == 'down'
-        name = 'Lüfterstoß unten' if down else 'Lüfterstoß'
-        if down and (t >= self.lo or t <= self.lo - 2):
+        name = 'Lüfterstoß unten'
+        if t >= self.lo or t <= self.lo - 2:
             st['stoss'] = None
             old = st.get('fan_target')
             if t >= self.lo:
@@ -1199,17 +1215,6 @@ class Round:
             else:
                 self.set_fan_target(self.base, 'Lüfterstöße unten abgebrochen: Basisstufe %d' % self.base)
                 text = 'Lüfterstöße unten abgebrochen: %d °C – Takterhöhung' % t
-            self.base_event(kind='luefterstoss_ende', trigger=text, fan_old=old)
-            self.note(text + '.')
-            return False
-        if not down and (t <= self.hi or high_rule(t, self.hi)[2] is not None):
-            st['stoss'] = None
-            old = st.get('fan_target')
-            if t <= self.hi:
-                self.set_fan_target(self.base, 'Lüfterstöße beendet: Basisstufe %d' % self.base)
-                text = 'Lüfterstöße beendet: wieder im Zielbereich (%d °C)' % t
-            else:
-                text = 'Lüfterstöße abgebrochen: %d °C – Tabelle' % t
             self.base_event(kind='luefterstoss_ende', trigger=text, fan_old=old)
             self.note(text + '.')
             return False
@@ -1225,23 +1230,31 @@ class Round:
             return True
         if ps['step'] == 'an':
             self.set_fan_target(self.base, '%s %d/2: zurück auf Basisstufe %d' % (name, ps['n'], self.base))
-            st['stoss'] = {'n': ps['n'], 'step': 'aus', 'at': _iso(now), 'level': self.base}
-            if down:
-                st['stoss']['dir'] = 'down'
+            st['stoss'] = {'n': ps['n'], 'step': 'aus', 'at': _iso(now), 'level': self.base, 'dir': 'down'}
             return True
         if ps['n'] == 1:
-            self.pulse_start(2, down)
+            self.pulse_start(2)
             return True
         st['stoss'] = None
-        text = ('Lüfterstöße unten fertig: %d °C, Takt wird erhöht' if down
-                else 'Lüfterstöße fertig: %d °C, Takt wird gesenkt') % t
+        text = 'Lüfterstöße unten fertig: %d °C, Takt wird erhöht' % t
         self.base_event(kind='luefterstoss_ende', trigger=text)
         self.note(text + '.')
         return False
 
+    def drop_hot_pulses(self):
+        """Zustand vor dem 28.10. mit laufenden Lüfterstößen oben (ohne 'dir'): beenden, Lüfter auf die Basisstufe;
+        ihre Sperre (stoss_at, stoss_frei) entfällt (Nutzer 28.10.)."""
+        st = self.st
+        st.pop('stoss_at', None)
+        st.pop('stoss_frei', None)
+        ps = st.get('stoss')
+        if ps and ps.get('dir') != 'down':
+            st['stoss'] = None
+            self.set_fan_target(self.base, 'Lüfterstöße oben entfallen: Basisstufe %d' % self.base)
+
     def cold_pulses_allowed(self):
         """Lüfterstöße unten (Nutzer 28.10.): nicht bei Basisstufe 1, im Heizmodus, in der Ausnahme oder während
-        Lüfterstöße laufen; höchstens ein Stoßpaar je 10 min und neue erst nach einem Wert ≥ L+1 (eigene Sperre).
+        Lüfterstöße laufen; höchstens ein Stoßpaar je 10 min und neue erst nach einem Wert ≥ L+1.
         Startpause, Korrekturphase, Takt-Messung und Temperatur-Test schließen schon die Plus-Schritte aus."""
         st = self.st
         return (self.base > FAN_MIN and not st.get('heat') and not st.get('exc_active') and not st.get('stoss')
@@ -1273,7 +1286,7 @@ class Round:
         if old >= top:
             return                                       # 440 MHz bzw. Obergrenze erreicht: kein Plus-Schritt
         if t == self.lo - 1 and self.cold_pulses_allowed():
-            self.pulse_start(1, down=True)
+            self.pulse_start(1)
             return
         size = full = plus_size(t, self.lo)
         if cap is not None and old + size > cap:
@@ -1406,25 +1419,17 @@ class Round:
             return
         if not st.get('cal'):
             self.calm_after_hot()                        # Takt-Messung: Taktregelung pausiert
-        ps = st.get('stoss')
-        running = bool(ps) and ps.get('dir') != 'down'   # Lüfterstöße oben liefen bis zu dieser Runde
-        if ps and self.pulses():
-            return                                       # Lüfterstöße laufen: keine Taktänderung
+        if st.get('stoss') and self.pulses():
+            return                                       # Lüfterstöße unten laufen: keine Taktänderung
         if self.t >= self.protection()[2]:               # ab U+1 (Takt-Messung: ab 85 °C)
-            # Lüfterstöße (Nutzer 27.10.): U+1 bis U+3 (Tabelle ohne Taktwert), auch direkt nach einem Start; höchstens
-            # ein Stoßpaar je 10 min und erst wieder nach einem Wert ≤ U−1. Laufende Befehle (z. B. der Starttakt) gehen
-            # weiter – verworfen werden sie erst beim Eintritt in die Korrekturphase (Review 27.10.)
-            if (not running and not st.get('corr') and not st.get('cal') and high_rule(self.t, self.hi)[2] is None
-                    and st.get('stoss_frei', True) and _age(st.get('stoss_at'), self.now) >= PULSE_GAP_S):
-                self.pulse_start(1)
-                return
-            # Sicherheit zuerst: beim Eintritt in die Korrekturphase ersetzt die Taktsenkung einen laufenden Befehl
-            if not st.get('corr') and not st.get('cal') and (st.get('queue') or st.get('pending')):
-                self.drop_pending('abgelöst: hohe Chiptemperatur')
-                st['queue'] = []
             self.high_temperature()
             return
         st['down_since'] = None
+        wait = st.pop('hot_wait', None)
+        if wait and not st.get('cal'):
+            # vor Ablauf der 60 s wieder ≤ U: keine Taktsenkung für diesen Ausflug; der Lüfter kehrt nach der
+            # Rückkehr-Regel zur Basisstufe zurück (Nutzer 28.10.)
+            self.note('Chiptemperatur wieder %d °C nach %d s: keine Taktsenkung.' % (self.t, int(_age(wait, self.now))))
         if st.get('corr'):
             self.correction_phase()
         if st.get('cal'):
@@ -1710,6 +1715,7 @@ class Round:
             st = self.st = new
             self.note('Automatik ein (Basisstufe %d).' % self.base)
         self.target_range()
+        self.drop_hot_pulses()                           # Zustand vor dem 28.10.: Lüfterstöße oben beenden
         if not st.get('start_at'):
             # Stand vor dem 28.10. ohne Startzeit: Obergrenze, Neustart, Ertrags-Prüfung erst 10/30 min nach dem Update
             st['start_at'] = _iso(now)
@@ -1755,6 +1761,7 @@ class Round:
                     # nicht erwartet – oder länger als erwartet (Knopf 5 min, Startpause vorbei): wie bisher ein Fehler
                     st['offline_since'] = st.get('offline_since') or _iso(now)
                     st['offline'] = True
+                    st['above_at'] = None                # ohne Messwerte zählen die 60 s über U nicht weiter (Review 28.10.)
                     log_id = self.base_event(kind='miner_offline', trigger='Miner antwortet nicht', ok=False, error=err)
                     self.note('Miner antwortet nicht: Lüfter unverändert, warten.')
                     self.remember_net(log_id, 'miner_offline', err=err)
@@ -1850,20 +1857,21 @@ class Round:
             st['t'] = self.t
             st['tendency'], self.ref = self.tendency()
             temps.append([_iso(now), self.t])
-            # Aufenthalt in L-U seit dem letzten Eintritt (von unten oder oben); beim ersten Wert über U gemessen
-            if self.t <= self.hi - PULSE_REARM:
-                st['stoss_frei'] = True                  # neue Lüfterstöße wieder möglich (Nutzer 27.10.)
             if self.t >= self.lo + PULSE_REARM:
                 st['stoss_unten_frei'] = True            # neue Lüfterstöße unten wieder möglich (Nutzer 28.10.)
             # Plus-Schritte erst nach 60 s ununterbrochen unter L; ein Wert ≥ L setzt zurück (Nutzer 28.10.)
             st['below_since'] = (st.get('below_since') or _iso(now)) if self.t < self.lo else None
+            # Aufenthalt in L-U seit dem letzten Eintritt (von unten oder oben); beim ersten Wert über U gemessen;
+            # dazu die Zeit des ersten Werts über U (60 s bis zur ersten Taktsenkung bei U+1 bis U+3, Nutzer 28.10.)
             if self.t > self.hi:
                 if not st.get('above'):
                     st['band_dwell_s'] = _age(st['band_in'], now) if st.get('band_in') else 0
                     st['above'] = True
+                st['above_at'] = st.get('above_at') or _iso(now)
                 st['band_in'] = None
             else:
                 st['above'] = False
+                st['above_at'] = None
                 st['band_in'] = (st.get('band_in') or _iso(now)) if self.t >= self.lo else None
             self.update_thermal()
         if st.get('fan_target') is None:

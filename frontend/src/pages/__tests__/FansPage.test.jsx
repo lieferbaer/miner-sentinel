@@ -45,25 +45,26 @@ describe('FansPage Lüfterstoß', () => {
     vi.clearAllMocks()
   })
 
-  it('shows the pulse as status: first the level for 6 s, then back to the base level', async () => {
+  it('no status for a hot pulse of an old state (Lüfterstöße oben entfallen, Nutzer 28.10.)', async () => {
     mockApi(automation({ stoss: { n: 1, step: 'an', at: '2026-10-27T10:00:00Z', level: 4 } }))
-    const { unmount } = renderPage()
-    expect(await screen.findByText('Lüfterstoß 1/2')).toBeInTheDocument()
-    expect(screen.getByText('Lüfter Stufe 4 für 6 s')).toBeInTheDocument()
-    expect(screen.getByText('Basisstufe 3 · Lüfterstoß 1/2')).toBeInTheDocument()
-    unmount()
-
-    mockApi(automation({ fan_target: 3, stoss: { n: 2, step: 'aus', at: '2026-10-27T10:00:20Z', level: 4 } }))
     renderPage()
-    expect(await screen.findByText('Lüfterstoß 2/2')).toBeInTheDocument()
-    expect(screen.getByText('zurück auf Basisstufe')).toBeInTheDocument()
+    expect(await screen.findByText('Normalbetrieb')).toBeInTheDocument()
+    expect(screen.queryByText(/Lüfterstoß/)).not.toBeInTheDocument()
   })
 
   it('no pulse status without regulation (Takt-Messung)', async () => {
-    mockApi(automation({ phase: 'messung', stoss: { n: 1, step: 'an', at: '2026-10-27T10:00:00Z', level: 4 } }))
+    mockApi(automation({ phase: 'messung', stoss: { n: 1, step: 'an', at: '2026-10-28T10:00:00Z', level: 2, dir: 'down' } }))
     renderPage()
     expect(await screen.findByText('Takt-Messung')).toBeInTheDocument()
     expect(screen.queryByText(/Lüfterstoß/)).not.toBeInTheDocument()
+  })
+
+  it('logic text: fan +1 at once, clock only if still above U after 60 s, from U+4 at once', async () => {
+    mockApi({ ...automation({ phase: 'aus' }), enabled: false })
+    renderPage()
+    expect(await screen.findByText(new RegExp('Bei 86–88 °C Lüfter \\+1 sofort, den Takt erst, wenn die Temperatur ' +
+      'nach 60 s noch über 85 °C liegt \\(vorher zurück: keine Senkung\\); ab 89 °C sofort nach Tabelle\\.'))).toBeInTheDocument()
+    expect(screen.queryByText(/Basisstufe \+1 für 6 s/)).not.toBeInTheDocument()
   })
 })
 
@@ -72,14 +73,21 @@ describe('FansPage Lüfterstöße unten', () => {
     vi.clearAllMocks()
   })
 
-  it('shows the cold pulse like the hot one (Basisstufe −1), not as reduced after an Ausnahme', async () => {
+  it('shows the cold pulse as status (Basisstufe −1 for 6 s, then back), not as reduced after an Ausnahme', async () => {
     mockApi(automation({ t: 81, fan_target: 2, fan_set: 2, fan_read: 2,
       stoss: { n: 1, step: 'an', at: '2026-10-28T10:00:00Z', level: 2, dir: 'down' } }))
-    renderPage()
+    const { unmount } = renderPage()
     expect(await screen.findByText('Lüfterstoß 1/2')).toBeInTheDocument()
     expect(screen.getByText('Lüfter Stufe 2 für 6 s')).toBeInTheDocument()
     expect(screen.getByText('Basisstufe 3 · Lüfterstoß 1/2')).toBeInTheDocument()
     expect(screen.queryByText(/reduziert nach Ausnahme/)).not.toBeInTheDocument()
+    unmount()
+
+    mockApi(automation({ t: 81, fan_target: 3, fan_set: 3, fan_read: 3,
+      stoss: { n: 2, step: 'aus', at: '2026-10-28T10:00:20Z', level: 3, dir: 'down' } }))
+    renderPage()
+    expect(await screen.findByText('Lüfterstoß 2/2')).toBeInTheDocument()
+    expect(screen.getByText('zurück auf Basisstufe')).toBeInTheDocument()
   })
 })
 
