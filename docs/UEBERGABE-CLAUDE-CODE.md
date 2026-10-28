@@ -152,7 +152,7 @@ solange die Seite offen ist. Steuerung läuft immer auf dem Server, unabhängig 
 - Python ≥ 3.10 nötig (System-Python 3.9 reicht nicht): `/opt/homebrew/bin/python3.10 -m venv <dir>` + requirements von backend und data-service + pytest, pytest-django.
 - pytest mit `-p no:cacheprovider -q -o addopts=""` aufrufen, sonst fehlt die Zusammenfassung (pyproject-Einstellungen).
   Das venv im Scratchpad kann von macOS teilweise gelöscht werden (25.10.: `pytest` fehlte) → in jeder Session neu anlegen.
-- Stand 28.10. (v2.2.5): **Backend 218 ✓, Data-Service 363 ✓ (7 übersprungen), Frontend 170 ✓**, Lint 0 Fehler (15 Warnungen aus dem Original).
+- Stand 28.10. (v2.2.6): **Backend 218 ✓, Data-Service 363 ✓ (7 übersprungen), Frontend 171 ✓**, Lint 0 Fehler (15 Warnungen aus dem Original).
   Achtung: `npm run lint` meldet zusätzlich Fehler aus `frontend/dist-local/` (lokaler Build-Ordner, nicht im Repo) – ignorieren.
 
 ---
@@ -284,7 +284,8 @@ Punkte (je 15 min bei 250 MHz, Endwert): Mode 04 252 MHz laut Miner, 121,8 TH/s,
 - Automatik-Bereich: **5 Karten** (Hashrate mit Fehlerrate wie Übersicht – erste Karte seit v2.0.0; Heißester Chip mit Regelwert
   und Tendenz; Takt laut Miner mit gesetzt · Modus · Standard; Lüfter läuft auf (aktive Stufe vs. Basisstufe, Korrektur/Ausnahme);
   Status mit Phase, laufendem Befehl, Beobachtungsfenster, Lernperiode). Kleine Zeile wiederholt den großen Wert nicht. Auf dem Handy
-  untereinander. Darunter Lernwerte **je Lüfterstufe** und letzte Aktionen. Rückfrage „Automatik wirklich beenden? Der Takt bleibt,
+  untereinander. Darunter Lernwerte **je Lüfterstufe** (Tabelle; **auf dem Handy je Stufe ein Block, Bezeichnung über dem Wert, zwei
+  Werte je Zeile** – v2.2.6, Nutzer 28.10.: „Tabelle ist nicht mobil freundlich“; ab `sm` Tabelle, seitlich verschiebbar) und letzte Aktionen. Rückfrage „Automatik wirklich beenden? Der Takt bleibt,
   wie er ist.“
 
 ### 7.7 Pools / f2pool

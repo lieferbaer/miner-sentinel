@@ -150,6 +150,20 @@ describe('FansPage Lernwerte', () => {
     expect(cells.slice(0, 7)).toEqual(['2', '82–85 °C', '275 MHz', '82,0 °C', '133,4 TH/s', '16,9 J/TH', '13'])
   })
 
+  it('mobile: one entry per level instead of the wide table', async () => {
+    const learned = { 2: { mhz: 260, temp_avg: 81.9, ths_avg: 131.6, j_th: 17.1, at: '2026-10-28T14:37:57Z', count: 21 } }
+    mockApi({ ...automation({ zb: [81, 84], caps: { 2: 275, 4: 380 } }), learned })
+    renderPage()
+    const first = (await screen.findByText(/^Stufe 2 · 81–84 °C$/)).closest('li')
+    expect(first.closest('ul')).toHaveClass('sm:hidden')
+    // label above value, two per line
+    const pairs = (li) => [...li.querySelectorAll('.grid > div')].map((d) => [...d.children].map((c) => c.textContent))
+    expect(pairs(first)).toEqual([['Gesetzter Takt (Ø)', '260 MHz'], ['Ø Temperatur', '81,9 °C'],
+      ['Ø Hashrate', '131,6 TH/s'], ['Effizienz', '17,1 J/TH'], ['Anzahl', '21'], ['Obergrenze', '275 MHz']])
+    const second = within(first.closest('ul')).getByText(/^Stufe 4$/).closest('li')
+    expect(pairs(second)).toEqual([['Obergrenze', '380 MHz']])
+  })
+
   it('Bereich unknown without state.zb', async () => {
     const learned = { 3: { mhz: 320, temp_avg: 83.2, at: '2026-10-28T09:00:00Z', count: 2 } }
     mockApi({ ...automation({ zb: null }), learned })

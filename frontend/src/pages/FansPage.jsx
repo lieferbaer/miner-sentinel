@@ -142,39 +142,69 @@ function LearnedTable({ learned, caps, zb, level, lo, hi }) {
   return (
     <div className="pt-1">
       <p className="font-medium">Lernwerte</p>
-      <table className="text-xs">
-        <thead className="text-muted-foreground">
-          <tr className="text-left">
-            <th className="pr-3 font-medium">Stufe</th>
-            <th className="pr-3 font-medium">Bereich</th>
-            <th className="pr-3 font-medium">Gesetzter Takt (Ø)</th>
-            <th className="pr-3 font-medium">Ø Temperatur</th>
-            <th className="pr-3 font-medium">Ø Hashrate</th>
-            <th className="pr-3 font-medium">Effizienz</th>
-            <th className="pr-3 font-medium">Anzahl</th>
-            <th className={withCaps ? 'pr-3 font-medium' : 'font-medium'}>Zeit</th>
-            {withCaps && <th className="font-medium">Obergrenze</th>}
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((lv) => {
-            const v = values[lv] || {}
-            return (
-              <tr key={lv} className={Number(lv) === level ? 'font-semibold' : ''}>
-                <td className="pr-3">{lv}</td>
-                <td className="whitespace-nowrap pr-3 tabular-nums">{values[lv] ? range : '—'}</td>
-                <td className="pr-3 tabular-nums">{fmt(v.mhz, 0, ' MHz')}</td>
-                <td className="pr-3 tabular-nums">{fmt(v.temp_avg, 1, ' °C')}</td>
-                <td className="whitespace-nowrap pr-3 tabular-nums">{fmt(v.ths_avg, 1, ' TH/s')}</td>
-                <td className="whitespace-nowrap pr-3 tabular-nums">{fmt(v.j_th, 1, ' J/TH')}</td>
-                <td className="pr-3 tabular-nums">{v.count ?? '—'}</td>
-                <td className={withCaps ? 'pr-3 text-muted-foreground' : 'text-muted-foreground'}>{when(v.at)}</td>
-                {withCaps && <td className="tabular-nums">{fmt(limits[lv], 0, ' MHz')}</td>}
-              </tr>
-            )
-          })}
-        </tbody>
-      </table>
+      {/* mobile: one entry per level like the Letzte Einträge (Nutzer 28.10.: Tabelle nicht mobil freundlich) */}
+      <ul className="divide-y divide-border/40 sm:hidden">
+        {rows.map((lv) => {
+          const v = values[lv]
+          const item = (label, value) => (
+            <div>
+              <div className="text-xs font-normal text-muted-foreground">{label}</div>
+              <div className="whitespace-nowrap">{value}</div>
+            </div>
+          )
+          return (
+            <li key={lv} className={'py-1.5' + (Number(lv) === level ? ' font-semibold' : '')}>
+              <div className="flex items-baseline justify-between gap-2">
+                <span>Stufe {lv}{v ? ' · ' + range : ''}</span>
+                {v && <span className="tabular-nums text-muted-foreground">{when(v.at)}</span>}
+              </div>
+              <div className="mt-0.5 grid grid-cols-2 gap-x-3 gap-y-1 tabular-nums">
+                {v && item('Gesetzter Takt (Ø)', fmt(v.mhz, 0, ' MHz'))}
+                {v && item('Ø Temperatur', fmt(v.temp_avg, 1, ' °C'))}
+                {v && item('Ø Hashrate', fmt(v.ths_avg, 1, ' TH/s'))}
+                {v && item('Effizienz', fmt(v.j_th, 1, ' J/TH'))}
+                {v && item('Anzahl', v.count ?? '—')}
+                {withCaps && item('Obergrenze', fmt(limits[lv], 0, ' MHz'))}
+              </div>
+            </li>
+          )
+        })}
+      </ul>
+      <div className="hidden overflow-x-auto sm:block">
+        <table className="text-xs">
+          <thead className="text-muted-foreground">
+            <tr className="text-left">
+              <th className="pr-3 font-medium">Stufe</th>
+              <th className="pr-3 font-medium">Bereich</th>
+              <th className="pr-3 font-medium">Gesetzter Takt (Ø)</th>
+              <th className="pr-3 font-medium">Ø Temperatur</th>
+              <th className="pr-3 font-medium">Ø Hashrate</th>
+              <th className="pr-3 font-medium">Effizienz</th>
+              <th className="pr-3 font-medium">Anzahl</th>
+              <th className={withCaps ? 'pr-3 font-medium' : 'font-medium'}>Zeit</th>
+              {withCaps && <th className="font-medium">Obergrenze</th>}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((lv) => {
+              const v = values[lv] || {}
+              return (
+                <tr key={lv} className={Number(lv) === level ? 'font-semibold' : ''}>
+                  <td className="pr-3">{lv}</td>
+                  <td className="whitespace-nowrap pr-3 tabular-nums">{values[lv] ? range : '—'}</td>
+                  <td className="pr-3 tabular-nums">{fmt(v.mhz, 0, ' MHz')}</td>
+                  <td className="pr-3 tabular-nums">{fmt(v.temp_avg, 1, ' °C')}</td>
+                  <td className="whitespace-nowrap pr-3 tabular-nums">{fmt(v.ths_avg, 1, ' TH/s')}</td>
+                  <td className="whitespace-nowrap pr-3 tabular-nums">{fmt(v.j_th, 1, ' J/TH')}</td>
+                  <td className="pr-3 tabular-nums">{v.count ?? '—'}</td>
+                  <td className={withCaps ? 'pr-3 text-muted-foreground' : 'text-muted-foreground'}>{when(v.at)}</td>
+                  {withCaps && <td className="tabular-nums">{fmt(limits[lv], 0, ' MHz')}</td>}
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
     </div>
   )
 }
