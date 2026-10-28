@@ -68,13 +68,13 @@ function phases(lo, hi) {
 const REGULATING = new Set(['normal', 'korrektur', 'ausnahme'])
 const MODE_LABEL = { '2/L4': 'mode 04', '2/L3': 'mode 03', '2/L2': 'mode 02', '2/L1': 'mode 01', '2/L0': 'mode 00',
   '1/-': 'High Performance' }
-// the regulation in short (plan of 24.10.), for the Zielbereich lo–hi (Nutzer 27.10.); Plus-Schritte erst nach 120 s
+// the regulation in short (plan of 24.10.), for the Zielbereich lo–hi (Nutzer 27.10.); Plus-Schritte erst nach 60 s
 // unter lo, Lüfterstöße unten, Ertrags-Prüfung, Obergrenze (4 %) und automatischer Neustart nach der Fehlerrate
 // (Nutzer 28.10.)
 function logicText(lo, hi) {
   const range = lo + '–' + hi + ' °C'
   return 'Der Lüfter läuft fest auf der gewählten Basisstufe, der Takt hält den heißesten Chip bei ' + range +
-    '; dort keine Taktänderung. Unter ' + lo + ' °C (erst nach 120 s ununterbrochen darunter) Takt +5 / +20 / +40 MHz ' +
+    '; dort keine Taktänderung. Unter ' + lo + ' °C (erst nach 60 s ununterbrochen darunter) Takt +5 / +20 / +40 MHz ' +
     '(kleinster Schritt 5 MHz; bei ' + (lo - 4) + '–' + (lo - 1) + ' °C erst 3 min nach der letzten Takterhöhung; ' +
     'nie über die Obergrenze der Basisstufe). Bei ' + (lo - 1) + ' °C statt der Takterhöhung zuerst zwei Lüfterstöße ' +
     '(Basisstufe −1 für 6 s, dann zurück; nicht bei Basisstufe 1); zurück im Ziel: keine Erhöhung; bei ' + (lo - 2) +
@@ -91,11 +91,11 @@ function logicText(lo, hi) {
     'Bei jedem Start Lüfter Stufe 1, bis die Chiptemperatur ' + lo + ' °C erreicht (Heizmodus). ' +
     'Bei 440 MHz und 3 min unter ' + (lo - 9) + ' °C Lüfter −1 (Ausnahme). ' +
     'Ertrags-Prüfung nach jeder Takterhöhung um +5 MHz (nicht in den ersten 30 min nach dem Start): 10 min keine ' +
-    'weitere Takterhöhung, dann Hashrate (Ø 5 min) gegen die 5 min davor; unter +0,5 TH/s mehr: Obergrenze der ' +
+    'weitere Takterhöhung, dann Hashrate (Ø 5 min) gegen die 15 min davor; unter +0,5 TH/s mehr: Obergrenze der ' +
     'Basisstufe = Takt davor; bei einem Verlust (über 0,5 TH/s weniger) zusätzlich zurück auf den Takt davor. ' +
     'Fehlerrate 5 min über 4 %: Obergrenze der Basisstufe = gesetzter Takt −5 MHz (der Takt wird nicht gesenkt; gilt ' +
-    'in jedem Zielbereich, bis „Obergrenzen löschen“). Fehlerrate 5 min ab 10 %: automatischer Neustart der A15 ' +
-    '(höchstens einer je 3 h, frühestens 30 min nach dem Start).'
+    'in jedem Zielbereich, bis „Obergrenzen löschen“) und sofort automatischer Neustart der A15 (höchstens einer ' +
+    'je 3 h, frühestens 30 min nach dem Start; sonst nur die Obergrenze).'
 }
 function startText(lo, hi) {
   return 'Start (Stufenwahl, Einschalten, Neustart, nach Wartung oder Takt-Messung): Lernwert der Basisstufe, sonst ' +

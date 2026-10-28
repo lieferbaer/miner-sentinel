@@ -91,6 +91,10 @@ def miner(monkeypatch):
     monkeypatch.setattr(calibration, 'read_miner', mn.read)
     monkeypatch.setattr(calibration, 'set_frequency', mn.set_frequency)
     monkeypatch.setattr(calibration, 'a15_set_mode', mn.set_mode)
+
+    def no_network(addr, timeout=None):                      # Neustart ab 4 % (28.10.): nie eine echte Verbindung
+        raise AssertionError('Verbindung im Test ohne _connect: %s' % (addr,))
+    monkeypatch.setattr(calibration.socket, 'create_connection', no_network)
     return mn
 
 
@@ -314,13 +318,13 @@ def test_no_clock_change_between_79_and_84(miner):
     assert miner.clock_sets == sets and miner.clock() == 300 and len(r.events('takt')) == n
 
 def test_fine_plus_steps_by_temperature(miner):
-    """Kleinster Taktschritt 5 MHz (Nutzer 25.10.): unter 79 °C +5 (70–78), +20 (60–69), +40 (unter 60) – nach 120 s
+    """Kleinster Taktschritt 5 MHz (Nutzer 25.10.): unter 79 °C +5 (70–78), +20 (60–69), +40 (unter 60) – nach 60 s
     unter 79 °C (Nutzer 28.10.)."""
     for temp, step in ((79, 0), (78, 5), (76, 5), (72, 5), (65, 20), (55, 40)):
         miner.clock_sets.clear()
         ac = FakeAC(level=5)
         r = started(miner, ac, level=5, tmax=temp, learned={'5': {'mhz': 200, 'temp_avg': 82, 'at': 'x', 'count': 1}})
-        r.go(115, temp=temp)
+        r.go(55, temp=temp)
         assert miner.clock() == 200 + step, temp
 
 def test_no_plus_step_while_rising(miner):
@@ -334,9 +338,9 @@ def test_plus_step_stays_5_after_strong_effect(miner):
     """Die Regel „eine Größe kleiner“ entfällt: kleiner als 5 MHz gibt es nicht mehr."""
     ac = FakeAC(level=5)
     r = started(miner, ac, level=5, tmax=72, learned={'5': {'mhz': 200, 'temp_avg': 82, 'at': 'x', 'count': 1}})
-    r.go(115, temp=72)                                            # nach 120 s unter 79 °C (Nutzer 28.10.)
+    r.go(55, temp=72)                                             # nach 60 s unter 79 °C (Nutzer 28.10.)
     assert miner.clock() == 205
-    r.go(30, temp=lambda r: 74 if r.now < T0 + timedelta(seconds=160) else 73)   # +2 °C nach dem Schritt
+    r.go(30, temp=lambda r: 74 if r.now < T0 + timedelta(seconds=100) else 73)   # +2 °C nach dem Schritt
     r.go(10, temp=73)
     assert miner.clock() == 210
 
@@ -392,6 +396,15 @@ def test_learns_after_15_minutes_unchanged(miner):
     assert lw['ths_avg'] == 150.0                                 # Ø Hashrate der 15 min (Nutzer 28.10.)
     assert lw['j_th'] == 13.3                                     # Effizienz: 2000 W / 150 TH/s
     assert r.events('lernwert')
+
+
+def test_learned_value_never_above_the_cap(miner):
+    """Review 28.10.: die Obergrenze senkt den Takt nicht – ein später gelernter Wert wird trotzdem auf sie begrenzt."""
+    ac = FakeAC(level=4)
+    r = started(miner, ac, level=4, learned={'4': {'mhz': 280, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    r.st['caps'] = {'4': 270}                                     # Takt bleibt 280
+    r.go(15 * 60 + 30, temp=82)
+    assert r.st['clock_set'] == 280 and r.st['learned']['4']['mhz'] == 270.0
 
 
 def test_learning_in_band_mean_clock_is_stored(miner):
@@ -630,7 +643,7 @@ def test_superseded_command_is_not_measured(miner):
     r = started(miner, ac, level=5, learned={'5': {'mhz': 300, 'temp_avg': 82, 'at': 'x', 'count': 1}})
     miner.ignore_clock = True
     r.go(40, temp=82)
-    r.go(125, temp=77)                                            # +5 gesendet (nach 120 s unter 79 °C), Miner übernimmt nicht
+    r.go(65, temp=77)                                             # +5 gesendet (nach 60 s unter 79 °C), Miner übernimmt nicht
     r.go(25, temp=77)                                             # nach 20 s erneut gesendet
     takt = [e for e in r.events('takt') if e.get('clock_new') == 305]
     assert len(takt) >= 2 and takt[0]['takeover_state'] == 'nicht gemessen' and takt[-1]['attempt'] == 2
@@ -758,7 +771,7 @@ def test_calm_only_once_per_hot_change_and_not_after_a_plus_step(miner):
     r.go(60, temp=78)
     r.go(5 * 60, temp=80)                                         # Sperre läuft im Bereich ab
     assert not r.st.get('calm') and r.st['clock_set'] == 290
-    r.go(125, temp=77)                                            # wieder unter 79: keine neue Sperre, +5 (nach 120 s)
+    r.go(65, temp=77)                                             # wieder unter 79: keine neue Sperre, +5 (nach 60 s)
     assert len(r.events('taktsperre')) == 1 and r.st['clock_set'] == 295
     r.go(185, temp=77)                                            # 75–78 °C: 3 min nach der letzten Erhöhung
     assert r.st['clock_set'] == 300 and len(r.events('taktsperre')) == 1   # letzte Änderung bei 78 °C: keine Sperre
@@ -1018,8 +1031,8 @@ def test_start_hold_after_restart_until_79(miner):
     r.go(5, temp=79)
     assert not r.st.get('start_hold')                             # 79 °C erreicht: Pause vorbei
     assert r.events('startpause_ende')[-1]['trigger'] == 'Startpause beendet: 79 °C erreicht (nach 7 min)'
-    r.go(125, temp=77)
-    assert r.st['clock_set'] == 305                               # danach wie immer (nach 120 s unter 79 °C)
+    r.go(65, temp=77)
+    assert r.st['clock_set'] == 305                               # danach wie immer (nach 60 s unter 79 °C)
 
 
 def test_start_hold_ends_after_10_min_at_the_latest(miner):
@@ -1363,7 +1376,7 @@ def test_waiting_mode_switch_caps_the_clock_at_the_current_mode(miner):
 def test_plus_steps_at_75_to_78_wait_3_min(miner):
     ac = FakeAC(level=5)
     r = started(miner, ac, level=5, tmax=76, learned={'5': {'mhz': 250, 'temp_avg': 82, 'at': 'x', 'count': 1}})
-    r.go(115, temp=76)
+    r.go(55, temp=76)
     assert r.st['clock_set'] == 255
     r.go(170, temp=76)
     assert r.st['clock_set'] == 255                               # 3 min nach der letzten Erhöhung noch nicht vorbei
@@ -1375,7 +1388,7 @@ def test_wait_counts_from_any_increase_but_not_below_75(miner):
     """Meine Lesart (freigegeben): die 3 min zählen ab der letzten Takterhöhung, egal bei welcher Temperatur."""
     ac = FakeAC(level=5)
     r = started(miner, ac, level=5, tmax=65, learned={'5': {'mhz': 250, 'temp_avg': 82, 'at': 'x', 'count': 1}})
-    r.go(115, temp=65)
+    r.go(55, temp=65)
     assert r.st['clock_set'] == 270                               # 60–69 °C: +20
     r.go(40, temp=72)
     assert r.st['clock_set'] == 275                               # unter 75 °C: nach dem 30-s-Fenster wie bisher
@@ -1582,7 +1595,7 @@ def test_range_82_85_plus_steps(miner):
         ac = FakeAC(level=5)
         r = started(miner, ac, level=5, tmax=temp, learned={'5': {'mhz': 200, 'temp_avg': 82, 'at': 'x', 'count': 1}},
                     zb=(82, 85))
-        r.go(115, temp=temp)
+        r.go(55, temp=temp)
         assert miner.clock() == 200 + step, temp
 
 
@@ -1590,7 +1603,7 @@ def test_range_82_85_wait_3_min_from_78(miner):
     ac = FakeAC(level=5)
     r = started(miner, ac, level=5, tmax=78, learned={'5': {'mhz': 250, 'temp_avg': 82, 'at': 'x', 'count': 1}},
                 zb=(82, 85))
-    r.go(115, temp=78)
+    r.go(55, temp=78)
     assert r.st['clock_set'] == 255
     r.go(170, temp=78)
     assert r.st['clock_set'] == 255                               # ab L−4 = 78 °C: 3 min nach der letzten Erhöhung
@@ -1780,7 +1793,7 @@ def test_range_change_takes_the_new_limits_at_once_without_a_start(miner):
     assert r.st['band_in'] == (r.now - timedelta(seconds=5)).isoformat()    # Aufenthalt neu gemessen
     assert any(n[1] == 'Zielbereich 82–85 °C übernommen.' for n in r.st['log'])
     assert len(r.events('start')) == starts and miner.clock_sets == sets and not r.st.get('heat') and ac.level == 5
-    r.go(125, temp=80)                                            # 80 °C liegt jetzt unter dem Zielbereich: +5 (nach 120 s)
+    r.go(65, temp=80)                                             # 80 °C liegt jetzt unter dem Zielbereich: +5 (nach 60 s)
     assert r.st['clock_set'] == 305
 
 
@@ -1914,7 +1927,7 @@ def test_pulses_end_back_in_the_target_range_without_clock_change(miner, zb, sec
     assert r.events('luefterstoss_ende')[-1]['trigger'] == 'Lüfterstöße beendet: wieder im Zielbereich (%d °C)' % hi
     r.go(120, temp=hi)
     assert miner.clock_sets == sets and r.st['clock_set'] == 300 and not r.events('hohe_temperatur')
-    r.go(125, temp=(zb or (79, 84))[0] - 2)                      # nach 120 s unter L (bei L−1 kämen Lüfterstöße unten)
+    r.go(65, temp=(zb or (79, 84))[0] - 2)                       # nach 60 s unter L (bei L−1 kämen Lüfterstöße unten)
     assert r.st['clock_set'] == 305 and miner.clock() == 305
 
 
@@ -2082,7 +2095,7 @@ def test_automatik_off_on_does_not_keep_the_pulses(miner):
     assert not r.st.get('corr') and ac.level == 6 and len(r.events('luefterstoss')) == 2
 
 
-# ---------------------------------------------------------------- Initialwerte, 120 s unter L, Lüfterstöße unten (Nutzer 28.10.)
+# ---------------------------------------------------------------- Initialwerte, 60 s unter L, Lüfterstöße unten (Nutzer 28.10.)
 
 def test_initial_values_of_28_10():
     assert fa.START_CLOCK == {1: 170, 2: 250, 3: 330, 4: 380, 5: 400, 6: 420, 7: 440, 8: 440, 9: 440, 10: 440}
@@ -2096,48 +2109,48 @@ def test_start_without_learned_value_new_initial_values(miner, level, mhz, mode)
     assert r.events('start')[-1]['details'] == {'quelle': 'Initialwert', 'starttakt': mhz, 'basisstufe': level}
 
 
-def test_plus_step_only_after_120_s_below_l(miner):
+def test_plus_step_only_after_60_s_below_l(miner):
     ac = FakeAC(level=5)
     r = started(miner, ac, level=5, learned={'5': LW})
     r.go(30, temp=82)
     since = r.now
-    r.go(120, temp=72)                                            # 115 s unter 79 °C: noch kein Plus-Schritt
+    r.go(60, temp=72)                                             # 55 s unter 79 °C: noch kein Plus-Schritt
     assert r.st['clock_set'] == 300 and r.st['below_since'] == since.isoformat()
-    r.go(5, temp=72)                                              # 120 s: +5
+    r.go(5, temp=72)                                              # 60 s: +5
     assert r.st['clock_set'] == 305 and miner.clock() == 305
 
 
-def test_a_value_at_l_restarts_the_120_s(miner):
+def test_a_value_at_l_restarts_the_60_s(miner):
     ac = FakeAC(level=5)
     r = started(miner, ac, level=5, learned={'5': LW})
     r.go(30, temp=82)
-    r.go(100, temp=72)
+    r.go(50, temp=72)
     r.go(5, temp=79)                                              # ein Wert ≥ L setzt zurück
     assert r.st['below_since'] is None
-    r.go(120, temp=72)
+    r.go(60, temp=72)
     assert r.st['clock_set'] == 300
     r.go(5, temp=72)
     assert r.st['clock_set'] == 305
 
 
-def test_lower_l_restarts_the_120_s(miner):
-    """Neuer Zielbereich mit tieferem L: die 120 s zählen unter dem neuen L neu."""
+def test_lower_l_restarts_the_60_s(miner):
+    """Neuer Zielbereich mit tieferem L: die 60 s zählen unter dem neuen L neu."""
     ac = FakeAC(level=5)
     r = started(miner, ac, level=5, learned={'5': LW}, zb=(82, 85))
     r.go(30, temp=83)
-    r.go(100, temp=77)
+    r.go(50, temp=77)
     r.kw.update(target_low=79, target_high=84)
-    r.go(120, temp=77)
+    r.go(60, temp=77)
     assert r.st['clock_set'] == 300 and not r.st.get('stoss')
     r.go(5, temp=77)
     assert r.st['clock_set'] == 305
 
 
 def _cold(miner, ac, level=5, learned=None, **kw):
-    """Basisstufe `level`, 82 °C, dann 120 s bei 78 °C (L−1 von 79–84): in der nächsten Runde wäre +5 fällig."""
+    """Basisstufe `level`, 82 °C, dann 60 s bei 78 °C (L−1 von 79–84): in der nächsten Runde wäre +5 fällig."""
     r = started(miner, ac, level=level, learned=learned or {str(level): LW}, **kw)
     r.go(30, temp=82)
-    r.go(120, temp=78)
+    r.go(60, temp=78)
     assert r.st['clock_set'] == 300 and not r.st.get('stoss')
     return r
 
@@ -2204,7 +2217,7 @@ def test_cold_pulses_at_most_once_per_10_min(miner):
     assert r.st['clock_set'] == 305 and len(r.events('luefterstoss')) == 2
     r.go(5, temp=80)                                              # L+1: wieder frei – aber keine 10 min
     assert r.st['stoss_unten_frei']
-    r.go(185, temp=78)                                            # 120 s unter L, 3 min nach dem +5: gleich +5
+    r.go(185, temp=78)                                            # 60 s unter L, 3 min nach dem +5: gleich +5
     assert r.st['clock_set'] == 310 and len(r.events('luefterstoss')) == 2
     r.go((first + timedelta(minutes=10) - r.now).total_seconds(), temp=78)
     assert len(r.events('luefterstoss')) == 2
@@ -2219,9 +2232,9 @@ def test_new_cold_pulses_only_after_a_value_at_l_plus_1(miner):
     assert len(r.events('luefterstoss')) == 2 and r.st['clock_set'] >= 315 and not r.st['stoss_unten_frei']
     clock = r.st['clock_set']
     r.go(5, temp=80)                                              # L+1
-    r.go(120, temp=78)
+    r.go(60, temp=78)
     assert not r.st.get('stoss')
-    r.go(185, temp=78)                                            # 120 s unter L: zweites Stoßpaar, dann +5
+    r.go(185, temp=78)                                            # 60 s unter L: zweites Stoßpaar, dann +5
     pairs = [e for e in r.events('luefterstoss') if e['trigger'].startswith('Lüfterstoß unten 1/2')]
     assert len(pairs) == 2 and r.st['clock_set'] == clock + 5
 
@@ -2273,10 +2286,12 @@ def test_cap_after_5_min_above_4_percent_clock_stays(miner):
     r.go(5, temp=82)                                              # 5 min lang jeder Wert über 4 %
     assert r.st['caps'] == {'5': 295} and r.st['clock_set'] == 300 and miner.clock() == 300
     ev = r.events('obergrenze')[-1]
-    assert ev['trigger'] == 'Fehlerrate 4.5 % seit 5 min über 4 %: Obergrenze Stufe 5 = 295 MHz'
+    assert ev['trigger'] == ('Fehlerrate 4.5 % seit 5 min über 4 %: Obergrenze Stufe 5 = 295 MHz, Lernwert Stufe 5 auf '
+                             '295 MHz begrenzt; kein automatischer Neustart (erst 30 min nach dem Start)')
     assert ev['details']['obergrenze'] == 295 and ev['details']['vorher'] is None
-    r.go(10 * 60, temp=82)
+    r.go(5 * 60, temp=82)                                         # weitere 5 min: Neustart noch gesperrt (nach 26 min)
     assert len(r.events('obergrenze')) == 1 and r.st['caps'] == {'5': 295}   # nur niedriger
+    assert len([n for n in r.st['log'] if 'kein automatischer Neustart' in n[1]]) == 1   # Grund nur einmal
 
 
 @pytest.mark.parametrize('low', [4.0, None])
@@ -2320,14 +2335,14 @@ def test_cap_not_in_the_first_10_min_after_a_start(miner):
     assert r.st['caps'] == {'5': 295}
 
 
-@pytest.mark.parametrize('case', ['messung', 'test', 'wartung', 'overhot'])
+@pytest.mark.parametrize('case', ['messung', 'test', 'wartung', 'overhot', 'offline'])
 def test_no_cap_and_no_restart_during_takt_messung_test_wartung_over_hot(miner, monkeypatch, case):
     calls = []
     monkeypatch.setattr(calibration, 'reboot', lambda ip, port: calls.append(ip) or 'ok')
     ac = FakeAC(level=2)
     r = started(miner, ac, level=2, learned={'2': dict(LW, mhz=319.2)})
     r.st['start_at'] = (r.now - timedelta(hours=1)).isoformat()
-    miner.dh = 12.0
+    miner.dh = 4.5                                                # über 4 %: sonst Obergrenze und Neustart (28.10.)
     if case == 'messung':
         r.kw['cal'] = True
     elif case == 'test':
@@ -2335,6 +2350,8 @@ def test_no_cap_and_no_restart_during_takt_messung_test_wartung_over_hot(miner, 
     elif case == 'wartung':
         miner_cache.put('10.0.0.15', 'estats', 'x')               # A15 antwortet noch
         r.kw['maintenance_at'] = r.now.isoformat()
+    elif case == 'offline':
+        miner.offline = True                                      # Miner antwortet nicht
     else:
         miner.status = 'Over Hot'
     r.go(6 * 60, temp=82)
@@ -2359,7 +2376,7 @@ def test_cap_of_another_stage_does_not_limit(miner):
     r = started(miner, ac, level=5, learned={'5': LW})
     r.st['caps'] = {'4': 290}
     r.go(30, temp=82)
-    r.go(125, temp=72)
+    r.go(65, temp=72)
     assert r.st['clock_set'] == 305
 
 
@@ -2454,7 +2471,7 @@ def test_select_reads_caps_cleared_at(monkeypatch):
             "'-infinity'::timestamptz)") in seen[0]
 
 
-# ---------------------------------------------------------------- Fehlerrate: automatischer Neustart (Nutzer 28.10.)
+# ---------------------------------------------------------------- Fehlerrate: automatischer Neustart (Nutzer 28.10.: ab 4 %)
 
 class FakeSocket:
     """cgminer-Verbindung: recv liefert die Antworten der Reihe nach (b'' = Ende, eine Ausnahme wird geworfen)."""
@@ -2513,24 +2530,28 @@ def test_reboot_helper_reply_no_reply_and_errors(monkeypatch):
         calibration.reboot('10.0.0.15', 4028)
 
 
-def test_auto_restart_after_5_min_at_10_percent_cap_first(miner, monkeypatch):
+def test_auto_restart_after_5_min_above_4_percent_cap_first(miner, monkeypatch):
+    """Nutzer 28.10.: 5 min über 4 % beim selben Takt → Obergrenze und sofort der Neustart (vorher erst 5 min ab 10 %)."""
     sock = FakeSocket([REBOOT_REPLY, b''])
     conns = _connect(monkeypatch, sock)
     ac = FakeAC(level=5)
     r = started(miner, ac, level=5, learned={'5': LW})            # Start bei T0
     r.go(25 * 60, temp=82)
-    miner.dh = 12.0
+    miner.dh = 4.5
     r.go(5 * 60, temp=82)
-    assert not r.events('neustart_auto') and conns == []
-    r.go(5, temp=82)                                              # 5 min ab 10 %, 30 min nach dem Start
+    assert not r.events('neustart_auto') and not r.st.get('caps') and conns == []
+    r.go(5, temp=82)                                              # 5 min über 4 %, 30 min nach dem Start
     at = (r.now - timedelta(seconds=5)).isoformat()
     ev = r.events('neustart_auto')
-    assert len(ev) == 1 and ev[0]['trigger'] == 'Automatischer Neustart: Fehlerrate 12.0 % seit 5 min (Takt 300 MHz)'
+    assert len(ev) == 1 and ev[0]['trigger'] == 'Automatischer Neustart: Fehlerrate 4.5 % seit 5 min über 4 % (Takt 300 MHz)'
     assert ev[0]['ok'] is True and ev[0]['request'] == 'ascset|0,reboot,0' and ev[0]['response'].startswith('STATUS=S')
     assert conns == [('10.0.0.15', 4028)] and sock.sent == [b'ascset|0,reboot,0']
     assert r.st['auto_restart_at'] == at and r.st['restart_req'] == at
     kinds = [k for k in r.j.kinds() if k in ('obergrenze', 'neustart_auto')]
     assert kinds == ['obergrenze', 'neustart_auto'] and r.st['caps'] == {'5': 295}
+    assert r.events('obergrenze')[-1]['trigger'] == ('Fehlerrate 4.5 % seit 5 min über 4 %: Obergrenze Stufe 5 = '
+                                                     '295 MHz, Lernwert Stufe 5 auf 295 MHz begrenzt')
+    assert r.st['learned']['5']['mhz'] == 295                     # Lernwert 300 auf die Obergrenze begrenzt
     assert r.st['clock_set'] == 300                               # der Takt bleibt
     miner.offline = True                                          # die A15 startet neu: erwartet, kein Fehler
     r.go(30)
@@ -2542,28 +2563,79 @@ def test_auto_restart_after_5_min_at_10_percent_cap_first(miner, monkeypatch):
     assert r.st['heat'] and r.st.get('start_hold') and not r.st.get('restart_req')
 
 
-def test_no_auto_restart_within_30_min_after_a_start(miner, monkeypatch):
-    conns = _connect(monkeypatch, FakeSocket([b'']))
-    ac = FakeAC(level=5)
-    r = started(miner, ac, level=5, learned={'5': LW})
-    miner.dh = 12.0
-    r.go(30 * 60 - 10, temp=82)
-    assert not r.events('neustart_auto') and conns == [] and r.st['caps'] == {'5': 295}
-    r.go(5, temp=82)
-    assert len(r.events('neustart_auto')) == 1 and r.events('neustart_auto')[0]['response'] == calibration.REBOOT_NO_REPLY
-
-
-def test_auto_restart_at_most_once_per_3_h(miner, monkeypatch):
+def test_after_the_auto_restart_start_with_a_learned_value_below_the_cap(miner, monkeypatch):
     conns = _connect(monkeypatch, FakeSocket([b'']))
     ac = FakeAC(level=5)
     r = started(miner, ac, level=5, learned={'5': LW})
     r.st['start_at'] = (r.now - timedelta(hours=1)).isoformat()
-    r.st['auto_restart_at'] = (r.now - timedelta(hours=3) + timedelta(minutes=10)).isoformat()
-    miner.dh = 12.0
-    r.go(10 * 60, temp=82)                                        # Fehlerrate seit 10 min ab 10 %, letzter Neustart < 3 h
-    assert not r.events('neustart_auto') and conns == []
+    r.st['learned'] = {'5': dict(LW, mhz=280)}                    # Lernwert unter der kommenden Obergrenze 295
+    miner.dh = 4.5
+    r.go(5 * 60 + 5, temp=82)
+    assert len(conns) == 1 and r.st['caps'] == {'5': 295} and r.st['learned'] == {'5': dict(LW, mhz=280)}
+    assert r.events('obergrenze')[-1]['trigger'] == 'Fehlerrate 4.5 % seit 5 min über 4 %: Obergrenze Stufe 5 = 295 MHz'
+    assert r.events('obergrenze')[-1]['details']['lernwerte_vorher'] is None
+    miner.offline = True
+    r.go(30)
+    miner.offline, miner.elapsed, miner.dh = False, 10, 1.0
+    r.go(5, temp=26)
+    assert r.events('start')[-1]['details']['starttakt'] == 280 and r.st['clock_set'] == 280   # min(Lernwert, Obergrenze)
+
+
+def test_no_auto_restart_within_30_min_after_a_start_only_the_cap(miner, monkeypatch):
+    conns = _connect(monkeypatch, FakeSocket([b'']))
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, learned={'5': LW})            # Start bei T0
+    miner.dh = 4.5
+    r.go(15 * 60 - 10, temp=82)
+    assert not r.st.get('caps')
+    r.go(5, temp=82)                                              # 10 min nach dem Start, dann 5 min über 4 %
+    ev = r.events('obergrenze')[-1]
+    assert ev['trigger'] == ('Fehlerrate 4.5 % seit 5 min über 4 %: Obergrenze Stufe 5 = 295 MHz, Lernwert Stufe 5 auf '
+                             '295 MHz begrenzt; kein automatischer Neustart (erst 30 min nach dem Start)')
+    assert ev['details']['neustart_gesperrt'] == 'erst 30 min nach dem Start'
+    assert r.st['caps'] == {'5': 295} and not r.events('neustart_auto') and conns == []
+    r.go(15 * 60 - 5, temp=82)                                    # nach 20 und 25 min: weiter gesperrt
+    assert not r.events('neustart_auto') and conns == [] and len(r.events('obergrenze')) == 1
+    assert len([n for n in r.st['log'] if 'kein automatischer Neustart' in n[1]]) == 1
+    r.go(5, temp=82)                                              # 30 min nach dem Start: die nächsten 5 min über 4 %
+    assert len(r.events('neustart_auto')) == 1 and r.events('neustart_auto')[0]['response'] == calibration.REBOOT_NO_REPLY
+
+
+def test_auto_restart_at_most_once_per_3_h_only_the_cap(miner, monkeypatch):
+    conns = _connect(monkeypatch, FakeSocket([b'']))
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, learned={'5': LW})
+    r.st['start_at'] = (r.now - timedelta(hours=1)).isoformat()
+    last = r.now - timedelta(hours=3) + timedelta(minutes=7)      # letzter automatischer Neustart: Sperre noch 7 min
+    r.st['auto_restart_at'] = last.isoformat()
+    miner.dh = 4.5
+    r.go(5 * 60 + 5, temp=82)                                     # 5 min über 4 %: nur die Obergrenze
+    hm = last.astimezone(fa.LOCAL_TZ).strftime('%H:%M')
+    ev = r.events('obergrenze')[-1]
+    assert ev['trigger'].endswith('; kein automatischer Neustart (höchstens einer je 3 h, letzter um %s)' % hm)
+    assert r.st['caps'] == {'5': 295} and not r.events('neustart_auto') and conns == []
+    r.go(5 * 60 - 5, temp=82)                                     # Sperre nach 7 min vorbei: Neustart erst mit den nächsten 5 min
+    assert conns == []
     r.go(5, temp=82)
-    assert len(r.events('neustart_auto')) == 1
+    assert len(conns) == 1 and len(r.events('neustart_auto')) == 1 and len(r.events('obergrenze')) == 1
+
+
+def test_blocked_restart_without_a_new_cap_noted_once(miner, monkeypatch):
+    """Obergrenze schon da (z. B. Ertrags-Prüfung), Neustart gesperrt: nur ein Hinweis mit dem Grund, einmal je Grund."""
+    conns = _connect(monkeypatch, FakeSocket([b'']))
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, learned={'5': LW})
+    r.st['start_at'] = (r.now - timedelta(hours=1)).isoformat()
+    last = r.now - timedelta(hours=3) + timedelta(minutes=12)
+    r.st.update(caps={'5': 295}, auto_restart_at=last.isoformat())
+    miner.dh = 4.5
+    r.go(10 * 60 + 5, temp=82)                                    # nach 5 und 10 min über 4 %: gesperrt
+    text = ('Fehlerrate 4.5 % seit 5 min über 4 %: kein automatischer Neustart (höchstens einer je 3 h, letzter um '
+            + last.astimezone(fa.LOCAL_TZ).strftime('%H:%M') + ').')
+    assert [n[1] for n in r.st['log'] if 'kein automatischer Neustart' in n[1]] == [text]
+    assert not r.events('obergrenze') and conns == [] and r.st['learned']['5']['mhz'] == 300   # keine neue Obergrenze
+    r.go(5 * 60, temp=82)
+    assert len(conns) == 1 and len(r.events('neustart_auto')) == 1
 
 
 def test_auto_restart_failure_retries_after_5_min_and_does_not_count(miner, monkeypatch):
@@ -2571,9 +2643,9 @@ def test_auto_restart_failure_retries_after_5_min_and_does_not_count(miner, monk
     ac = FakeAC(level=5)
     r = started(miner, ac, level=5, learned={'5': LW})
     r.st['start_at'] = (r.now - timedelta(hours=1)).isoformat()
-    miner.dh = 12.0
+    miner.dh = 4.5
     r.go(5 * 60 + 5, temp=82)
-    assert len(conns) == 1 and not r.events('neustart_auto')
+    assert len(conns) == 1 and not r.events('neustart_auto') and r.st['caps'] == {'5': 295}
     err = [e for e in r.events('fehler') if e['details'].get('grund') == 'neustart_auto'][-1]
     assert err['ok'] is False and 'Connection refused' in err['error']
     assert err['trigger'] == 'Automatischer Neustart: Befehl nicht gesendet'
@@ -2583,24 +2655,28 @@ def test_auto_restart_failure_retries_after_5_min_and_does_not_count(miner, monk
     assert len(conns) == 1                                        # nächster Versuch frühestens nach 5 min
     sock = FakeSocket([b''])
     _connect(monkeypatch, sock)
-    r.go(5, temp=82)
+    r.go(5, temp=82)                                              # weitere 5 min über 4 %: erneut
     assert len(r.events('neustart_auto')) == 1 and sock.sent == [b'ascset|0,reboot,0'] and r.st['auto_restart_at']
+    assert len(r.events('obergrenze')) == 1                       # die Obergrenze nur einmal
 
 
-def test_auto_restart_5_min_restart_below_10_percent(miner, monkeypatch):
+def test_no_cap_and_no_restart_at_exactly_4_percent(miner, monkeypatch):
     conns = _connect(monkeypatch, FakeSocket([b'']))
     ac = FakeAC(level=5)
     r = started(miner, ac, level=5, learned={'5': LW})
     r.st['start_at'] = (r.now - timedelta(hours=1)).isoformat()
-    miner.dh = 12.0
+    miner.dh = 4.0
+    r.go(30 * 60, temp=82)                                        # genau 4 %: nicht über 4 %
+    assert conns == [] and not r.st.get('caps') and not r.events('neustart_auto')
+    miner.dh = 4.5
     r.go(250, temp=82)
-    miner.dh = 9.9
-    r.go(5, temp=82)
-    miner.dh = 12.0
+    miner.dh = 4.0
+    r.go(5, temp=82)                                              # ein Wert von 4 %: die 5 min beginnen neu
+    miner.dh = 4.5
     r.go(300, temp=82)
-    assert conns == [] and r.st['caps'] == {'5': 295}             # über 4 % ununterbrochen: Obergrenze schon da
+    assert conns == [] and not r.st.get('caps')
     r.go(5, temp=82)
-    assert len(conns) == 1
+    assert len(conns) == 1 and r.st['caps'] == {'5': 295}
 
 
 # ---------------------------------------------------------------- Lernen nur bei Fehlerrate unter 4 % (Nutzer 28.10.)
@@ -2664,23 +2740,41 @@ def _ghs(gain, top=300):
     return lambda mn: 150000.0 if mn.clock() <= top else 150000.0 + gain * 1000
 
 
-def _plus5(miner, ac, gain, learned=300, level=5):
-    """Lernwert `learned`, Start vor 1 h; 5 min bei 82 °C, dann 74 °C (L−5: +5 ohne Stöße und ohne die 3 min): der
-    +5-Schritt ist übernommen, die Ertrags-Prüfung läuft seit der letzten Runde."""
+def _plus5(miner, ac, gain, learned=300, level=5, warm=15 * 60, dip=None, before=150.0):
+    """Lernwert `learned`, Start vor 1 h; `warm` bei 82 °C (15 min: das ganze Fenster vor dem Schritt hat Hashrate),
+    dann 74 °C (L−5: +5 ohne Stöße und ohne die 3 min): der +5-Schritt ist übernommen, die Ertrags-Prüfung läuft seit
+    der letzten Runde. `dip` = (von, bis) in min vor dem Schritt: Hashrate 10 TH/s tiefer (kurzer Firmware-Einbruch)."""
     r = started(miner, ac, level=level, learned={str(level): dict(LW, mhz=learned)})
     r.st['start_at'] = (r.now - timedelta(hours=1)).isoformat()
-    miner.ghs = _ghs(gain, learned)
-    r.go(5 * 60, temp=82)
-    r.go(125, temp=74)                                            # 120 s unter L: +5 in die Folge
+    ghs = _ghs(gain, learned)
+    step = r.now + timedelta(seconds=warm + 60)                   # Runde des +5-Schritts
+    if dip:
+        lo, hi = step - timedelta(minutes=dip[0]), step - timedelta(minutes=dip[1])
+        miner.ghs = lambda mn: ghs(mn) - (10000.0 if lo <= r.now < hi else 0.0)
+    else:
+        miner.ghs = ghs
+    r.go(warm, temp=82)
+    r.go(60, temp=74)
+    assert r.st['clock_set'] == learned                           # 55 s unter L: noch kein Plus-Schritt
+    r.go(5, temp=74)                                              # Runde `step`, 60 s unter L: +5 in die Folge
     assert r.st['clock_set'] == learned + 5 and not r.st.get('ertrag')
     for _ in range(6):                                            # übernommen (mit Moduswechsel später): Prüfung
         r.go(5, temp=74)
         if r.st.get('ertrag'):
             break
     at = r.now - timedelta(seconds=5)
-    assert r.st['ertrag'] == {'at': at.isoformat(), 'from': learned, 'to': learned + 5, 'before': 150.0}
+    assert r.st['ertrag'] == {'at': at.isoformat(), 'from': learned, 'to': learned + 5, 'before': before}
     assert miner.clock() == learned + 5
     return r
+
+
+@pytest.mark.parametrize('dip, before', [((10, 9), round(150 - 12 * 10 / 181, 2)), ((17, 16), 150.0)])
+def test_yield_check_before_is_the_mean_of_the_15_min_before_the_step(miner, dip, before):
+    """Nutzer 28.10.: Mittel der 15 min vor dem Schritt (181 Werte) – ein Einbruch 10 min vorher zählt (mit 12 Werten
+    à −10 TH/s), einer 17 min vorher nicht, obwohl er noch in der gemerkten Hashrate (20 min) liegt."""
+    ac = FakeAC(level=5)
+    r = _plus5(miner, ac, gain=1.0, warm=20 * 60, dip=dip, before=before)
+    assert min(v for _, v in r.st['ths']) == 140.0
 
 
 def test_yield_check_loss_goes_back_and_sets_the_cap(miner):
@@ -2762,8 +2856,8 @@ def test_no_yield_check_for_20_40_and_shortened_steps(miner, temp, cap, size):
     if cap:
         r.st['caps'] = {'5': cap}
     miner.ghs = _ghs(-1.2)
-    r.go(5 * 60, temp=82)
-    r.go(130, temp=temp)
+    r.go(15 * 60, temp=82)                                        # das ganze Fenster vor dem Schritt hat Hashrate
+    r.go(70, temp=temp)
     assert r.st['clock_set'] == 300 + size and miner.clock() == 300 + size and not r.st.get('ertrag')
     r.go(15 * 60, temp=82)
     assert not r.events('ertrag') and r.st.get('caps', {}) == ({'5': cap} if cap else {})
@@ -2773,8 +2867,8 @@ def test_no_yield_check_within_30_min_after_a_start(miner):
     ac = FakeAC(level=5)
     r = started(miner, ac, level=5, learned={'5': LW})            # Start bei T0
     miner.ghs = _ghs(-1.2)
-    r.go(5 * 60, temp=82)
-    r.go(130, temp=74)
+    r.go(15 * 60, temp=82)                                        # Schritt nach gut 16 min: noch in den 30 min
+    r.go(70, temp=74)
     assert r.st['clock_set'] == 305 and not r.st.get('ertrag')
     r.go(30, temp=74)                                             # kein 10-min-Halt: nach dem Fenster gleich +5
     assert r.st['clock_set'] == 310
@@ -2787,10 +2881,10 @@ def test_no_yield_check_without_hashrate_before_the_step(miner):
     r = started(miner, ac, level=5, learned={'5': LW})
     r.st['start_at'] = (r.now - timedelta(hours=1)).isoformat()
     miner.ghs = None
-    r.go(5 * 60, temp=82)
-    r.go(130, temp=74)
+    r.go(15 * 60, temp=82)
+    r.go(70, temp=74)
     assert r.st['clock_set'] == 305 and not r.st.get('ertrag')
-    assert len(r.st['ths']) == 2                                  # nur die zwei Werte des Starts, älter als 5 min
+    assert len(r.st['ths']) == 2                                  # nur die zwei Werte des Starts, älter als 15 min
     miner.ghs = _ghs(-1.2)
     r.go(15 * 60, temp=82)
     assert not r.events('ertrag') and not r.st.get('caps')
@@ -2806,12 +2900,12 @@ def test_yield_check_cancelled_without_hashrate_after_the_step(miner):
     assert r.st['clock_set'] == 310                               # Prüfung vorbei: Plus-Schritte wieder möglich
 
 
-def test_yield_check_keeps_15_min_of_hashrate(miner):
+def test_yield_check_keeps_20_min_of_hashrate(miner):
     ac = FakeAC(level=5)
     r = _plus5(miner, ac, gain=1.0)
     r.go(20 * 60, temp=82)
     hist = r.st['ths']
-    assert len(hist) == 181 and fa._age(hist[0][0], r.now - timedelta(seconds=5)) == 15 * 60
+    assert len(hist) == 241 and fa._age(hist[0][0], r.now - timedelta(seconds=5)) == 20 * 60
     assert hist[-1] == [(r.now - timedelta(seconds=5)).isoformat(), 151.0]
 
 
@@ -2875,6 +2969,59 @@ def test_yield_check_cancelled_by_another_clock_change_or_a_pause(miner, case):
     assert not r.events('ertrag') and not r.st.get('caps')
 
 
+# ---------------------------------------------------------------- Neue Obergrenze begrenzt die Lernwerte (Nutzer 28.10.)
+
+def test_error_rate_cap_limits_the_learned_values_of_the_stage_in_all_ranges(miner):
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, learned={'5': LW, '4': dict(LW, mhz=320)})
+    archive = {'82-85': {'5': dict(LW, mhz=320), '4': dict(LW, mhz=330)}, '76-79': {'5': dict(LW, mhz=280)}}
+    r.st['learned_zb'] = archive
+    miner.dh = 4.5
+    r.go(15 * 60 - 10, temp=82)
+    assert not r.st.get('caps') and r.st['learned']['5'] == LW
+    r.go(5, temp=82)                                              # 10 min nach dem Start, dann 5 min über 4 %
+    assert r.st['caps'] == {'5': 295}
+    assert r.st['learned'] == {'5': dict(LW, mhz=295), '4': dict(LW, mhz=320)}   # andere Stufe bleibt
+    assert r.st['learned_zb'] == {'82-85': {'5': dict(LW, mhz=295), '4': dict(LW, mhz=330)},
+                                  '76-79': {'5': dict(LW, mhz=280)}}              # 280 liegt schon darunter
+    assert archive['82-85']['5']['mhz'] == 320                    # neue dicts: der Zustand davor bleibt unverändert
+    ev = r.events('obergrenze')[-1]
+    assert ev['trigger'] == ('Fehlerrate 4.5 % seit 5 min über 4 %: Obergrenze Stufe 5 = 295 MHz, Lernwerte Stufe 5 auf '
+                             '295 MHz begrenzt (79–84, 82–85); kein automatischer Neustart (erst 30 min nach dem Start)')
+    assert ev['details']['lernwerte_vorher'] == {'79-84': 300, '82-85': 320}
+    assert any(n[1] == ev['trigger'] + '.' for n in r.st['log'])
+    r.kw.update(target_low=82, target_high=85)                    # zurück im Bereich 82–85: begrenzter Lernwert
+    r.go(5, temp=83)
+    assert r.st['learned'] == {'5': dict(LW, mhz=295), '4': dict(LW, mhz=330)}
+    r.kw['level_at'] = 'neu'
+    r.go(10, temp=83)
+    assert r.events('start')[-1]['details']['starttakt'] == 295
+
+
+def test_yield_check_cap_limits_the_learned_values_at_or_below_stay(miner):
+    ac = FakeAC(level=5)
+    r = _plus5(miner, ac, gain=-1.2)
+    r.st['learned'] = {'5': dict(LW, mhz=300)}                    # genau die kommende Obergrenze: bleibt
+    r.st['learned_zb'] = {'82-85': {'5': dict(LW, mhz=310)}, '76-79': {'5': dict(LW, mhz=290)}}
+    r.go(600, temp=74)
+    ev = r.events('ertrag')[-1]
+    assert ev['trigger'] == ('Ertrags-Prüfung: +5 MHz (300 → 305 MHz) brachte −1,2 TH/s: zurück auf 300 MHz, '
+                             'Obergrenze Stufe 5 = 300 MHz, Lernwert Stufe 5 auf 300 MHz begrenzt (82–85)')
+    assert ev['details']['lernwerte_vorher'] == {'82-85': 310}
+    assert r.st['caps'] == {'5': 300} and r.st['learned'] == {'5': dict(LW, mhz=300)}
+    assert r.st['learned_zb'] == {'82-85': {'5': dict(LW, mhz=300)}, '76-79': {'5': dict(LW, mhz=290)}}
+
+
+def test_yield_check_cap_limits_the_active_learned_value(miner):
+    ac = FakeAC(level=5)
+    r = _plus5(miner, ac, gain=0.2)
+    r.st['learned'] = {'5': dict(LW, mhz=304.6)}
+    r.go(600, temp=74)
+    assert r.events('ertrag')[-1]['trigger'] == ('Ertrags-Prüfung: +5 MHz (300 → 305 MHz) brachte +0,2 TH/s (unter 0,5): '
+                                                 'Obergrenze Stufe 5 = 300 MHz, Lernwert Stufe 5 auf 300 MHz begrenzt')
+    assert r.st['learned'] == {'5': dict(LW, mhz=300)} and r.st['clock_set'] == 305
+
+
 # ---------------------------------------------------------------- Lüfterstöße unten enden ohne Regelung (28.10.)
 
 def test_cold_pulses_end_on_automatik_off_fan_write_retried(miner):
@@ -2925,7 +3072,7 @@ def test_state_without_start_time_gets_one_no_cap_and_no_restart_at_once(miner, 
     old = {'v': fa.STATE_VERSION, 'seen_at': T0.isoformat(), 'level_seen': 'x', 'zb': [79, 84], 'learned': {'5': LW},
            'clock_set': 300, 'fan_target': 5, 'fan_set': 5, 'elapsed': 900}   # Stand vor dem Update: ohne start_at
     r = Run(miner, ac, 5, state=old)
-    miner.dh = 12.0
+    miner.dh = 4.5
     r.go(5, temp=82)
     assert r.st['start_at'] == T0.isoformat() and not r.events('start')
     r.go(15 * 60 - 5, temp=82)                                    # 10 min, dann 5 min über 4 %
@@ -2944,7 +3091,7 @@ def test_cap_window_restarts_when_the_clock_changes(miner):
     r.go(10 * 60, temp=82)
     miner.dh = 4.5
     r.go(60, temp=82)                                             # 5 min über 4 % beginnen bei 300 MHz
-    r.go(125, temp=74)                                            # +5 → 305 MHz
+    r.go(65, temp=74)                                             # +5 → 305 MHz
     assert r.st['clock_set'] == 305
     r.go(5, temp=82)
     since = r.now - timedelta(seconds=5)
@@ -2973,17 +3120,23 @@ def test_cap_window_restarts_when_the_user_clears_the_caps(miner):
     assert r.st['caps'] == {'5': 295}
 
 
-def test_restart_window_keeps_running_when_the_clock_changes(miner, monkeypatch):
+def test_restart_window_restarts_when_the_clock_changes(miner, monkeypatch):
+    """Nutzer 28.10.: der Neustart hängt an den 5 min über 4 % beim selben Takt (vorher eigene 5 min ab 10 %, unabhängig
+    vom Takt)."""
     conns = _connect(monkeypatch, FakeSocket([b'']))
     ac = FakeAC(level=5)
     r = started(miner, ac, level=5, learned={'5': LW})
     r.st['start_at'] = (r.now - timedelta(hours=1)).isoformat()
-    miner.dh = 12.0
-    r.go(60, temp=82)
-    since = r.st['dh_restart_since']
-    r.go(125, temp=74)                                            # +5 → 305 MHz: die 5 min ab 10 % laufen weiter
-    assert r.st['clock_set'] == 305 and r.st['dh_restart_since'] == since and conns == []
-    r.go(115, temp=82)
-    assert conns == []
-    r.go(5, temp=82)                                              # 5 min nach dem Beginn, trotz anderem Takt
-    assert len(conns) == 1
+    r.st['dh_restart_since'] = r.now.isoformat()                  # Zustand der entfallenen 10-%-Regel
+    miner.dh = 4.5
+    r.go(60, temp=82)                                             # 5 min über 4 % beginnen bei 300 MHz
+    assert 'dh_restart_since' not in r.st
+    r.go(65, temp=74)                                             # +5 → 305 MHz
+    assert r.st['clock_set'] == 305
+    r.go(5, temp=82)
+    since = r.now - timedelta(seconds=5)
+    assert r.st['dh_cap_since'] == since.isoformat() and r.st['dh_cap_clock'] == 305
+    r.go((since + timedelta(minutes=5) - r.now).total_seconds(), temp=82)
+    assert conns == [] and not r.st.get('caps')                   # die 5 min bei 300 MHz zählen nicht
+    r.go(5, temp=82)
+    assert len(conns) == 1 and r.st['caps'] == {'5': 300}
