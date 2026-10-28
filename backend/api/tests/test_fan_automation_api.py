@@ -236,6 +236,35 @@ def test_payload_state_of_the_new_regulation(client, a15, backup):
     assert data['log'] == [['2026-10-24T20:00:00+00:00', 'Korrekturphase']]
 
 
+def test_caps_in_payload_and_clear(client, a15, backup):
+    """Obergrenzen (Nutzer 28.10.): the payload shows the caps per fan stage; „Obergrenzen löschen“ only writes the
+    user event (the data-service clears the caps in its next round), with the automation on or off."""
+    url = '/api/fans/automation/'
+    client.post(url, {'action': 'enable', 'dev_id': 'dev1', 'port': 1, 'level': 3}, format='json')
+    auto = FanAutomation.objects.get(device=a15)
+    auto.state = {'v': 2, 'phase': 'normal', 't': 83, 'caps': {'3': 325, '5': 395}, 'caps_cleared_seen': 'x',
+                  'seen_at': timezone.now().isoformat()}
+    auto.save()
+    st = client.get(url).data['state']
+    assert st['caps'] == {'3': 325, '5': 395} and 'caps_cleared_seen' not in st
+    updated = FanAutomation.objects.get(device=a15).updated_at
+    res = client.post(url, {'action': 'caps_clear'}, format='json')
+    assert res.status_code == 200 and res.data['state']['caps'] == {'3': 325, '5': 395}   # until the data-service ran
+    auto = FanAutomation.objects.get(device=a15)
+    assert auto.updated_at == updated and auto.enabled and auto.state['caps'] == {'3': 325, '5': 395}
+    client.post(url, {'action': 'disable'}, format='json')
+    assert client.post(url, {'action': 'caps_clear'}, format='json').status_code == 200     # automation off: allowed
+    events = list(AutomationLog.objects.filter(kind='obergrenzen_loeschen').order_by('id'))
+    assert [(e.trigger, e.source, e.device_id, e.ok) for e in events] == [
+        ('Nutzer: Obergrenzen gelöscht', 'nutzer', a15.id, None)] * 2
+    assert (events[0].phase, events[0].chip_temp) == ('normal', 83.0)
+
+
+def test_caps_clear_without_a15(client):
+    assert client.post('/api/fans/automation/', {'action': 'caps_clear'}, format='json').status_code == 404
+    assert not AutomationLog.objects.exists()
+
+
 def test_temp_test_start_and_abort(client, a15, backup):
     url = '/api/fans/automation/'
     client.post(url, {'action': 'enable', 'dev_id': 'dev1', 'port': 1, 'level': 2}, format='json')

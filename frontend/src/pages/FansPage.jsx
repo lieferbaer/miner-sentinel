@@ -68,12 +68,18 @@ function phases(lo, hi) {
 const REGULATING = new Set(['normal', 'korrektur', 'ausnahme'])
 const MODE_LABEL = { '2/L4': 'mode 04', '2/L3': 'mode 03', '2/L2': 'mode 02', '2/L1': 'mode 01', '2/L0': 'mode 00',
   '1/-': 'High Performance' }
-// the regulation in short (plan of 24.10.), for the Zielbereich lo–hi (Nutzer 27.10.)
+// the regulation in short (plan of 24.10.), for the Zielbereich lo–hi (Nutzer 27.10.); Plus-Schritte erst nach 120 s
+// unter lo, Lüfterstöße unten, Ertrags-Prüfung, Obergrenze (4 %) und automatischer Neustart nach der Fehlerrate
+// (Nutzer 28.10.)
 function logicText(lo, hi) {
   const range = lo + '–' + hi + ' °C'
   return 'Der Lüfter läuft fest auf der gewählten Basisstufe, der Takt hält den heißesten Chip bei ' + range +
-    '; dort keine Taktänderung. Unter ' + lo + ' °C Takt +5 / +20 / +40 MHz (kleinster Schritt 5 MHz; bei ' +
-    (lo - 4) + '–' + (lo - 1) + ' °C erst 3 min nach der letzten Takterhöhung). Ab ' + (hi + 1) +
+    '; dort keine Taktänderung. Unter ' + lo + ' °C (erst nach 120 s ununterbrochen darunter) Takt +5 / +20 / +40 MHz ' +
+    '(kleinster Schritt 5 MHz; bei ' + (lo - 4) + '–' + (lo - 1) + ' °C erst 3 min nach der letzten Takterhöhung; ' +
+    'nie über die Obergrenze der Basisstufe). Bei ' + (lo - 1) + ' °C statt der Takterhöhung zuerst zwei Lüfterstöße ' +
+    '(Basisstufe −1 für 6 s, dann zurück; nicht bei Basisstufe 1); zurück im Ziel: keine Erhöhung; bei ' + (lo - 2) +
+    ' °C oder weniger sofort die Takterhöhung; höchstens ein Stoßpaar je 10 min, neue erst nach ' + (lo + 1) +
+    ' °C oder mehr. Ab ' + (hi + 1) +
     ' °C Lüfter +1 bzw. +2 und Takt runter (Korrekturphase; bei ' + (hi + 1) + '–' + (hi + 3) +
     ' °C −10 MHz, wenn sie vorher unter 5 min in ' + range + ' lag, sonst −5 MHz); zurück zur Basisstufe nach ' +
     '1 min in ' + range + ' oder sobald unter ' + lo + ' °C. Ab ' + (hi + 1) + ' °C zuerst zwei Lüfterstöße ' +
@@ -83,12 +89,19 @@ function logicText(lo, hi) {
     ' °C und fällt die Temperatur unter ' + lo + ' °C: 5 min keine Taktänderung (endet über ' + hi + ' °C). ' +
     'Nach Neustart, Wartung oder Over Hot keine Takterhöhung bis ' + lo + ' °C, höchstens 10 min (Startpause). ' +
     'Bei jedem Start Lüfter Stufe 1, bis die Chiptemperatur ' + lo + ' °C erreicht (Heizmodus). ' +
-    'Bei 440 MHz und 3 min unter ' + (lo - 9) + ' °C Lüfter −1 (Ausnahme).'
+    'Bei 440 MHz und 3 min unter ' + (lo - 9) + ' °C Lüfter −1 (Ausnahme). ' +
+    'Ertrags-Prüfung nach jeder Takterhöhung um +5 MHz (nicht in den ersten 30 min nach dem Start): 10 min keine ' +
+    'weitere Takterhöhung, dann Hashrate (Ø 5 min) gegen die 5 min davor; unter +0,5 TH/s mehr: Obergrenze der ' +
+    'Basisstufe = Takt davor; bei einem Verlust (über 0,5 TH/s weniger) zusätzlich zurück auf den Takt davor. ' +
+    'Fehlerrate 5 min über 4 %: Obergrenze der Basisstufe = gesetzter Takt −5 MHz (der Takt wird nicht gesenkt; gilt ' +
+    'in jedem Zielbereich, bis „Obergrenzen löschen“). Fehlerrate 5 min ab 10 %: automatischer Neustart der A15 ' +
+    '(höchstens einer je 3 h, frühestens 30 min nach dem Start).'
 }
 function startText(lo, hi) {
   return 'Start (Stufenwahl, Einschalten, Neustart, nach Wartung oder Takt-Messung): Lernwert der Basisstufe, sonst ' +
-    'Stufe 1 = 100 MHz … Stufe 7 = 160 MHz. Lernwert: 15 min stabil in ' + lo + '–' + hi +
-    ' °C bei unveränderter Lüfterstufe.'
+    'der des nächstgelegenen Zielbereichs, sonst Stufe 1 = 170, 2 = 250, 3 = 330, 4 = 380, 5 = 400, 6 = 420, ' +
+    'ab 7 = 440 MHz; höchstens die Obergrenze der Stufe. Lernwert: 15 min stabil in ' + lo + '–' + hi +
+    ' °C bei unveränderter Lüfterstufe, nur bei einer Fehlerrate unter 4 % (Mittel der 15 min).'
 }
 
 function clockTime(iso, seconds = false) {
@@ -111,12 +124,19 @@ function useAutomation(initial) {
   return [auto, setAuto]
 }
 
-/** Learned values per fan level: clock at which the chip temperature stayed 15 min within the Zielbereich. */
-function LearnedTable({ learned, level, lo, hi }) {
+const hasCaps = (caps) => Object.values(caps || {}).some((v) => typeof v === 'number')
+
+/** Learned values per fan level: mean of the clock set by the regulation while the chip temperature stayed 15 min
+ * within the Zielbereich; with the Obergrenze per level (Fehlerrate, Nutzer 28.10.; gilt in jedem Zielbereich). */
+function LearnedTable({ learned, caps, zb, level, lo, hi }) {
   // only the per-level values of the regulation since 24.10. (older values per mode have no 'mhz' here)
-  const rows = Object.entries(learned || {})
-    .filter(([, v]) => v && typeof v.mhz === 'number')
-    .sort((a, b) => Number(a[0]) - Number(b[0]))
+  const values = Object.fromEntries(Object.entries(learned || {}).filter(([, v]) => v && typeof v.mhz === 'number'))
+  const limits = Object.fromEntries(Object.entries(caps || {}).filter(([, v]) => typeof v === 'number'))
+  const withCaps = Object.keys(limits).length > 0
+  // Bereich (Nutzer 28.10.): the learned values belong to the range the data-service has taken over (state.zb)
+  const range = Array.isArray(zb) && zb.length === 2 ? zb[0] + '–' + zb[1] + ' °C' : '—'
+  // a level with an Obergrenze but no learned value gets its own row
+  const rows = [...new Set([...Object.keys(values), ...Object.keys(limits)])].sort((a, b) => Number(a) - Number(b))
   if (!rows.length) {
     return <p className="text-muted-foreground">Lernwerte: noch keine (nach 15 min stabil bei {lo}–{hi} °C).</p>
   }
@@ -127,24 +147,62 @@ function LearnedTable({ learned, level, lo, hi }) {
         <thead className="text-muted-foreground">
           <tr className="text-left">
             <th className="pr-3 font-medium">Stufe</th>
-            <th className="pr-3 font-medium">Takt</th>
+            <th className="pr-3 font-medium">Bereich</th>
+            <th className="pr-3 font-medium">Gesetzter Takt (Ø)</th>
             <th className="pr-3 font-medium">Ø Temperatur</th>
+            <th className="pr-3 font-medium">Ø Hashrate</th>
             <th className="pr-3 font-medium">Anzahl</th>
-            <th className="font-medium">Zeit</th>
+            <th className={withCaps ? 'pr-3 font-medium' : 'font-medium'}>Zeit</th>
+            {withCaps && <th className="font-medium">Obergrenze</th>}
           </tr>
         </thead>
         <tbody>
-          {rows.map(([lv, v]) => (
-            <tr key={lv} className={Number(lv) === level ? 'font-semibold' : ''}>
-              <td className="pr-3">{lv}</td>
-              <td className="pr-3 tabular-nums">{fmt(v.mhz, 0, ' MHz')}</td>
-              <td className="pr-3 tabular-nums">{fmt(v.temp_avg, 1, ' °C')}</td>
-              <td className="pr-3 tabular-nums">{v.count ?? '—'}</td>
-              <td className="text-muted-foreground">{when(v.at)}</td>
-            </tr>
-          ))}
+          {rows.map((lv) => {
+            const v = values[lv] || {}
+            return (
+              <tr key={lv} className={Number(lv) === level ? 'font-semibold' : ''}>
+                <td className="pr-3">{lv}</td>
+                <td className="whitespace-nowrap pr-3 tabular-nums">{values[lv] ? range : '—'}</td>
+                <td className="pr-3 tabular-nums">{fmt(v.mhz, 0, ' MHz')}</td>
+                <td className="pr-3 tabular-nums">{fmt(v.temp_avg, 1, ' °C')}</td>
+                <td className="whitespace-nowrap pr-3 tabular-nums">{fmt(v.ths_avg, 1, ' TH/s')}</td>
+                <td className="pr-3 tabular-nums">{v.count ?? '—'}</td>
+                <td className={withCaps ? 'pr-3 text-muted-foreground' : 'text-muted-foreground'}>{when(v.at)}</td>
+                {withCaps && <td className="tabular-nums">{fmt(limits[lv], 0, ' MHz')}</td>}
+              </tr>
+            )
+          })}
         </tbody>
       </table>
+    </div>
+  )
+}
+
+/** Obergrenzen löschen (Nutzer 28.10.): only with Obergrenzen, also with the automation off; the data-service clears
+ * them in its next round. */
+function ClearCaps({ caps, onCommand, busy }) {
+  const [confirm, setConfirm] = useState(false)
+  if (!hasCaps(caps)) return null
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      {confirm ? (
+        <>
+          <span className="basis-full self-center sm:basis-auto">Obergrenzen wirklich löschen?</span>
+          <Button size="sm" variant="destructive" className="h-9 flex-1 sm:h-8 sm:flex-none" disabled={busy}
+            onClick={() => { setConfirm(false); onCommand({ action: 'caps_clear' }) }}>
+            Ja
+          </Button>
+          <Button size="sm" variant="secondary" className="h-9 flex-1 sm:h-8 sm:flex-none"
+            onClick={() => setConfirm(false)}>
+            Nein
+          </Button>
+        </>
+      ) : (
+        <Button size="sm" variant="outline" className="h-9 w-full sm:h-8 sm:w-auto" disabled={busy}
+          onClick={() => setConfirm(true)}>
+          Obergrenzen löschen
+        </Button>
+      )}
     </div>
   )
 }
@@ -179,7 +237,8 @@ function AutomationCards({ auto, st, roomTemp, lo, hi }) {
     (st.fan_read_at && st.fan_set_at && Date.parse(st.fan_read_at) >= Date.parse(st.fan_set_at) + 10000)
   // Wartung, Takt-Messung, Over Hot, miner silent: the data-service leaves these fields as they were
   const regulating = REGULATING.has(st.phase) && !st.offline && !st.over_hot
-  // Lüfterstoß (Nutzer 27.10.): ab hi+1 zuerst zwei Stöße, noch keine Korrekturphase; Status wie beim Heizmodus
+  // Lüfterstoß (Nutzer 27.10.): ab hi+1 zuerst zwei Stöße, noch keine Korrekturphase; Status wie beim Heizmodus;
+  // unten (Nutzer 28.10., dir 'down'): bei lo−1 Basisstufe −1 statt der Takterhöhung, gleiche Anzeige
   const pulse = regulating ? st.stoss : null
   const fanSub = [
     running === base ? '= Basisstufe' : 'Basisstufe ' + base,
@@ -189,7 +248,7 @@ function AutomationCards({ auto, st, roomTemp, lo, hi }) {
     // after the Ausnahme the fan stays on the reduced level (plan, step 5); judged by the target: fan_set lags
     // behind until the controller has taken a new base level
     st.heat ? 'Heizmodus bis ' + lo + ' °C' : null,
-    !st.heat && st.phase === 'normal' && st.fan_target != null && st.fan_target < base
+    !pulse && !st.heat && st.phase === 'normal' && st.fan_target != null && st.fan_target < base
       ? 'reduziert nach Ausnahme −' + (base - st.fan_target) : null,
     st.fan_target != null && st.fan_target !== st.fan_set ? 'wird Stufe ' + st.fan_target : null,
     confirmed ? null : 'Rückmeldung folgt',
@@ -250,13 +309,13 @@ const RECENT_KINDS = ['takt', 'modus', 'luefter', 'hohe_temperatur', 'rueckkehr'
   'test_start', 'test_stufe', 'test_ziel', 'test_schritt', 'test_messung', 'test_ende', 'neustart_nutzer', 'taktsperre',
   'taktsperre_ende', 'startpause', 'startpause_ende', 'neustart_offline', 'neustart_online',
   'einstellungsseite_aus', 'einstellungsseite_an', 'modus_wartet', 'heizmodus', 'heizmodus_ende', 'zielbereich',
-  'luefterstoss', 'luefterstoss_ende']
+  'luefterstoss', 'luefterstoss_ende', 'obergrenze', 'ertrag', 'neustart_auto', 'obergrenzen_loeschen']
 const RECENT_COUNT = 20
 const RECENT_REFRESH_MS = 10000
 const RECENT_LABEL = { takt: 'Takt', modus: 'Modus', luefter: 'Lüfter', start: 'Start' }
 const FAN_KINDS = new Set(['luefter', 'hohe_temperatur', 'rueckkehr', 'ausnahme', 'ausnahme_ende', 'luefterstoss'])
 const USER_KINDS = new Set(['basisstufe', 'automatik_ein', 'automatik_aus', 'wartung_start', 'wartung_ende',
-  'zielbereich'])
+  'zielbereich', 'obergrenzen_loeschen'])
 
 function recentTone(e) {
   if (isError(e)) return 'text-destructive'
@@ -448,6 +507,13 @@ function AutomationPanel({ auto, here, port, level, locked, onCommand, busy, msg
           {busy && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
           Einschalten (Port {port}, Basisstufe {level})
         </Button>
+        {/* Obergrenzen auch bei Automatik aus (Nutzer 28.10.): Tabelle mit der Spalte und der Knopf zum Löschen */}
+        {hasCaps(st.caps) && (
+          <div className="space-y-1.5 text-xs">
+            <LearnedTable learned={auto.learned} caps={st.caps} zb={st.zb} level={auto.level} lo={lo} hi={hi} />
+            <ClearCaps caps={st.caps} onCommand={onCommand} busy={busy} />
+          </div>
+        )}
       </div>
     )
   }
@@ -523,7 +589,8 @@ function AutomationPanel({ auto, here, port, level, locked, onCommand, busy, msg
       )}
       <TempTest auto={auto} st={st} onCommand={onCommand} busy={busy} msg={msg} lo={lo} />
       <AutomationCards auto={auto} st={st} roomTemp={roomTemp} lo={lo} hi={hi} />
-      <LearnedTable learned={auto.learned} level={auto.level} lo={lo} hi={hi} />
+      <LearnedTable learned={auto.learned} caps={st.caps} zb={st.zb} level={auto.level} lo={lo} hi={hi} />
+      <ClearCaps caps={st.caps} onCommand={onCommand} busy={busy} />
       {st.ac_error && <p className="text-amber-600">AC Infinity: {st.ac_error}</p>}
       {st.last_error && <p className="text-destructive">Fehler: {st.last_error}</p>}
       <RecentEvents />

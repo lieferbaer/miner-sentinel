@@ -5,7 +5,9 @@ Regelungslogik nach dem Plan vom 24.10.2026 (docs/claude/Regelungslogik-Luefter-
     (heißester Chip, TMax) im Zielbereich L-U liegt; in diesem Bereich keine Taktänderung (Nutzer 25.10.).
     Zielbereich wählt der Nutzer: L ab 76, U bis 92 °C, 2 bis 4 Grad (Nutzer 27.10.; vorher fest 79-84 °C).
   * Start (Basisstufe gewählt, Automatik ein, Neustart des Miners, nach Wartung, nach Takt-Messung, nach Over Hot):
-    Starttakt = Lernwert der Basisstufe, sonst Initialwert (Stufe 1 = 100 ... Stufe 10 = 190 MHz).
+    Starttakt = Lernwert der Basisstufe, sonst der derselben Stufe aus dem gemerkten Zielbereich mit der nächsten Mitte
+    (gleich weit: der kühlere), sonst Initialwert (Stufe 1 = 170, 2 = 250, 3 = 330, 4 = 380, 5 = 400, 6 = 420, ab 7 = 440
+    MHz); höchstens die Obergrenze der Basisstufe (Nutzer 28.10.).
   * Schritt 1 - hohe Chiptemperatur (ab U+1): Lüfter = Basisstufe + 1/+2 (Korrekturphase), Takt -5 ... -100 MHz;
     bei U+1 bis U+3 nach dem Aufenthalt in L-U davor: unter 5 min -10, sonst -5 (Nutzer 26.10.; vorher 10 min).
     Schwellen der Tabelle höchstens 96 °C: ab 96 °C immer Lüfter +2, Takt -100 (Nutzer 27.10.).
@@ -14,16 +16,25 @@ Regelungslogik nach dem Plan vom 24.10.2026 (docs/claude/Regelungslogik-Luefter-
     kein Takt; danach Schritt 1. Zurück in L-U: Ende ohne Taktänderung; ab U+4: Abbruch, Tabelle.
   * Schritt 2 - Korrekturphase: keine Plus-Schritte; zurück zur Basisstufe nach 1 min stabil in L-U oder unter L
     (Nutzer 27.10.; vorher 80-84 °C bzw. unter 80 °C).
-  * Schritt 3 - Feintuning: unter L ab L-9 +5; ab L-19 +20; darunter +40 (kleinster Schritt 5 MHz, Nutzer 25.10.).
+  * Schritt 3 - Feintuning: unter L ab L-9 +5; ab L-19 +20; darunter +40 (kleinster Schritt 5 MHz, Nutzer 25.10.);
+    Plus-Schritte erst nach 120 s ununterbrochen unter L, höchstens bis zur Obergrenze (Nutzer 28.10.).
     Taktsperre: war die letzte Taktänderung über U und fällt die Chiptemperatur unter L, 5 min keine Taktänderung
     (einmal je Änderung; endet über U).
+  * Lüfterstöße unten (Nutzer 28.10.): wäre bei genau L-1 ein Plus-Schritt fällig, zuerst zwei Stöße mit Basisstufe - 1
+    (wie oben); zurück in L-U: Ende ohne Takterhöhung; ab L-2: Abbruch, Plus-Schritt; danach noch L-1: +5.
+  * Fehlerrate (Nutzer 28.10.): 5 min über 4 % beim selben gesetzten Takt -> Obergrenze der Basisstufe = gesetzter
+    Takt - 5 (Takt bleibt); 5 min ab 10 % -> automatischer Neustart (höchstens einer je 3 h). Obergrenzen löscht nur der
+    Nutzer.
+  * Ertrags-Prüfung (Nutzer 28.10.): nach jedem +5-MHz-Schritt der Regelung (nicht in den ersten 30 min nach einem
+    Start) 10 min kein Plus-Schritt, dann Hashrate der letzten 5 min gegen die 5 min vor dem Schritt: unter +0,5 TH/s
+    -> Obergrenze = Takt davor; Verlust über 0,5 TH/s -> zusätzlich zurück auf den Takt davor.
   * Schritt 4 - Takt 100-440 MHz, Modus folgt dem Takt (Spielraum 20 MHz nach unten).
   * Schritt 5 - Ausnahme: Takt 440 und 3 min stabil unter L-9 -> Lüfter -1 (stufenweise); Ende über L-9.
   * Heizmodus: bei jedem Start Lüfter Stufe 1, bis die Chiptemperatur L erreicht (Nutzer 26./27.10.).
   * Startpause: nach Neustart, Wartung oder Over Hot keine Takterhöhung bis L, höchstens 10 min (kalte Chips,
     Nutzer 25.10.). „Nicht erreichbar“ rund um einen Neustart ist ein Neustart-Eintrag, kein Fehler.
   * Lernen: 15 min in L-U (Nutzer 25.10.) bei unverändertem Lüfter -> Lernwert der aktiven Stufe; Lernwerte je
-    Zielbereich gemerkt (Nutzer 27.10.).
+    Zielbereich gemerkt (Nutzer 27.10.); gespeichert nur bei mittlerer Fehlerrate unter 4 % (Nutzer 28.10.).
   * Neuer Zielbereich: neue Grenzen sofort, kein Start (Nutzer 27.10.).
   * Jeder Zyklus und jede Entscheidung wird protokolliert (automation_journal.py).
 Takt-Messung (Takt-Tabellen): Taktregelung pausiert, der Lüfter reagiert nur nach Schritt 1/2 – fest wie bisher (ab 85 °C,
@@ -61,7 +72,8 @@ PULSE_ON_S = 6                # Lüfterstoß: Basisstufe + 1 für 6 s ab der Bes
 PULSE_CONFIRM_MAX_S = 30      # ... ohne Bestätigung der Lüftersteuerung nach 30 s weiter (Nutzer 27.10.)
 PULSE_GAP_S, PULSE_REARM = 10 * 60, 1   # gegen Pendeln an U: höchstens ein Stoßpaar je 10 min, und neue Stöße erst nach
                                         # einem Wert ≤ U−1; sonst gleich die Korrekturphase (Nutzer 27.10.)
-START_CLOCK = {1: 100, 2: 110, 3: 120, 4: 130, 5: 140, 6: 150, 7: 160, 8: 170, 9: 180, 10: 190}
+                                        # Lüfterstöße unten ebenso, eigene Sperre: neue erst nach einem Wert ≥ L+1 (Nutzer 28.10.)
+START_CLOCK = {1: 170, 2: 250, 3: 330, 4: 380, 5: 400, 6: 420, 7: 440, 8: 440, 9: 440, 10: 440}   # Nutzer 28.10.
 CLOCK_MIN, CLOCK_MAX = 100, 440
 MODE_TOP = {4: 360, 3: 380, 2: 400, 1: 420, 0: 440}   # oberer Takt je Modus (mode 04 ... mode 00)
 MODE_DOWN_MARGIN = 20         # Spielraum nach unten: Wechsel in den tieferen Modus erst 20 MHz unter dessen Obergrenze (Nutzer 26.10.)
@@ -70,6 +82,22 @@ TENDENCY_S = 30               # Tendenz: gegen den Wert von vor höchstens 30 s 
 CALM_AFTER_HOT_S = 5 * 60     # Taktsperre: letzte Taktänderung über U, dann unter L → 5 min keine Taktänderung
 PLUS_5_FROM, PLUS_20_FROM = 9, 19          # unter L: ab L−9 °C +5, ab L−19 °C +20, darunter +40 MHz (Nutzer 25./27.10.)
 PLUS_WAIT_FROM, PLUS_WAIT_S = 4, 3 * 60    # ab L−4 °C: nächste Takterhöhung erst 3 min nach der letzten (Nutzer 26./27.10.)
+PLUS_BELOW_S = 120            # Plus-Schritte erst nach 120 s ununterbrochen unter L; ein Wert ≥ L setzt zurück (Nutzer 28.10.)
+# Fehlerrate DH (Nutzer 28.10.: hängt am Takt, nicht an der Temperatur; ein Neustart setzt sie zurück)
+DH_S = 5 * 60                 # Fehlerrate ununterbrochen 5 min ...
+DH_CAP_PCT, CAP_MINUS = 4, 5  # ... über 4 % → Obergrenze der Basisstufe = gesetzter Takt − 5 MHz (Takt bleibt)
+DH_CAP_AFTER_START_S = 10 * 60   # ... nicht in den ersten 10 min nach einem Start
+DH_RESTART_PCT = 10           # ... ab 10 % → automatischer Neustart (zuerst die Obergrenze)
+RESTART_AFTER_START_S = 30 * 60  # ... frühestens 30 min nach einem Start,
+AUTO_RESTART_GAP_S = 3 * 3600    # ... höchstens einer je 3 h,
+AUTO_RESTART_RETRY_S = 5 * 60    # ... nach einem Fehler erneut frühestens nach 5 min
+DH_LEARN_PCT = 4              # Lernwert nur bei mittlerer Fehlerrate der 15 min unter 4 %
+# Ertrags-Prüfung nach jedem +5-MHz-Schritt der Regelung (Nutzer 28.10.)
+YIELD_WAIT_S = 10 * 60        # 10 min nach der Übernahme prüfen, bis dahin kein Plus-Schritt
+YIELD_MEAN_S = 5 * 60         # Mittel der Hashrate: 5 min vor dem Schritt gegen die letzten 5 min
+YIELD_MIN_THS = 0.5           # Ertrag unter +0,5 TH/s → Obergrenze = Takt davor; unter −0,5 TH/s zusätzlich zurück
+YIELD_AFTER_START_S = 30 * 60   # nicht in den ersten 30 min nach einem Start (die Firmware driftet 20–30 min)
+THS_KEEP_S = 15 * 60          # Hashrate laut Miner (GHSspd) der letzten 15 min im Zustand
 HEAT_FAN = 1                  # Heizmodus beim Start: Lüfter Stufe 1, bis L (Nutzer 27.10.; vorher 74 °C)
 START_HOLD_S = 10 * 60        # Startpause: nach einem Start mit kalten Chips keine Takterhöhung bis L, höchstens 10 min
 RESTART_EXPECT_S = 5 * 60     # Neustart über den Knopf: so lange gilt „nicht erreichbar“ als erwartet (Nutzer 25.10.)
@@ -117,6 +145,14 @@ def _age(value, now):
         return (now - datetime.fromisoformat(value)).total_seconds()
     except (TypeError, ValueError):
         return float('inf')
+
+
+def _de(value, sign=False):
+    """Zahl mit einer Nachkommastelle und Dezimalkomma, auf Wunsch mit Vorzeichen (+/−) – Texte der Ertrags-Prüfung."""
+    text = '%.1f' % (abs(value) if sign else value)
+    if sign:
+        text = ('−' if round(value, 1) < 0 else '+') + text
+    return text.replace('.', ',')
 
 
 def load_ac():
@@ -263,8 +299,9 @@ class Round:
     """One regulation round for one automation row.
 
     Flags in the state: corr (Korrekturphase), exc_active (Ausnahme läuft), cal (Takt-Messung), start_reason (Start
-    nach Kapitel 4 steht aus), stoss (Lüfterstöße laufen). The shown phase is derived from them at the end of the
-    round."""
+    nach Kapitel 4 steht aus), stoss (Lüfterstöße laufen; 'dir': 'down' = Lüfterstöße unten). The shown phase is
+    derived from them at the end of the round. caps = Obergrenzen je Lüfterstufe, ertrag = laufende Ertrags-Prüfung,
+    ths = Hashrate der letzten 15 min (Nutzer 28.10.)."""
 
     def __init__(self, row, now, ac, journal):
         self.row, self.now, self.ac, self.j = row, now, ac, journal
@@ -374,18 +411,88 @@ class Round:
             ref = self.t
         return int(round(self.t - ref)), ref
 
+    # --- Obergrenze je Lüfterstufe (Nutzer 28.10.)
+    def cap(self):
+        """Obergrenze der Basisstufe in MHz oder None."""
+        value = (self.st.get('caps') or {}).get(str(self.base))
+        return int(value) if value is not None else None
+
+    def lower_cap(self, value):
+        """Obergrenze der Basisstufe auf value senken – nur wenn niedriger als die bisherige (oder keine da).
+        Ergebnis (bisherige, jetzige Obergrenze)."""
+        st, key = self.st, str(self.base)
+        prev = (st.get('caps') or {}).get(key)
+        if prev is not None and value >= prev:
+            return prev, prev
+        st['caps'] = dict(st.get('caps') or {}, **{key: value})    # neues dict: row['state'] bleibt unverändert
+        return prev, value
+
+    def set_cap(self, dh):
+        """Obergrenze der Basisstufe = gesetzter Takt − 5 MHz, nur wenn niedriger als die bisherige (oder keine da);
+        der Takt bleibt."""
+        st = self.st
+        clock = st.get('clock_set')
+        if clock is None:
+            return
+        prev, value = self.lower_cap(int(round(clock)) - CAP_MINUS)
+        if value == prev:
+            return
+        text = 'Fehlerrate %.1f %% seit 5 min über %d %%: Obergrenze Stufe %d = %d MHz' % (dh, DH_CAP_PCT, self.base, value)
+        log_id = self.base_event(kind='obergrenze', trigger=text,
+                                 details={'luefterstufe': self.base, 'obergrenze': value, 'vorher': prev,
+                                          'fehlerrate': dh, 'takt': clock})
+        self.note(text + '.')
+        self.decide('Obergrenze Stufe %d = %d MHz' % (self.base, value), log_id)
+
+    def caps_cleared(self):
+        """Knopf „Obergrenzen löschen“ (Nutzer 28.10.): ein neuerer Eintrag obergrenzen_loeschen löscht alle Obergrenzen –
+        auch wenn die Automatik dabei aus war (dann in der nächsten Runde, die läuft)."""
+        st, at = self.st, self.row.get('caps_cleared_at')
+        if at is None:
+            return
+        at = at if isinstance(at, datetime) else datetime.fromisoformat(str(at))
+        seen = st.get('caps_cleared_seen')
+        if seen and at <= datetime.fromisoformat(seen):
+            return
+        st['caps_cleared_seen'] = _iso(at)
+        st['caps'] = {}
+        st['dh_cap_since'] = None                        # die 5 min über 4 % beginnen neu (nicht in derselben Runde)
+        self.note('Obergrenzen gelöscht (Nutzer).')
+
     # --- start (Kapitel 4)
+    def start_clock(self):
+        """Starttakt für Start und Beginn des Temperatur-Tests als (MHz, Quelle): Lernwert der Basisstufe im Zielbereich;
+        fehlt er, der derselben Stufe aus dem gemerkten Bereich mit der nächsten Mitte (gleich weit: der kühlere); sonst
+        der Initialwert – immer höchstens die Obergrenze der Basisstufe (Nutzer 28.10.)."""
+        st, key = self.st, str(self.base)
+        learned, source = (st.get('learned') or {}).get(key), 'Lernwert'
+        if not learned:
+            mid, near = (self.lo + self.hi) / 2.0, []
+            for zb, values in (st.get('learned_zb') or {}).items():
+                try:
+                    lo, hi = (int(x) for x in zb.split('-'))
+                except ValueError:
+                    continue
+                if (values or {}).get(key):
+                    near.append((abs((lo + hi) / 2.0 - mid), lo + hi, lo, hi, values[key]))
+            if near:
+                _, _, lo, hi, learned = min(near, key=lambda x: x[:3])
+                source = 'Lernwert %d–%d' % (lo, hi)
+        target = int(round(learned['mhz'])) if learned else START_CLOCK.get(self.base, START_CLOCK[1])
+        cap = self.cap()
+        return (target if cap is None else min(target, cap)), (source if learned else 'Initialwert')
+
     def start(self, reason):
         st = self.st
-        learned = (st.get('learned') or {}).get(str(self.base))
-        target = int(round(learned['mhz'])) if learned else START_CLOCK.get(self.base, START_CLOCK[1])
-        source = 'Lernwert' if learned else 'Initialwert'
+        target, source = self.start_clock()
         target = min(max(target, CLOCK_MIN), CLOCK_MAX)
         old_fan, old_clock = st.get('fan_target'), st.get('clock_set')
         self.drop_pending('Start (%s)' % reason)
         st.update({'corr': False, 'corr_dwell_s': None, 'exc_active': False, 'clock_set': target, 'queue': [], 'window_until': None,
                    'band_since': None, 'cold_since': None, 'down_since': None, 'stoss': None,
-                   'clock_changed_at': _iso(self.now), 'clock_changed_t': self.t, 'start_reason': None})
+                   'clock_changed_at': _iso(self.now), 'clock_changed_t': self.t, 'start_reason': None,
+                   'start_at': _iso(self.now),        # Fehlerrate: Obergrenze erst 10 min, Neustart 30 min danach
+                   'ertrag': None})                   # eine laufende Ertrags-Prüfung endet ohne Ergebnis
         # Heizmodus (Nutzer 26./27.10.): Lüfter Stufe 1, bis die Chiptemperatur L erreicht; schon so warm: Basisstufe
         # (nicht während eines Temperatur-Tests: dort Lüfter auf der Basisstufe)
         st['heat'] = not st.get('test') and (self.t is None or self.t < self.lo)
@@ -581,11 +688,14 @@ class Round:
 
     def clock_done(self, cmd):
         """Takt übernommen: Beobachtungsfenster beginnt. Eine übernommene Takterhöhung der Regelung startet die 3 min für
-        L−4 bis L−1 – ab der Übernahme, und nur wenn der Takt wirklich stieg (Review 26.10.)."""
+        L−4 bis L−1 – ab der Übernahme, und nur wenn der Takt wirklich stieg (Review 26.10.). Ein +5-MHz-Schritt startet
+        die Ertrags-Prüfung (Nutzer 28.10.)."""
         st = self.st
         st['window_until'] = _iso(self.now + timedelta(seconds=WINDOW_S))
         if (cmd.get('step') or 0) > 0 and cmd.get('from') is not None and cmd['value'] > cmd['from']:
             st['last_plus_at'] = _iso(self.now)
+            if cmd.get('ertrag'):
+                self.yield_arm(cmd)
 
     def follow(self, log_id):
         """Thermischen Verlauf nachtragen (alle 30 s, 10 Werte)."""
@@ -604,8 +714,9 @@ class Round:
                 keep.append(f)
         self.st['thermal'] = keep
 
-    def queue_clock(self, value, why, hot=False, step=None):
-        """Takt setzen (Schritt 4): Grenzen, Modus nach Regel; bei hoher Chiptemperatur erst Takt, dann Modus, dann Takt."""
+    def queue_clock(self, value, why, hot=False, step=None, check=False):
+        """Takt setzen (Schritt 4): Grenzen, Modus nach Regel; bei hoher Chiptemperatur erst Takt, dann Modus, dann Takt.
+        check: +5-MHz-Schritt mit Ertrags-Prüfung (der Taktbefehl merkt sich die Zeit des Schritts, Nutzer 28.10.)."""
         st, m = self.st, self.m
         old = st.get('clock_set')
         if value < CLOCK_MIN:
@@ -620,6 +731,8 @@ class Round:
         level = required_level(value, current)
         common = {'from': old, 'why': why, 'step': step, 't0': self.t,
                   'details': {'schritt': step} if step is not None else {}}
+        if check:
+            common['ertrag'] = _iso(self.now)
         queue = []
         if hot:
             queue.append(dict(common, kind='takt', value=value))
@@ -735,13 +848,16 @@ class Round:
                                                                          'seit': st['learn_since']})
         st['learn_since'] = None
         st['learn_sum'], st['learn_n'], st['learn_clock_sum'] = 0, 0, 0.0
+        st['learn_dh_sum'], st['learn_dh_n'] = 0.0, 0
+        st['learn_ths_sum'], st['learn_ths_n'] = 0.0, 0
 
     def learn(self):
         """Lernperiode 15 min auf derselben Lüfterstufe. Taktschritte setzen sie nicht zurück, kurze Ausflüge
         aus L-U bis 60 s auch nicht (Nutzer 25.10.: sonst entstand nie ein Lernwert). Neu beginnt sie bei Wechsel der
         Lüfterstufe, Moduswechsel, hoher Chiptemperatur (ab U+1) oder länger als 60 s außerhalb L-U (Lernbereich
         = Bereich ohne Taktänderung, Nutzer 25.10.).
-        Gespeichert: Mittelwert des gesetzten Takts und der Chiptemperatur der 15 min."""
+        Gespeichert: Mittelwert des gesetzten Takts, der Chiptemperatur und der Hashrate der 15 min – nur bei mittlerer
+        Fehlerrate unter 4 %, sonst verworfen und neu begonnen (Nutzer 28.10.)."""
         st, t, now = self.st, self.t, self.now
         lo, hi = self.lo, self.hi
         level = st.get('fan_target')
@@ -772,33 +888,55 @@ class Round:
             if not (lo <= t <= hi):
                 return                                   # eine Lernperiode beginnt nur im Zielbereich
             st.update({'learn_since': _iso(now), 'learn_level': level, 'learn_sum': 0, 'learn_n': 0,
-                       'learn_clock_sum': 0.0, 'learn_out_since': None})
+                       'learn_clock_sum': 0.0, 'learn_dh_sum': 0.0, 'learn_dh_n': 0, 'learn_ths_sum': 0.0,
+                       'learn_ths_n': 0, 'learn_out_since': None})
             self.base_event(kind='lernen_start', trigger='Chiptemperatur %d °C in %d–%d °C' % (t, lo, hi),
                             details={'takt': st.get('clock_set'), 'luefterstufe': level})
         st['learn_sum'] += t
         st['learn_clock_sum'] = (st.get('learn_clock_sum') or 0.0) + float(st.get('clock_set') or 0)
         st['learn_n'] += 1
+        if self.m.get('dh') is not None:
+            st['learn_dh_sum'] = (st.get('learn_dh_sum') or 0.0) + float(self.m['dh'])
+            st['learn_dh_n'] = (st.get('learn_dh_n') or 0) + 1
+        if self.m.get('ghsspd'):
+            st['learn_ths_sum'] = (st.get('learn_ths_sum') or 0.0) + float(self.m['ghsspd']) / 1000.0
+            st['learn_ths_n'] = (st.get('learn_ths_n') or 0) + 1
         if _age(st['learn_since'], now) >= LEARN_S:
             n = max(st['learn_n'], 1)
             avg_t = round(st['learn_sum'] / n, 1)
             mhz = round(st['learn_clock_sum'] / n, 1)
             key = str(level)
-            prev = (st.get('learned') or {}).get(key)
-            entry = {'mhz': mhz, 'temp_avg': avg_t, 'at': _iso(now), 'count': (prev or {}).get('count', 0) + 1}
-            st.setdefault('learned', {})[key] = entry
-            log_id = self.base_event(kind='lernwert', trigger='15 min auf Stufe %s, Ø %.1f °C' % (key, avg_t),
-                                     details={'luefterstufe': level, 'takt': mhz, 'temp_mittel': avg_t,
-                                              'anzahl': entry['count'], 'vorher': prev})
-            self.base_event(kind='lernen_ende', trigger='15 min erreicht', details={'ergebnis': 'gespeichert'})
-            self.note('Lernwert Stufe %s: %.1f MHz (Mittel), Ø %.1f °C (%d. Mal).' % (key, mhz, avg_t, entry['count']))
-            self.decide('Lernwert gespeichert', log_id)
-            st.update({'learn_since': _iso(now), 'learn_sum': 0, 'learn_n': 0, 'learn_clock_sum': 0.0})
+            dh_n = st.get('learn_dh_n') or 0
+            dh = st['learn_dh_sum'] / dh_n if dh_n else None
+            if dh is None or dh >= DH_LEARN_PCT:
+                # Fehlerrate zu hoch (oder ohne Wert): kein Lernwert, die Periode beginnt neu (Nutzer 28.10.)
+                why = ('Fehlerrate %.1f %% (Grenze %d %%)' % (dh, DH_LEARN_PCT) if dh is not None
+                       else 'Fehlerrate unbekannt (Grenze %d %%)' % DH_LEARN_PCT)
+                log_id = self.base_event(kind='lernen_ende', trigger='15 min erreicht, Lernwert verworfen: ' + why,
+                                         details={'ergebnis': 'verworfen', 'grund': why, 'seit': st['learn_since']})
+                self.note('Lernwert Stufe %s verworfen: %s.' % (key, why))
+                self.decide('Lernwert verworfen', log_id)
+            else:
+                prev = (st.get('learned') or {}).get(key)
+                entry = {'mhz': mhz, 'temp_avg': avg_t, 'at': _iso(now), 'count': (prev or {}).get('count', 0) + 1}
+                if st.get('learn_ths_n'):
+                    entry['ths_avg'] = round(st['learn_ths_sum'] / st['learn_ths_n'], 1)   # Ø Hashrate (Nutzer 28.10.)
+                st.setdefault('learned', {})[key] = entry
+                log_id = self.base_event(kind='lernwert', trigger='15 min auf Stufe %s, Ø %.1f °C' % (key, avg_t),
+                                         details={'luefterstufe': level, 'takt': mhz, 'temp_mittel': avg_t,
+                                                  'anzahl': entry['count'], 'vorher': prev})
+                self.base_event(kind='lernen_ende', trigger='15 min erreicht', details={'ergebnis': 'gespeichert'})
+                self.note('Lernwert Stufe %s: %.1f MHz (Mittel), Ø %.1f °C (%d. Mal).' % (key, mhz, avg_t, entry['count']))
+                self.decide('Lernwert gespeichert', log_id)
+            st.update({'learn_since': _iso(now), 'learn_sum': 0, 'learn_n': 0, 'learn_clock_sum': 0.0,
+                       'learn_dh_sum': 0.0, 'learn_dh_n': 0, 'learn_ths_sum': 0.0, 'learn_ths_n': 0})
 
     # --- Zielbereich (Nutzer 27.10.)
     def target_range(self):
         """Neuer Zielbereich: neue Grenzen sofort – kein Start, kein Taktsprung, kein Heizmodus; Korrekturphase,
         Taktsperre, Heizmodus und Startpause laufen mit den neuen Grenzen weiter. Lernwerte je Bereich gemerkt: zurück
-        im alten Bereich gelten wieder seine Lernwerte, ein neuer beginnt mit dem Initialwert. Lernperiode endet,
+        im alten Bereich gelten wieder seine Lernwerte, ein neuer startet mit dem Lernwert des nächsten Bereichs, sonst
+        dem Initialwert (Nutzer 28.10.; vorher immer Initialwert). Lernperiode endet,
         Aufenthalt in L-U wird neu gemessen. Ohne gemerkten Bereich (Stand vor dem 27.10.): die Lernwerte gehören zum
         Startwert 82–85 – auch wenn bis zur ersten Runde schon ein anderer Bereich gewählt wurde."""
         st = self.st
@@ -815,6 +953,8 @@ class Round:
         self.end_learning('Zielbereich geändert')
         st['learn_out_since'] = None
         st['band_in'] = st['band_dwell_s'] = None
+        if new[0] < old[0]:
+            st['below_since'] = None                     # 120 s unter L: unter dem neuen, tieferen L neu gezählt
         st['zb'] = new
         self.note('Zielbereich %d–%d °C übernommen.' % tuple(new))
 
@@ -969,28 +1109,49 @@ class Round:
         self.decide('Rückkehr zur Basisstufe', log_id)
 
     # --- Lüfterstöße (Nutzer 27.10.)
-    def pulse_start(self, n):
-        """Lüfterstoß n/2: Lüfter Basisstufe + 1, kein Takt."""
+    def pulse_start(self, n, down=False):
+        """Lüfterstoß n/2: Lüfter Basisstufe + 1, kein Takt; Lüfterstoß unten (Nutzer 28.10.): Basisstufe − 1."""
         st = self.st
-        level = min(self.base + 1, FAN_MAX)
+        level = max(self.base - 1, FAN_MIN) if down else min(self.base + 1, FAN_MAX)
         old = st.get('fan_target')
-        text = 'Lüfterstoß %d/2: Stufe %d für %d s (Chiptemperatur %d °C)' % (n, level, PULSE_ON_S, self.t)
+        name = 'Lüfterstoß unten' if down else 'Lüfterstoß'
+        text = '%s %d/2: Stufe %d für %d s (Chiptemperatur %d °C)' % (name, n, level, PULSE_ON_S, self.t)
         self.set_fan_target(level, text)
         st['stoss'] = {'n': n, 'step': 'an', 'at': _iso(self.now), 'level': level}
+        if down:
+            st['stoss']['dir'] = 'down'
         if n == 1:
-            st['stoss_at'], st['stoss_frei'] = _iso(self.now), False
+            if down:
+                st['stoss_unten_at'], st['stoss_unten_frei'] = _iso(self.now), False
+            else:
+                st['stoss_at'], st['stoss_frei'] = _iso(self.now), False
         log_id = self.base_event(kind='luefterstoss', trigger=text, fan_old=old, fan_new=level)
         self.note(text + '.')
-        self.decide('Lüfterstoß %d/2' % n, log_id)
+        self.decide('%s %d/2' % (name, n), log_id)
 
     def pulses(self):
         """Laufende Lüfterstöße: ein Schritt gilt als bestätigt, wenn die Lüftersteuerung nach dem Befehl seine Stufe
         meldet (Zeit des Lesens); „an“ 6 s ab der Bestätigung, dann „aus“ (Basisstufe); nach „aus“ von Stoß 1 Stoß 2,
         nach Stoß 2 fertig. Ohne Bestätigung nach 30 s weiter. Zurück in L-U: Ende ohne Taktänderung; ab U+4: Abbruch.
-        True, solange sie laufen (keine andere Regel in dieser Runde)."""
+        Lüfterstöße unten (Nutzer 28.10.): ab L Ende ohne Takterhöhung; ab L−2 Abbruch – danach in derselben Runde die
+        Plus-Schritt-Regel, wie nach dem Ende bei L−1 (+5). True, solange sie laufen (keine andere Regel in dieser Runde)."""
         st, t, now = self.st, self.t, self.now
         ps = st['stoss']
-        if t <= self.hi or high_rule(t, self.hi)[2] is not None:
+        down = ps.get('dir') == 'down'
+        name = 'Lüfterstoß unten' if down else 'Lüfterstoß'
+        if down and (t >= self.lo or t <= self.lo - 2):
+            st['stoss'] = None
+            old = st.get('fan_target')
+            if t >= self.lo:
+                self.set_fan_target(self.base, 'Lüfterstöße unten beendet: Basisstufe %d' % self.base)
+                text = 'Lüfterstöße unten beendet: wieder im Zielbereich (%d °C)' % t
+            else:
+                self.set_fan_target(self.base, 'Lüfterstöße unten abgebrochen: Basisstufe %d' % self.base)
+                text = 'Lüfterstöße unten abgebrochen: %d °C – Takterhöhung' % t
+            self.base_event(kind='luefterstoss_ende', trigger=text, fan_old=old)
+            self.note(text + '.')
+            return False
+        if not down and (t <= self.hi or high_rule(t, self.hi)[2] is not None):
             st['stoss'] = None
             old = st.get('fan_target')
             if t <= self.hi:
@@ -1008,41 +1169,67 @@ class Round:
         if not ps.get('ok'):
             if _age(ps['at'], now) < PULSE_CONFIRM_MAX_S:
                 return True
-            self.note('Lüfterstoß: keine Bestätigung nach 30 s – weiter.')
+            self.note('%s: keine Bestätigung nach 30 s – weiter.' % name)
         elif ps['step'] == 'an' and _age(ps['ok'], now) < PULSE_ON_S:
             return True
         if ps['step'] == 'an':
-            self.set_fan_target(self.base, 'Lüfterstoß %d/2: zurück auf Basisstufe %d' % (ps['n'], self.base))
+            self.set_fan_target(self.base, '%s %d/2: zurück auf Basisstufe %d' % (name, ps['n'], self.base))
             st['stoss'] = {'n': ps['n'], 'step': 'aus', 'at': _iso(now), 'level': self.base}
+            if down:
+                st['stoss']['dir'] = 'down'
             return True
         if ps['n'] == 1:
-            self.pulse_start(2)
+            self.pulse_start(2, down)
             return True
         st['stoss'] = None
-        text = 'Lüfterstöße fertig: %d °C, Takt wird gesenkt' % t
+        text = ('Lüfterstöße unten fertig: %d °C, Takt wird erhöht' if down
+                else 'Lüfterstöße fertig: %d °C, Takt wird gesenkt') % t
         self.base_event(kind='luefterstoss_ende', trigger=text)
         self.note(text + '.')
         return False
 
+    def cold_pulses_allowed(self):
+        """Lüfterstöße unten (Nutzer 28.10.): nicht bei Basisstufe 1, im Heizmodus, in der Ausnahme oder während
+        Lüfterstöße laufen; höchstens ein Stoßpaar je 10 min und neue erst nach einem Wert ≥ L+1 (eigene Sperre).
+        Startpause, Korrekturphase, Takt-Messung und Temperatur-Test schließen schon die Plus-Schritte aus."""
+        st = self.st
+        return (self.base > FAN_MIN and not st.get('heat') and not st.get('exc_active') and not st.get('stoss')
+                and st.get('stoss_unten_frei', True) and _age(st.get('stoss_unten_at'), self.now) >= PULSE_GAP_S)
+
     def fine_tuning(self):
         """Schritt 3: L-U keine Taktänderung; darunter +5/+20/+40 MHz (nicht in der Korrekturphase, nicht bei
         steigender Tendenz, nicht während der Taktsperre oder der Startpause; bei L−4 bis L−1 erst 3 min nach der
-        letzten Takterhöhung)."""
+        letzten Takterhöhung). Nutzer 28.10.: erst nach 120 s ununterbrochen unter L, höchstens bis zur Obergrenze der
+        Basisstufe; bei genau L−1 statt des Plus-Schritts zuerst die Lüfterstöße unten."""
         st, t, d = self.st, self.t, self.st['tendency']
         old = st.get('clock_set')
         if old is None or t >= self.lo or st.get('corr') or st.get('calm') or d > 0:
             return
         if st.get('start_hold'):
             return                                       # Startpause nach einem Start mit kalten Chips
+        if st.get('ertrag'):
+            return                                       # Ertrags-Prüfung läuft: 10 min kein Plus-Schritt, keine Stöße
+        if not st.get('below_since') or _age(st['below_since'], self.now) < PLUS_BELOW_S:
+            return                                       # noch keine 120 s ununterbrochen unter L
         current = level_of(self.m['mode_key'])
         if st.get('mode_wait') is not None and current is not None and old >= MODE_TOP[current]:
             return                                       # mehr geht erst mit dem wartenden Moduswechsel
         if t >= self.lo - PLUS_WAIT_FROM and _age(st.get('last_plus_at'), self.now) < PLUS_WAIT_S:
             return                                       # L−4 bis L−1: 3 min nach der letzten Takterhöhung warten
         old = int(round(old))
-        if old < CLOCK_MAX:
-            size = plus_size(t, self.lo)
-            self.queue_clock(old + size, 'Chiptemperatur %d °C: +%d MHz' % (t, size), step=size)
+        cap = self.cap()
+        top = CLOCK_MAX if cap is None else min(cap, CLOCK_MAX)
+        if old >= top:
+            return                                       # 440 MHz bzw. Obergrenze erreicht: kein Plus-Schritt
+        if t == self.lo - 1 and self.cold_pulses_allowed():
+            self.pulse_start(1, down=True)
+            return
+        size = full = plus_size(t, self.lo)
+        if cap is not None and old + size > cap:
+            size = cap - old                             # höchstens bis zur Obergrenze
+        # Ertrags-Prüfung nur nach dem vollen +5-Schritt (nicht +20/+40, nicht an der Obergrenze gekürzt, Nutzer 28.10.)
+        self.queue_clock(old + size, 'Chiptemperatur %d °C: +%d MHz' % (t, size), step=size,
+                         check=full == 5 and size == 5)
 
     def calm_after_hot(self):
         """Taktsperre (Nutzer 25.10.): war die letzte Taktänderung über U und fällt die Chiptemperatur unter L,
@@ -1113,12 +1300,28 @@ class Round:
         self.base_event(kind='heizmodus_ende', trigger=text, fan_old=old, fan_new=self.base)
         self.note(text + '.')
 
+    def end_cold_pulses(self, why):
+        """Laufende Lüfterstöße unten enden, wenn die Regelung aufhört (wie der Heizmodus): Lüfter auf Basisstufe."""
+        st = self.st
+        if (st.get('stoss') or {}).get('dir') != 'down':
+            return False
+        st['stoss'] = None
+        old = st.get('fan_target')
+        self.set_fan_target(self.base, 'Lüfterstöße unten beendet: Basisstufe %d' % self.base)
+        text = 'Lüfterstöße unten beendet: %s' % why
+        self.base_event(kind='luefterstoss_ende', trigger=text, fan_old=old)
+        self.note(text + '.')
+        return True
+
     def heat_off(self, why):
-        """Ohne Regelung (Automatik aus, Miner antwortet nicht): ein laufender Heizmodus endet sofort, Lüfter auf die
-        Basisstufe; ein fehlgeschlagener Lüfterbefehl wird wiederholt (Nutzer 26.10.)."""
+        """Ohne Regelung (Automatik aus, Miner antwortet nicht): ein laufender Heizmodus oder laufende Lüfterstöße
+        unten enden sofort, Lüfter auf die Basisstufe; ein fehlgeschlagener Lüfterbefehl wird wiederholt (Nutzer
+        26./28.10.)."""
         st = self.st
         if st.get('heat'):
             self.end_heat(why)
+            st['heat_fan_due'] = True
+        if self.end_cold_pulses(why):
             st['heat_fan_due'] = True
         if not st.get('heat_fan_due'):
             return
@@ -1152,8 +1355,9 @@ class Round:
             return
         if not st.get('cal'):
             self.calm_after_hot()                        # Takt-Messung: Taktregelung pausiert
-        running = bool(st.get('stoss'))
-        if running and self.pulses():
+        ps = st.get('stoss')
+        running = bool(ps) and ps.get('dir') != 'down'   # Lüfterstöße oben liefen bis zu dieser Runde
+        if ps and self.pulses():
             return                                       # Lüfterstöße laufen: keine Taktänderung
         if self.t >= self.protection()[2]:               # ab U+1 (Takt-Messung: ab 85 °C)
             # Lüfterstöße (Nutzer 27.10.): U+1 bis U+3 (Tabelle ohne Taktwert), auch direkt nach einem Start; höchstens
@@ -1178,6 +1382,141 @@ class Round:
             self.fine_tuning()
         if not st.get('corr'):
             self.exception()
+
+    # --- Fehlerrate (Nutzer 28.10.)
+    def dh_reset(self):
+        """Die 5 min der Fehlerrate beginnen neu (fehlender Wert, Miner antwortet nicht, Wartung …)."""
+        self.st['dh_cap_since'] = self.st['dh_restart_since'] = None
+
+    def error_rate(self, over_hot, cal):
+        """Fehlerrate DH (jede Runde gelesen, die Firmware erneuert sie etwa alle 130 s): ununterbrochen 5 min über 4 %
+        beim selben gesetzten Takt → Obergrenze der Basisstufe = gesetzter Takt − 5 MHz, der Takt bleibt (nicht in den
+        ersten 10 min nach einem Start); ununterbrochen 5 min ab 10 % → automatischer Neustart (frühestens 30 min nach
+        einem Start, höchstens einer je 3 h; unabhängig vom Takt). Nicht während Takt-Messung, Temperatur-Test, Wartung
+        und Over Hot; ein Wert ≤ 4 % (bzw. unter 10 %) oder ohne Wert setzt die 5 min zurück – die 5 min über 4 % auch
+        ein anderer gesetzter Takt, eine neue Obergrenze und „Obergrenzen löschen“ (Nutzer 28.10.)."""
+        st, now = self.st, self.now
+        dh = self.m.get('dh')
+        if cal or over_hot or st.get('test') or self.row.get('maintenance_at') or dh is None:
+            self.dh_reset()
+            return
+        high = dh > DH_CAP_PCT and _age(st.get('start_at'), now) >= DH_CAP_AFTER_START_S
+        clock = st.get('clock_set')
+        if not high:
+            st['dh_cap_since'] = None
+        elif not st.get('dh_cap_since') or st.get('dh_cap_clock') != clock:
+            st['dh_cap_since'], st['dh_cap_clock'] = _iso(now), clock   # die 5 min gehören zum gesetzten Takt
+        elif _age(st['dh_cap_since'], now) >= DH_S:
+            self.set_cap(dh)
+            st['dh_cap_since'] = _iso(now)               # eine weitere Obergrenze erst nach weiteren 5 min
+        st['dh_restart_since'] = (st.get('dh_restart_since') or _iso(now)) if dh >= DH_RESTART_PCT else None
+        if (st['dh_restart_since'] and _age(st['dh_restart_since'], now) >= DH_S
+                and _age(st.get('start_at'), now) >= RESTART_AFTER_START_S
+                and _age(st.get('auto_restart_at'), now) >= AUTO_RESTART_GAP_S
+                and _age(st.get('auto_restart_fail_at'), now) >= AUTO_RESTART_RETRY_S):
+            self.auto_restart(dh)
+
+    def auto_restart(self, dh):
+        """Automatischer Neustart: zuerst die Obergrenze, dann der Neustart-Befehl über die Mining-Schnittstelle (wie der
+        Knopf „A15 neu starten“). Gesendet: „nicht erreichbar“ gilt als erwarteter Neustart; Fehler: nächster Versuch
+        frühestens nach 5 min (zählt nicht als Neustart der 3 h)."""
+        st, row = self.st, self.row
+        self.set_cap(dh)
+        clock = int(round(st.get('clock_set') or 0))
+        endpoint = 'cgminer %s:%s' % (row['ip_address'], row['port'] or 4028)
+        sent, t0 = _now(), time.monotonic()
+        try:
+            reply = calibration.reboot(row['ip_address'], row['port'])
+        except (OSError, RuntimeError) as exc:
+            err = str(exc)[:500]
+            st['auto_restart_fail_at'] = _iso(self.now)
+            log_id = self.base_event(kind='fehler', trigger='Automatischer Neustart: Befehl nicht gesendet', target='miner',
+                                     endpoint=endpoint, request='ascset|0,reboot,0', status='Fehler', ok=False,
+                                     error=err, api_sent_at=sent, api_reply_at=_now(),
+                                     api_ms=int((time.monotonic() - t0) * 1000),
+                                     details={'grund': 'neustart_auto', 'fehlerrate': dh, 'takt': clock})
+            self.note('Automatischer Neustart fehlgeschlagen: %s – nächster Versuch frühestens in 5 min.' % err)
+            self.decide('Fehler: automatischer Neustart', log_id)
+            return
+        text = 'Automatischer Neustart: Fehlerrate %.1f %% seit 5 min (Takt %d MHz)' % (dh, clock)
+        st['auto_restart_at'] = st['restart_req'] = _iso(self.now)   # „nicht erreichbar“ gehört zum Neustart
+        st['auto_restart_fail_at'] = st['dh_restart_since'] = None
+        log_id = self.base_event(kind='neustart_auto', trigger=text, target='miner', endpoint=endpoint,
+                                 request='ascset|0,reboot,0', response=reply[:300], ok=True, api_sent_at=sent,
+                                 api_reply_at=_now(), api_ms=int((time.monotonic() - t0) * 1000),
+                                 details={'fehlerrate': dh, 'takt': clock})
+        self.note(text + '.')
+        self.decide('Automatischer Neustart', log_id)
+
+    # --- Ertrags-Prüfung (Nutzer 28.10.)
+    def record_hashrate(self):
+        """Hashrate laut Miner (GHSspd in GH/s, gemerkt in TH/s) der letzten 15 min."""
+        st, now = self.st, self.now
+        hist = [x for x in st.get('ths') or [] if _age(x[0], now) <= THS_KEEP_S]
+        if self.m.get('ghsspd'):
+            hist.append([_iso(now), round(self.m['ghsspd'] / 1000.0, 2)])
+        st['ths'] = hist
+
+    def mean_ths(self, since, until):
+        """Mittel der gemerkten Hashrate von since bis until in TH/s, None ohne Wert."""
+        vals = [v for at, v in self.st.get('ths') or [] if since <= datetime.fromisoformat(at) <= until]
+        return sum(vals) / len(vals) if vals else None
+
+    def yield_arm(self, cmd):
+        """+5-MHz-Schritt übernommen: Ertrags-Prüfung beginnt – nicht in den ersten 30 min nach einem Start (die
+        Firmware driftet nach einem Neustart 20–30 min) und nicht ohne Hashrate in den 5 min vor dem Schritt."""
+        st, now = self.st, self.now
+        if _age(st.get('start_at'), now) < YIELD_AFTER_START_S:
+            return
+        at = datetime.fromisoformat(cmd['ertrag'])      # Zeit des Schritts (Befehl in die Folge)
+        before = self.mean_ths(at - timedelta(seconds=YIELD_MEAN_S), at)
+        if before is None:
+            return
+        st['ertrag'] = {'at': _iso(now), 'from': int(round(cmd['from'])), 'to': int(cmd['value']),
+                        'before': round(before, 2)}
+
+    def yield_check(self, over_hot, cal):
+        """Ertrags-Prüfung 10 min nach der Übernahme: Hashrate der letzten 5 min gegen die 5 min vor dem Schritt (auf
+        0,1 TH/s gerundet). Unter +0,5 TH/s → Obergrenze der Basisstufe = Takt davor (nur niedriger, wie bei der
+        Fehlerrate); unter −0,5 TH/s zusätzlich zurück auf den Takt davor (Modus nach der Regel); sonst nur ein Hinweis.
+        Abgebrochen (keine Obergrenze, kein Eintrag), wenn sich der Takt anders ändert (neuer Befehl, anderer gesetzter
+        Takt, Start), die Regelung pausiert (Takt-Messung, Temperatur-Test, Wartung, Over Hot; Miner antwortet nicht und
+        Automatik aus in run) oder nach dem Schritt keine Hashrate da ist."""
+        st, now = self.st, self.now
+        ck = st.get('ertrag')
+        if not ck:
+            return
+        if (cal or over_hot or st.get('test') or self.row.get('maintenance_at') or self.busy()
+                or int(round(st.get('clock_set') or 0)) != ck['to']):
+            st['ertrag'] = None
+            return
+        if _age(ck['at'], now) < YIELD_WAIT_S:
+            return
+        st['ertrag'] = None
+        after = self.mean_ths(now - timedelta(seconds=YIELD_MEAN_S), now)
+        if after is None:
+            return
+        gain = after - ck['before']                       # Schwellen ungerundet, im Text auf 0,1 TH/s
+        head = 'Ertrags-Prüfung: +%d MHz (%d → %d MHz) brachte %s TH/s' % (ck['to'] - ck['from'], ck['from'], ck['to'],
+                                                                           _de(round(gain, 1), sign=True))
+        if gain >= YIELD_MIN_THS:
+            self.note(head + '.')
+            return
+        prev, cap = self.lower_cap(ck['from'])
+        back = gain < -YIELD_MIN_THS
+        if back:
+            self.queue_clock(ck['from'], 'Ertrags-Prüfung: zurück auf %d MHz' % ck['from'], step=ck['from'] - ck['to'])
+            text = '%s: zurück auf %d MHz, Obergrenze Stufe %d = %d MHz' % (head, ck['from'], self.base, cap)
+        else:
+            text = '%s (unter %s): Obergrenze Stufe %d = %d MHz' % (head, _de(YIELD_MIN_THS), self.base, cap)
+        log_id = self.base_event(kind='ertrag', trigger=text, clock_old=ck['to'],
+                                 details={'luefterstufe': self.base, 'takt_vorher': ck['from'],
+                                          'takt_nachher': ck['to'], 'ths_vorher': ck['before'],
+                                          'ths_nachher': round(after, 2), 'ertrag_ths': round(gain, 2), 'obergrenze': cap,
+                                          'obergrenze_vorher': prev, 'zurueck': back})
+        self.note(text + '.')
+        self.decide('Ertrags-Prüfung: ' + ('zurück auf %d MHz' % ck['from'] if back else 'Obergrenze %d MHz' % cap),
+                    log_id)
 
     # --- Temperatur-Test (Nutzer 25.10., v2.0.6)
     def temp_test(self, valid, over_hot, cal):
@@ -1230,11 +1569,11 @@ class Round:
         st['stoss'] = None                               # Lüfterstöße enden, Lüfter auf die Basisstufe (unten)
         self.end_heat('Temperatur-Test')
         self.set_fan_target(self.base, 'Temperatur-Test: Basisstufe %d' % self.base)
-        learned = (st.get('learned') or {}).get(str(self.base))
-        clock = int(round(learned['mhz'])) if learned else START_CLOCK.get(self.base, START_CLOCK[1])
-        why = 'Temperatur-Test Beginn: %s Stufe %d (%d MHz)' % ('Lernwert' if learned else 'Initialwert', self.base, clock)
+        clock, source = self.start_clock()               # wie beim Start (höchstens die Obergrenze, Nutzer 28.10.)
+        why = 'Temperatur-Test Beginn: %s Stufe %d (%d MHz)' % (source, self.base, clock)
         st['test'] = {'started': started.isoformat(), 'step': 0, 'steps': TEST_STEPS, 'clock': clock,
                       'phase': 'einstellen', 'wait_ends': None, 'measure_from': None, 'measure_ends': None}
+        # (die Schritte +30 MHz begrenzt die Obergrenze nicht: Test des Nutzers, Nutzer 28.10.)
         self.queue_clock(clock, why)
         self.note(why + ', dann warten bis ≤ %d °C.' % (self.lo + TEST_START_AT))
 
@@ -1281,19 +1620,21 @@ class Round:
     def run(self):
         st, row, now = self.st, self.row, self.now
         st.pop('test_clear', None)
+        self.caps_cleared()
         if not row['enabled']:
             if not st.get('off'):
                 self.note('Automatik aus: Takt bleibt %s.' % ('%s MHz' % st['clock_set'] if st.get('clock_set') else 'wie er ist'))
                 self.drop_pending('Automatik aus')
             self.heat_off('Automatik aus')
-            st.update({'off': True, 'phase': 'aus', 'queue': [], 'settle': None})
+            st.update({'off': True, 'phase': 'aus', 'queue': [], 'settle': None, 'ertrag': None})
             self.j.cycle(recorded_at=now, phase='aus', base_level=self.base, clock_set=st.get('clock_set'),
                          fan_level=st.get('fan_set'), decision='Automatik aus')
             return st
         if st.pop('off', False) or st.get('v') != STATE_VERSION:
             # Automatik ein bzw. Umstellung auf die neue Regelung (startet ohne Lernwerte, Plan Kapitel 7)
             keep = ('log', 'stock', 'fan_set', 'fan_read', 'fan_read_at', 'fan_set_at', 'elapsed', 'mode_key',
-                    'maint', 'maint_ended_at', 'offline', 'over_hot', 'test', 'restart_req_seen', 'zb', 'learned_zb')
+                    'maint', 'maint_ended_at', 'offline', 'over_hot', 'test', 'restart_req_seen', 'zb', 'learned_zb',
+                    'caps', 'caps_cleared_seen', 'auto_restart_at')   # Obergrenzen bleiben (Nutzer 28.10.)
             new = {k: st[k] for k in keep if k in st}
             new['learned'] = (st.get('learned') or {}) if st.get('v') == STATE_VERSION else {}
             if new.get('stock') is None:
@@ -1303,6 +1644,9 @@ class Round:
             st = self.st = new
             self.note('Automatik ein (Basisstufe %d).' % self.base)
         self.target_range()
+        if not st.get('start_at'):
+            # Stand vor dem 28.10. ohne Startzeit: Obergrenze, Neustart, Ertrags-Prüfung erst 10/30 min nach dem Update
+            st['start_at'] = _iso(now)
 
         req = row.get('restart_req_at')
         if req is not None and str(req) != st.get('restart_req_seen'):
@@ -1316,6 +1660,8 @@ class Round:
         if row.get('maintenance_at'):
             m = _maintenance(row, st, now, self.ac, self.j)
             if m is None:
+                self.dh_reset()
+                st['ertrag'] = None                      # Ertrags-Prüfung abgebrochen
                 st['phase'] = 'wartung'
                 self.j.cycle(recorded_at=now, phase='wartung', base_level=self.base, clock_set=st.get('clock_set'),
                              fan_level=0 if (st.get('maint') or {}).get('fan_off') else st.get('fan_set'),
@@ -1330,6 +1676,8 @@ class Round:
                 m = calibration.read_miner(row['ip_address'], row['port'])
             except (OSError, RuntimeError, ValueError) as exc:
                 err = str(exc)[:500]
+                self.dh_reset()                          # Fehlerrate: die 5 min beginnen neu
+                st['ertrag'] = None                      # Ertrags-Prüfung abgebrochen
                 if not st.get('offline') and self.restart_expected():
                     st['offline_since'] = _iso(now)
                     st['offline'] = 'neustart'
@@ -1352,6 +1700,7 @@ class Round:
                              decision='A15 startet neu' if st['offline'] == 'neustart' else 'Miner antwortet nicht')
                 return st
         self.m = m
+        self.record_hashrate()                           # für die Ertrags-Prüfung (Nutzer 28.10.)
         if m.get('web_error') and m.get('mode_key') is None and st.get('mode_key'):
             m['mode_key'] = st['mode_key']                 # Einstellungsseite seit dem Start nie gelesen: letzter Modus
         self.web_status(m)
@@ -1420,6 +1769,7 @@ class Round:
             self.base_event(kind='over_hot', trigger='Miner meldet Over Hot: keine Entscheidung bis zu gültigen Werten')
             self.note('Over Hot gemeldet: keine Entscheidung bis zu gültigen Werten.')
             self.end_heat('Over Hot')
+            self.end_cold_pulses('Over Hot')
         if not over_hot and st.get('over_hot'):
             st.pop('over_hot')
             st['start_reason'] = 'nach Over Hot'
@@ -1437,6 +1787,10 @@ class Round:
             # Aufenthalt in L-U seit dem letzten Eintritt (von unten oder oben); beim ersten Wert über U gemessen
             if self.t <= self.hi - PULSE_REARM:
                 st['stoss_frei'] = True                  # neue Lüfterstöße wieder möglich (Nutzer 27.10.)
+            if self.t >= self.lo + PULSE_REARM:
+                st['stoss_unten_frei'] = True            # neue Lüfterstöße unten wieder möglich (Nutzer 28.10.)
+            # Plus-Schritte erst nach 120 s ununterbrochen unter L; ein Wert ≥ L setzt zurück (Nutzer 28.10.)
+            st['below_since'] = (st.get('below_since') or _iso(now)) if self.t < self.lo else None
             if self.t > self.hi:
                 if not st.get('above'):
                     st['band_dwell_s'] = _age(st['band_in'], now) if st.get('band_in') else 0
@@ -1489,6 +1843,8 @@ class Round:
                           'why': 'Miner hat den Takt geändert: erneut senden'})
                 st['queue'] = q
                 st['resent_at'] = _iso(now)
+        self.yield_check(over_hot, cal)                    # Ertrags-Prüfung nach einem +5-MHz-Schritt (Nutzer 28.10.)
+        self.error_rate(over_hot, cal)                     # Obergrenze und automatischer Neustart (Nutzer 28.10.)
         if valid:
             self.rules()
         self.write_fan()                                   # Lüfter vor den (möglicherweise langsamen) Miner-Befehlen
@@ -1535,11 +1891,17 @@ def run_fan_automation(database_url, ac=None):
                 "d.id AS device_id, d.ip_address, d.port, "
                 "(SELECT max(l.recorded_at) FROM automation_log l WHERE l.device_id = d.id AND l.kind = 'neustart_nutzer') "
                 "AS restart_req_at, "
+                "(SELECT max(l.recorded_at) FROM automation_log l WHERE l.device_id = d.id AND l.kind = 'obergrenzen_loeschen') "
+                "AS caps_cleared_at, "
                 "d.connection_config, EXISTS (SELECT 1 FROM calibration_runs r WHERE r.device_id = d.id "
                 "AND r.status IN ('running', 'cancelling', 'finishing')) AS cal_active "
                 "FROM fan_automation f JOIN devices d ON d.id = f.device_id "
                 "WHERE f.enabled OR NOT COALESCE((f.state->>'off')::boolean, false) "
-                "OR COALESCE((f.state->>'heat_fan_due')::boolean, false)")      # Automatik aus: Lüfterbefehl wiederholen
+                "OR COALESCE((f.state->>'heat_fan_due')::boolean, false) "     # Automatik aus: Lüfterbefehl wiederholen
+                # Automatik aus: „Obergrenzen löschen“ trotzdem ausführen (Review 28.10.)
+                "OR (SELECT max(l.recorded_at) FROM automation_log l WHERE l.device_id = d.id "
+                "AND l.kind = 'obergrenzen_loeschen') > COALESCE((f.state->>'caps_cleared_seen')::timestamptz, "
+                "'-infinity'::timestamptz)")
             rows = cur.fetchall()
         jconn = automation_journal.connect(database_url) if rows else None
         for row in rows:

@@ -1,5 +1,6 @@
 import api from '@/lib/api'
-import { render, screen } from '@testing-library/react'
+import { render, screen, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import FansPage from '../FansPage'
@@ -63,5 +64,114 @@ describe('FansPage Lüfterstoß', () => {
     renderPage()
     expect(await screen.findByText('Takt-Messung')).toBeInTheDocument()
     expect(screen.queryByText(/Lüfterstoß/)).not.toBeInTheDocument()
+  })
+})
+
+describe('FansPage Lüfterstöße unten', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('shows the cold pulse like the hot one (Basisstufe −1), not as reduced after an Ausnahme', async () => {
+    mockApi(automation({ t: 81, fan_target: 2, fan_set: 2, fan_read: 2,
+      stoss: { n: 1, step: 'an', at: '2026-10-28T10:00:00Z', level: 2, dir: 'down' } }))
+    renderPage()
+    expect(await screen.findByText('Lüfterstoß 1/2')).toBeInTheDocument()
+    expect(screen.getByText('Lüfter Stufe 2 für 6 s')).toBeInTheDocument()
+    expect(screen.getByText('Basisstufe 3 · Lüfterstoß 1/2')).toBeInTheDocument()
+    expect(screen.queryByText(/reduziert nach Ausnahme/)).not.toBeInTheDocument()
+  })
+})
+
+describe('FansPage Obergrenzen', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('shows the Obergrenze per level, also for a level without a learned value', async () => {
+    const learned = { 3: { mhz: 320, temp_avg: 83.2, at: '2026-10-28T09:00:00Z', count: 2 } }
+    mockApi({ ...automation({ caps: { 5: 395, 3: 325 } }), learned })
+    renderPage()
+    const table = (await screen.findByRole('columnheader', { name: 'Obergrenze' })).closest('table')
+    const rows = within(table).getAllByRole('row').slice(1).map((r) => within(r).getAllByRole('cell').map((c) => c.textContent))
+    expect(rows).toEqual([
+      ['3', '82–85 °C', '320 MHz', '83,2 °C', '—', '2', expect.any(String), '325 MHz'],
+      ['5', '—', '—', '—', '—', '—', '—', '395 MHz'],
+    ])
+  })
+
+  it('also with the automation off: table with the Obergrenze and the button', async () => {
+    const user = userEvent.setup()
+    const auto = { ...automation({ phase: 'aus', caps: { 3: 325 } }), enabled: false }
+    mockApi(auto)
+    api.post.mockResolvedValue({ data: auto })
+    renderPage()
+    const table = (await screen.findByRole('columnheader', { name: 'Obergrenze' })).closest('table')
+    const rows = within(table).getAllByRole('row').slice(1).map((r) => within(r).getAllByRole('cell').map((c) => c.textContent))
+    expect(rows).toEqual([['3', '—', '—', '—', '—', '—', '—', '325 MHz']])
+    await user.click(screen.getByRole('button', { name: 'Obergrenzen löschen' }))
+    await user.click(screen.getByRole('button', { name: 'Ja' }))
+    expect(api.post).toHaveBeenCalledWith('/api/fans/automation/', expect.objectContaining({ action: 'caps_clear' }))
+  })
+
+  it('automation off without Obergrenzen: no table and no button', async () => {
+    const learned = { 3: { mhz: 320, temp_avg: 83.2, at: '2026-10-28T09:00:00Z', count: 2 } }
+    mockApi({ ...automation({ phase: 'aus', caps: {} }), enabled: false, learned })
+    renderPage()
+    expect(await screen.findByRole('button', { name: /Einschalten/ })).toBeInTheDocument()
+    expect(screen.queryByRole('columnheader', { name: 'Gesetzter Takt (Ø)' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Obergrenzen löschen' })).not.toBeInTheDocument()
+  })
+})
+
+describe('FansPage Lernwerte', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('Bereich right after Stufe (range of the learned values = state.zb), Takt as Gesetzter Takt (Ø)', async () => {
+    const learned = { 2: { mhz: 275, temp_avg: 82, ths_avg: 133.4, at: '2026-10-28T12:39:51Z', count: 13 } }
+    // Zielbereich 83–86 gewählt, der data-service hat noch 82–85: die Lernwerte gehören zu 82–85
+    mockApi({ ...automation({ zb: [82, 85] }), target_low: 83, target_high: 86, learned })
+    renderPage()
+    const table = (await screen.findByRole('columnheader', { name: 'Bereich' })).closest('table')
+    const heads = within(table).getAllByRole('columnheader').map((c) => c.textContent)
+    expect(heads).toEqual(['Stufe', 'Bereich', 'Gesetzter Takt (Ø)', 'Ø Temperatur', 'Ø Hashrate', 'Anzahl', 'Zeit'])
+    const cells = within(within(table).getAllByRole('row')[1]).getAllByRole('cell').map((c) => c.textContent)
+    expect(cells.slice(0, 6)).toEqual(['2', '82–85 °C', '275 MHz', '82,0 °C', '133,4 TH/s', '13'])
+  })
+
+  it('Bereich unknown without state.zb', async () => {
+    const learned = { 3: { mhz: 320, temp_avg: 83.2, at: '2026-10-28T09:00:00Z', count: 2 } }
+    mockApi({ ...automation({ zb: null }), learned })
+    renderPage()
+    const table = (await screen.findByRole('columnheader', { name: 'Bereich' })).closest('table')
+    const cells = within(within(table).getAllByRole('row')[1]).getAllByRole('cell').map((c) => c.textContent)
+    expect(cells.slice(0, 3)).toEqual(['3', '—', '320 MHz'])
+  })
+
+  it('no column and no button without Obergrenzen', async () => {
+    mockApi(automation({ caps: {} }))
+    renderPage()
+    expect(await screen.findByText(/Lernwerte: noch keine/)).toBeInTheDocument()
+    expect(screen.queryByText('Obergrenze')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Obergrenzen löschen' })).not.toBeInTheDocument()
+  })
+
+  it('Obergrenzen löschen asks first, then posts caps_clear to the automation', async () => {
+    const user = userEvent.setup()
+    const auto = automation({ caps: { 3: 325 } })
+    mockApi(auto)
+    api.post.mockResolvedValue({ data: auto })
+    renderPage()
+    await user.click(await screen.findByRole('button', { name: 'Obergrenzen löschen' }))
+    expect(screen.getByText('Obergrenzen wirklich löschen?')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Nein' }))
+    expect(api.post).not.toHaveBeenCalled()
+    await user.click(screen.getByRole('button', { name: 'Obergrenzen löschen' }))
+    await user.click(screen.getByRole('button', { name: 'Ja' }))
+    expect(api.post).toHaveBeenCalledTimes(1)
+    expect(api.post).toHaveBeenCalledWith('/api/fans/automation/', expect.objectContaining({ action: 'caps_clear' }))
+    expect(await screen.findByRole('button', { name: 'Obergrenzen löschen' })).toBeInTheDocument()
   })
 })

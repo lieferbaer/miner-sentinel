@@ -146,6 +146,28 @@ def set_frequency(ip, port, points):
     return reply[:500]
 
 
+REBOOT_NO_REPLY = 'keine Antwort – Miner startet neu'
+
+
+def reboot(ip, port, timeout=8):
+    """Send the reboot command (ascset|0,reboot,0) like the button "A15 neu starten" (backend/api/views.py
+    _reboot_command): not reachable (connect/send fails) raises OSError; once it is sent, a missing or broken reply
+    means the miner is already restarting (Nutzer 27.10.). Automatischer Neustart der Temperatur-Automatik (Nutzer 28.10.)."""
+    with miner_cache.command(ip), socket.create_connection((ip, port or 4028), timeout) as sock:
+        sock.sendall(b'ascset|0,reboot,0')
+        chunks = []
+        try:
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+        except OSError:
+            if not chunks:
+                return REBOOT_NO_REPLY
+    return b''.join(chunks).decode('utf-8', 'ignore').replace('\x00', '').strip() or REBOOT_NO_REPLY
+
+
 def mode_key(mode, level):
     return '2/L%d' % level if mode == 2 else '%d/-' % mode
 

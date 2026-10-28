@@ -21,7 +21,7 @@ READ_BACK_S = 5       # user choice (was 10); measured: the controller reports a
 STATE_KEYS = ('phase', 't', 'tendency', 'boards', 'clock_set', 'clock_changed_at', 'clock_now', 'mode_key',
               'stock_mhz', 'fan_target', 'fan_set', 'fan_read', 'fan_read_at', 'fan_set_at', 'window_until',
               'window_active', 'learn_since', 'cal', 'over_hot', 'offline', 'ac_error', 'last_error', 'seen_at',
-              'exc_active', 'calm', 'start_hold', 'restart_req', 'heat', 'zb', 'stoss')
+              'exc_active', 'calm', 'start_hold', 'restart_req', 'heat', 'zb', 'stoss', 'caps')
 PENDING_KEYS = ('kind', 'value', 'sent_at', 'attempt')
 STATE_FRESH_S = 15    # the data-service writes the state every 5 s (only while it reads the miner)
 TMAX_FRESH_S = 30     # the collector writes the chip temperatures every 10 s
@@ -204,7 +204,8 @@ def fans_automation(request):
     """Temperatur-Automatik (A15). GET: settings + state. POST {action: enable, dev_id, port, level} |
     {action: level, level} | {action: disable} | {action: maintenance_start|maintenance_end} |
     {action: temp_test_start|temp_test_abort} | {action: target, low, high} (Zielbereich, also with the automation off,
-    during Wartung or Takt-Messung; ends a running Temperatur-Test). The data-service applies the changes."""
+    during Wartung or Takt-Messung; ends a running Temperatur-Test) | {action: caps_clear} (Obergrenzen löschen, always;
+    only the protocol entry, the data-service clears the caps in its next round). The data-service applies the changes."""
     dev, auto = _automation()
     if not auto:
         return Response({'error': 'Kein Avalon A15 gefunden.'}, status=status.HTTP_404_NOT_FOUND)
@@ -263,6 +264,11 @@ def fans_automation(request):
             # no test (already over): no entry
             events = [_test_end('Nutzer')] if auto.temp_test_at else []
             auto.temp_test_at = None
+        elif action == 'caps_clear':
+            # Obergrenzen löschen (Nutzer 28.10.): nur der Eintrag, die Zeile bleibt; der data-service liest ihn
+            # (caps_cleared_at) und löscht die Obergrenzen in seiner nächsten Runde
+            _user_event(dev, auto, 'obergrenzen_loeschen', 'Nutzer: Obergrenzen gelöscht')
+            return Response(automation_payload())
         elif action == 'target':
             # Zielbereich (Nutzer 27.10.): the data-service takes it over in its next round; a running test ends
             low, high = _whole_number(request.data.get('low')), _whole_number(request.data.get('high'))
