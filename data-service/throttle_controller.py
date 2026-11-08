@@ -280,7 +280,7 @@ def control_device(conn, dev):
     rebooted = (last.get('elapsed') is not None and m['elapsed'] is not None
                 and m['elapsed'] < last['elapsed'])
     mode_changed = last.get('mode_key') not in (None, mkey)
-    observe = bool(dev.get('calibrating'))   # Takt-Messung / Temperatur-Automatik: nur lesen, nichts regeln
+    observe = bool(dev.get('calibrating'))   # Temperatur-Automatik: nur lesen, nichts regeln
 
     # 1) was an active throttle lifted on the miner? (Nano 3S / Avalon Q; the A15 has no throttle since 24.10.)
     if active and not observe:
@@ -324,7 +324,7 @@ def control_device(conn, dev):
             st['stable_since'] = _iso(now)
         stable_for = (now - (_parse(st.get('stable_since')) or now)).total_seconds()
         tried = _parse(prof.get('measure_try_at')) or _parse(prof.get('measured_at'))
-        if (family != 'a15'               # A15: measured values only from the Takt-Tabellen
+        if (family != 'a15'               # A15: no measured values here (they came from the Takt-Messung, removed)
                 and stable_for >= STABLE_SECONDS
                 and (tried is None or (now - tried).total_seconds() >= REMEASURE_SECONDS)):
             value, watts = _measured_full_power(conn, dev['id'])
@@ -361,7 +361,7 @@ def control_device(conn, dev):
                 if active.get('status') != 'reached':
                     active['reached_at'] = _iso(now)
                 active['status'] = 'reached'
-                if family != 'a15':           # A15: measured values only from the Takt-Tabellen
+                if family != 'a15':           # A15: no measured points here (they came from the Takt-Messung, removed)
                     _record_point(prof, x_now, speed)
             else:
                 x_new = next_clock(active['meas'] + (prof.get('cal') or []), active['target_ths'], x_now)
@@ -407,10 +407,8 @@ def run_throttle_controller(database_url):
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("SELECT id, ip_address, port, connection_config, name AS device_name, model, device_id "
-                        ", (EXISTS (SELECT 1 FROM "
-                        "calibration_runs r WHERE r.device_id = devices.id AND r.status IN "
-                        "('running', 'paused', 'cancelling', 'finishing')) OR EXISTS (SELECT 1 FROM "
-                        "fan_automation f WHERE f.device_id = devices.id AND f.enabled)) AS calibrating, "
+                        ", EXISTS (SELECT 1 FROM "
+                        "fan_automation f WHERE f.device_id = devices.id AND f.enabled) AS calibrating, "
                         "(SELECT f.state->>'clock_set' FROM fan_automation f WHERE f.device_id = devices.id) "
                         "AS auto_clock_set "
                         "FROM devices WHERE is_active AND protocol = 'cgminer_tcp'")

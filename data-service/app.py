@@ -27,7 +27,6 @@ from collectors.parasite_collector import collect_parasite_data
 from collectors.publicpool_collector import collect_publicpool_data
 import miner_cache
 from throttle_controller import run_throttle_controller
-from calibration import run_calibration
 from live_reader import READ_S as LIVE_READ_S, run_live_cycle
 import automation_journal
 import stats_rollup
@@ -626,9 +625,9 @@ def reschedule_jobs():
     )
 
     # central reading of the Avalon miners every 5 s; right after it the Temperatur-Automatik
-    # (every reading) and the throttle controller + Takt-Tabellen (every 15 s) run on these values
+    # (every reading) and the throttle controller (every 15 s) run on these values
     scheduler.add_job(
-        func=lambda: run_live_cycle(DATABASE_URL, run_throttle_controller, run_calibration),
+        func=lambda: run_live_cycle(DATABASE_URL, run_throttle_controller),
         trigger=IntervalTrigger(seconds=LIVE_READ_S),
         id='live_cycle',
         name='Zentrale Abfrage Avalon',

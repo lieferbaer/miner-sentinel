@@ -1,6 +1,7 @@
 /**
  * Lüfter (AC Infinity, Testmenü): Controller und Ports anzeigen, Einstellungen sichern/zurückschreiben und
- * testen, welcher Schreibweg die Lüfterstufe am echten Gerät wirklich ändert.
+ * testen, welcher Schreibweg die Lüfterstufe am echten Gerät wirklich ändert. Dazu die Temperatur-Automatik der A15
+ * (Regeln v2.2.7, Nutzer 06.11.): Heiz-, Basis- oder Kühlmodus des Lüfters, Takt nach der Zieltemperatur, Lernwerte.
  */
 import { formatHashrate, formatNumber } from '@/components/dashboard'
 import TargetRangeCard, { targetOf } from '@/components/fans/TargetRangeCard'
@@ -52,59 +53,66 @@ function errText(err, fallback) {
   return err?.response?.data?.error || fallback
 }
 
-// state of the regulation (fan_automation.state.phase, Regelung vom 24.10.); the limits follow the Zielbereich
-// lo–hi (Nutzer 27.10.), the Takt-Messung keeps 85 °C
+// state of the regulation (fan_automation.state.phase, rules of v2.2.7, Nutzer 06.11.): exactly one fan mode at a
+// time; the numbers follow the Zieltemperatur ZTU–ZTO = lo–hi
 function phases(lo, hi) {
   return {
-    normal: { value: 'Normalbetrieb', sub: 'Takt regelt ' + lo + '–' + hi + ' °C' },
-    korrektur: { value: 'Korrekturphase', sub: 'Lüfter erhöht, bis ' + lo + '–' + hi + ' °C erreicht sind' },
-    ausnahme: { value: 'Ausnahme', sub: 'Lüfter reduziert · 440 MHz und unter ' + (lo - 9) + ' °C' },
-    messung: { value: 'Takt-Messung', sub: 'Taktregelung pausiert, Lüfter nur ab 85 °C' },
+    heizmodus: { value: 'Heizmodus', sub: 'endet ab ' + (lo - 4) + ' °C' },
+    basismodus: { value: 'Basismodus', sub: 'Takt regelt ' + lo + '–' + hi + ' °C' },
+    kuehlmodus: { value: 'Kühlmodus', sub: 'endet bei ' + (hi - 4) + ' °C oder kälter' },
     wartung: { value: 'Wartung', sub: 'A15 aus · Lüfter aus · endet beim Einschalten' },
     aus: { value: 'Aus', sub: '' },
   }
 }
-// commands, window and learning period are only current while the regulation runs on valid readings
-const REGULATING = new Set(['normal', 'korrektur', 'ausnahme'])
+// commands, locks and learning period are only current while the regulation runs on valid readings
+const REGULATING = new Set(['heizmodus', 'basismodus', 'kuehlmodus'])
+// the status card keeps the calm tone in these modes; Kühlmodus (hot) is a warning like the old Korrekturphase
+const CALM_PHASES = new Set(['heizmodus', 'basismodus'])
 const MODE_LABEL = { '2/L4': 'mode 04', '2/L3': 'mode 03', '2/L2': 'mode 02', '2/L1': 'mode 01', '2/L0': 'mode 00',
   '1/-': 'High Performance' }
-// the regulation in short (plan of 24.10.), for the Zielbereich lo–hi (Nutzer 27.10.); Plus-Schritte erst nach 60 s
-// unter lo, Lüfterstöße unten, Takt bei hi+1 bis hi+3 erst nach 60 s (statt der Lüfterstöße oben), Ertrags-Prüfung,
-// Obergrenze (4 %) und automatischer Neustart nach der Fehlerrate (Nutzer 28.10.)
+// clock-increase locks of the data-service (state.locks, ISO "until" times) and why they run
+const LOCK_REASON = { erhoehung: 'nach Erhöhung', heizmodus: 'nach Heizmodus', kuehlmodus: 'nach Kühlmodus',
+  senkung: 'nach Senkung' }
+
+// the rules in short (v2.2.7, Nutzer 06.11.) with the current Zieltemperatur lo–hi (ZTU–ZTO)
 function logicText(lo, hi) {
   const range = lo + '–' + hi + ' °C'
-  return 'Der Lüfter läuft fest auf der gewählten Basisstufe, der Takt hält den heißesten Chip bei ' + range +
-    '; dort keine Taktänderung. Unter ' + lo + ' °C (erst nach 60 s ununterbrochen darunter) Takt +5 / +20 / +40 MHz ' +
-    '(kleinster Schritt 5 MHz; bei ' + (lo - 4) + '–' + (lo - 1) + ' °C erst 3 min nach der letzten Takterhöhung; ' +
-    'nie über die Obergrenze der Basisstufe). Bei ' + (lo - 1) + ' °C statt der Takterhöhung zuerst zwei Lüfterstöße ' +
-    '(Basisstufe −1 für 6 s, dann zurück; nicht bei Basisstufe 1); zurück im Ziel: keine Erhöhung; bei ' + (lo - 2) +
-    ' °C oder weniger sofort die Takterhöhung; höchstens ein Stoßpaar je 10 min, neue erst nach ' + (lo + 1) +
-    ' °C oder mehr. Ab ' + (hi + 1) +
-    ' °C Lüfter +1 bzw. +2 und Takt runter (Korrekturphase; bei ' + (hi + 1) + '–' + (hi + 3) +
-    ' °C −10 MHz, wenn sie vorher unter 5 min in ' + range + ' lag, sonst −5 MHz); zurück zur Basisstufe nach ' +
-    '1 min in ' + range + ' oder sobald unter ' + lo + ' °C. Bei ' + (hi + 1) + '–' + (hi + 3) +
-    ' °C Lüfter +1 sofort, den Takt erst, wenn die Temperatur nach 60 s noch über ' + hi + ' °C liegt (vorher ' +
-    'zurück: keine Senkung); ab ' + (hi + 4) + ' °C sofort nach Tabelle. War die letzte Taktänderung über ' + hi +
-    ' °C und fällt die Temperatur unter ' + lo + ' °C: 5 min keine Taktänderung (endet über ' + hi + ' °C). ' +
-    'Nach Neustart, Wartung oder Over Hot keine Takterhöhung bis ' + lo + ' °C, höchstens 10 min (Startpause). ' +
-    'Bei jedem Start Lüfter Stufe 1, bis die Chiptemperatur ' + lo + ' °C erreicht (Heizmodus). ' +
-    'Bei 440 MHz und 3 min unter ' + (lo - 9) + ' °C Lüfter −1 (Ausnahme). ' +
-    'Ertrags-Prüfung nach jeder Takterhöhung um +5 MHz (nicht in den ersten 30 min nach dem Start): 10 min keine ' +
-    'weitere Takterhöhung, dann Hashrate (Ø 5 min) gegen die 15 min davor; unter +0,5 TH/s mehr: Obergrenze der ' +
-    'Basisstufe = Takt davor; bei einem Verlust (über 0,5 TH/s weniger) zusätzlich zurück auf den Takt davor. ' +
-    'Fehlerrate 5 min über 4 %: Obergrenze der Basisstufe = gesetzter Takt −5 MHz (der Takt wird nicht gesenkt; gilt ' +
-    'in jedem Zielbereich, bis „Obergrenzen löschen“) und sofort automatischer Neustart der A15 (höchstens einer ' +
-    'je 3 h, frühestens 30 min nach dem Start; sonst nur die Obergrenze).'
+  return 'Der Takt hält den heißesten Chip in der Zieltemperatur ' + range + ' (ZTU ' + lo + ' °C, ZTO ' + hi +
+    ' °C); dort keine Taktänderung. Der Lüfter ist immer in genau einem Modus. Basismodus: Lüfter auf der gewählten ' +
+    'Basisstufe. Kühlmodus: ab ' + (hi + 3) + ' °C Basisstufe +1, ab ' + (hi + 8) + ' °C +2 (höchstens Stufe 10; ' +
+    'das Plus geht bis zum Ende nicht zurück); endet bei ' + (hi - 4) + ' °C oder kälter, zurück auf die Basisstufe. ' +
+    'Heizmodus: bei ' + (lo - 11) + ' °C oder kälter Lüfter −1, sobald die Lüfterstufe seit über 1 min unverändert ' +
+    'ist, so jede Minute weiter (mindestens Stufe 1); bei ' + (lo - 10) + '–' + (lo - 5) + ' °C bleibt die Stufe; ' +
+    'endet ab ' + (lo - 4) + ' °C, zurück auf die Basisstufe. Nach dem Ende von Heiz- oder Kühlmodus 3 min keine ' +
+    'Takterhöhung. ' +
+    'Unter ' + lo + ' °C sofort Takt +5 MHz bei ' + (lo - 3) + '–' + (lo - 1) + ' °C, +10 bei ' + (lo - 5) + '–' +
+    (lo - 4) + ' °C, +15 bei ' + (lo - 10) + '–' + (lo - 6) + ' °C, +20 bei ' + (lo - 20) + '–' + (lo - 11) +
+    ' °C, +40 bei ' + (lo - 21) + ' °C oder kälter (höchstens 440 MHz); danach keine Takterhöhung für 3 min ' +
+    '(+5, +10) bzw. 2 min (+15, +20, +40). Diese Sperren und die nach Heiz- oder Kühlmodus enden früher ab ' +
+    (lo + 4) + ' °C. Keine Takterhöhung, solange ein Befehl noch nicht übernommen ist. ' +
+    'Über ' + hi + ' °C Takt runter: Bereich 1 (' + (hi + 1) + '–' + (hi + 3) + ' °C) −15 / −10 / −5 MHz bei ' +
+    'einer ZeitImZieltemperatur davor (ununterbrochen in ' + range + ') unter 1 min / 1–5 min / über 5 min, ' +
+    'Bereich 2 (' + (hi + 4) + '–' + (hi + 6) + ' °C) −20 MHz, Bereich 3 (' + (hi + 7) + '–' + (hi + 9) +
+    ' °C) −20 MHz, Bereich 4 (ab ' + (hi + 10) + ' °C) −50 MHz; mindestens 100 MHz. Die erste Senkung sofort ' +
+    '(lag die letzte unter 3 min zurück: 3 min nach ihr, in einem höheren Bereich als bei ihr sofort), im ' +
+    'selben Bereich alle 2 min, beim Anstieg in einen ' +
+    'höheren Bereich sofort, beim Rückgang in einen niedrigeren 2 min nach der Ankunft dort. Nach jeder Senkung ' +
+    '5 min keine Takterhöhung. ' +
+    'Nach Neustart, Wartung oder Over Hot keine Takterhöhung bis ' + (lo - 5) + ' °C, höchstens 10 min ' +
+    '(Startpause). Weicht der Takt laut Miner 15 min ununterbrochen um mehr als 15 MHz vom gesetzten ab, wird der ' +
+    'gesetzte Takt erneut gesendet. Fehlerrate 30 min ununterbrochen über 10 %: automatischer Neustart der A15 ' +
+    '(höchstens einer je 6 h).'
 }
 function startText(lo, hi) {
-  return 'Start (Stufenwahl, Einschalten, Neustart, nach Wartung oder Takt-Messung): Lernwert der Basisstufe, sonst ' +
-    'der des nächstgelegenen Zielbereichs, sonst Stufe 1 = 170, 2 = 250, 3 = 330, 4 = 380, 5 = 400, 6 = 420, ' +
-    'ab 7 = 440 MHz; höchstens die Obergrenze der Stufe. Lernwert: 15 min stabil in ' + lo + '–' + hi +
-    ' °C bei unveränderter Lüfterstufe, nur bei einer Fehlerrate unter 4 % (Mittel der 15 min).'
+  return 'Start (Stufenwahl, Einschalten, Neustart, nach Wartung oder Over Hot): Heiz- und Kühlmodus enden ohne ' +
+    'Sperre, Lüfter auf die Basisstufe; Starttakt = Lernwert der Basisstufe, sonst der der nächstgelegenen ' +
+    'Zieltemperatur, sonst Stufe 1 = 170, 2 = 250, 3 = 330, 4 = 380, 5 = 400, 6 = 420, ab 7 = 440 MHz. ' +
+    'Lernwert: 15 min stabil in ' + lo + '–' + hi + ' °C bei unveränderter Lüfterstufe, nur bei einer Fehlerrate ' +
+    'unter 5 % (Mittel der 15 min).'
 }
 
-function clockTime(iso, seconds = false) {
-  return new Date(iso).toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit', ...(seconds ? { second: '2-digit' } : {}) })
+function clockTime(iso) {
+  return new Date(iso).toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' })
 }
 
 function tendencyText(d) {
@@ -123,21 +131,20 @@ function useAutomation(initial) {
   return [auto, setAuto]
 }
 
-const hasCaps = (caps) => Object.values(caps || {}).some((v) => typeof v === 'number')
-
 /** Learned values per fan level: mean of the clock set by the regulation while the chip temperature stayed 15 min
- * within the Zielbereich; with the Obergrenze per level (Fehlerrate, Nutzer 28.10.; gilt in jedem Zielbereich). */
-function LearnedTable({ learned, caps, zb, level, lo, hi }) {
+ * in the Zieltemperatur (no Obergrenzen any more since v2.2.7, Nutzer 06.11.). */
+function LearnedTable({ learned, zb, level, lo, hi }) {
   // only the per-level values of the regulation since 24.10. (older values per mode have no 'mhz' here)
   const values = Object.fromEntries(Object.entries(learned || {}).filter(([, v]) => v && typeof v.mhz === 'number'))
-  const limits = Object.fromEntries(Object.entries(caps || {}).filter(([, v]) => typeof v === 'number'))
-  const withCaps = Object.keys(limits).length > 0
-  // Bereich (Nutzer 28.10.): the learned values belong to the range the data-service has taken over (state.zb)
+  // Zieltemperatur (Nutzer 28.10.): the learned values belong to the one the data-service has taken over (state.zb)
   const range = Array.isArray(zb) && zb.length === 2 ? zb[0] + '–' + zb[1] + ' °C' : '—'
-  // a level with an Obergrenze but no learned value gets its own row
-  const rows = [...new Set([...Object.keys(values), ...Object.keys(limits)])].sort((a, b) => Number(a) - Number(b))
+  const rows = Object.keys(values).sort((a, b) => Number(a) - Number(b))
   if (!rows.length) {
-    return <p className="text-muted-foreground">Lernwerte: noch keine (nach 15 min stabil bei {lo}–{hi} °C).</p>
+    return (
+      <p className="text-muted-foreground">
+        Lernwerte: noch keine (nach 15 min stabil bei {lo}–{hi} °C und einer Fehlerrate unter 5 %).
+      </p>
+    )
   }
   return (
     <div className="pt-1">
@@ -155,16 +162,15 @@ function LearnedTable({ learned, caps, zb, level, lo, hi }) {
           return (
             <li key={lv} className={'py-1.5' + (Number(lv) === level ? ' font-semibold' : '')}>
               <div className="flex items-baseline justify-between gap-2">
-                <span>Stufe {lv}{v ? ' · ' + range : ''}</span>
-                {v && <span className="tabular-nums text-muted-foreground">{when(v.at)}</span>}
+                <span>Stufe {lv} · {range}</span>
+                <span className="tabular-nums text-muted-foreground">{when(v.at)}</span>
               </div>
               <div className="mt-0.5 grid grid-cols-2 gap-x-3 gap-y-1 tabular-nums">
-                {v && item('Gesetzter Takt (Ø)', fmt(v.mhz, 0, ' MHz'))}
-                {v && item('Ø Temperatur', fmt(v.temp_avg, 1, ' °C'))}
-                {v && item('Ø Hashrate', fmt(v.ths_avg, 1, ' TH/s'))}
-                {v && item('Effizienz', fmt(v.j_th, 1, ' J/TH'))}
-                {v && item('Anzahl', v.count ?? '—')}
-                {withCaps && item('Obergrenze', fmt(limits[lv], 0, ' MHz'))}
+                {item('Gesetzter Takt (Ø)', fmt(v.mhz, 0, ' MHz'))}
+                {item('Ø Temperatur', fmt(v.temp_avg, 1, ' °C'))}
+                {item('Ø Hashrate', fmt(v.ths_avg, 1, ' TH/s'))}
+                {item('Effizienz', fmt(v.j_th, 1, ' J/TH'))}
+                {item('Anzahl', v.count ?? '—')}
               </div>
             </li>
           )
@@ -175,30 +181,28 @@ function LearnedTable({ learned, caps, zb, level, lo, hi }) {
           <thead className="text-muted-foreground">
             <tr className="text-left">
               <th className="pr-3 font-medium">Stufe</th>
-              <th className="pr-3 font-medium">Bereich</th>
+              <th className="pr-3 font-medium">Zieltemperatur</th>
               <th className="pr-3 font-medium">Gesetzter Takt (Ø)</th>
               <th className="pr-3 font-medium">Ø Temperatur</th>
               <th className="pr-3 font-medium">Ø Hashrate</th>
               <th className="pr-3 font-medium">Effizienz</th>
               <th className="pr-3 font-medium">Anzahl</th>
-              <th className={withCaps ? 'pr-3 font-medium' : 'font-medium'}>Zeit</th>
-              {withCaps && <th className="font-medium">Obergrenze</th>}
+              <th className="font-medium">Zeit</th>
             </tr>
           </thead>
           <tbody>
             {rows.map((lv) => {
-              const v = values[lv] || {}
+              const v = values[lv]
               return (
                 <tr key={lv} className={Number(lv) === level ? 'font-semibold' : ''}>
                   <td className="pr-3">{lv}</td>
-                  <td className="whitespace-nowrap pr-3 tabular-nums">{values[lv] ? range : '—'}</td>
+                  <td className="whitespace-nowrap pr-3 tabular-nums">{range}</td>
                   <td className="pr-3 tabular-nums">{fmt(v.mhz, 0, ' MHz')}</td>
                   <td className="pr-3 tabular-nums">{fmt(v.temp_avg, 1, ' °C')}</td>
                   <td className="whitespace-nowrap pr-3 tabular-nums">{fmt(v.ths_avg, 1, ' TH/s')}</td>
                   <td className="whitespace-nowrap pr-3 tabular-nums">{fmt(v.j_th, 1, ' J/TH')}</td>
                   <td className="pr-3 tabular-nums">{v.count ?? '—'}</td>
-                  <td className={withCaps ? 'pr-3 text-muted-foreground' : 'text-muted-foreground'}>{when(v.at)}</td>
-                  {withCaps && <td className="tabular-nums">{fmt(limits[lv], 0, ' MHz')}</td>}
+                  <td className="text-muted-foreground">{when(v.at)}</td>
                 </tr>
               )
             })}
@@ -209,33 +213,28 @@ function LearnedTable({ learned, caps, zb, level, lo, hi }) {
   )
 }
 
-/** Obergrenzen löschen (Nutzer 28.10.): only with Obergrenzen, also with the automation off; the data-service clears
- * them in its next round. */
-function ClearCaps({ caps, onCommand, busy }) {
-  const [confirm, setConfirm] = useState(false)
-  if (!hasCaps(caps)) return null
-  return (
-    <div className="flex flex-wrap items-center gap-2">
-      {confirm ? (
-        <>
-          <span className="basis-full self-center sm:basis-auto">Obergrenzen wirklich löschen?</span>
-          <Button size="sm" variant="destructive" className="h-9 flex-1 sm:h-8 sm:flex-none" disabled={busy}
-            onClick={() => { setConfirm(false); onCommand({ action: 'caps_clear' }) }}>
-            Ja
-          </Button>
-          <Button size="sm" variant="secondary" className="h-9 flex-1 sm:h-8 sm:flex-none"
-            onClick={() => setConfirm(false)}>
-            Nein
-          </Button>
-        </>
-      ) : (
-        <Button size="sm" variant="outline" className="h-9 w-full sm:h-8 sm:w-auto" disabled={busy}
-          onClick={() => setConfirm(true)}>
-          Obergrenzen löschen
-        </Button>
-      )}
-    </div>
-  )
+// a lock or pause of the data-service that still runs (ISO "until" in the future)
+const runs = (until) => Boolean(until) && Date.parse(until) > Date.now()
+
+/** What runs right now in the regulation (Nutzer 06.11.): command being taken over, Startpause, the clock-increase
+ * locks (latest end with the reasons), the excursion over ZTO and the learning period. */
+function runningItems(st, lo) {
+  const pending = st.pending
+    ? (st.pending.kind === 'modus' ? 'Modus ' + String(st.pending.value).padStart(2, '0') : 'Takt ' + st.pending.value + ' MHz') +
+      ' wird übernommen' + (st.pending.attempt > 1 ? ' (Versuch ' + st.pending.attempt + ')' : '')
+    : null
+  const startHold = st.start_hold && runs(st.start_hold.until)
+    ? 'keine Takterhöhung bis ' + (lo - 5) + ' °C, spätestens ' + clockTime(st.start_hold.until) : null
+  const locks = Object.keys(LOCK_REASON).filter((key) => runs(st.locks?.[key]))
+  const lockEnd = locks.length ? locks.map((key) => st.locks[key]).reduce((a, b) => (Date.parse(b) > Date.parse(a) ? b : a)) : null
+  return [
+    pending,
+    startHold,
+    lockEnd ? 'keine Takterhöhung bis ' + clockTime(lockEnd) + ' (' + locks.map((key) => LOCK_REASON[key]).join(', ') + ')'
+      : null,
+    st.hot?.band ? 'über ZTO: Bereich ' + st.hot.band : null,
+    st.learn_since ? 'lernt seit ' + clockTime(st.learn_since) : null,
+  ].filter(Boolean)
 }
 
 /** Status of the Temperatur-Automatik as cards like the overview; the small line never repeats the big value. */
@@ -246,63 +245,35 @@ function AutomationCards({ auto, st, roomTemp, lo, hi }) {
   // the same hashrate card as on the overview (latest collector value of the A15)
   const deviceKey = (live.data?.devices || []).find((d) => d.id === auto.device?.id)?.device_id
   const mining = (live.data?.mining || []).find((row) => row.device_id_str === deviceKey) || {}
-  // during a Takt-Messung the run sets the clock: then the same value as the throttle card
-  const throttle = live.data?.throttle?.[auto.device?.id] || {}
-  const measuring = st.phase === 'messung'
-  const setText = measuring
-    ? (throttle.set_mhz != null ? fmt(throttle.set_mhz, 0, ' MHz') + ' (Takt-Messung)' : '—')
-    : fmt(st.clock_set, 0, ' MHz')
+  // Fan speed of the A15 (Fan1, its own fan inputs), the same latest collector value as on the overview (Nutzer 06.11.)
+  const fanRpm = (live.data?.hardware || []).find((row) => row.device_id_str === deviceKey)?.fan_speed_rpm
+  // Wartung (Miner aus) or the A15 does not answer: the latest value is old, so "unbekannt" (Nutzer 06.11.)
+  const fanRpmText = st.phase === 'wartung' || st.offline ? 'unbekannt' : fanRpm != null ? fmt(fanRpm, 0, ' rpm') : null
   const tmax = auto.now?.tmax
   const boards = (auto.now?.boards || []).filter((b) => b != null)
   const others = boards.length > 1 ? [...boards].sort((a, b) => b - a).slice(1) : []
-  // colours like the table of high temperatures (Nutzer 27.10.): fan +1 from hi+1, +2 from hi+4, at most 96 °C;
-  // the Takt-Messung keeps the table for 84 °C
-  const top = measuring ? 84 : hi
-  const tempTone = tmax == null ? 'default' : tmax >= Math.min(top + 4, 96) ? 'danger'
-    : tmax >= Math.min(top + 1, 96) ? 'warning' : 'default'
+  // colours like the clock reduction (Nutzer 06.11.): warning from ZTO+1 (Bereich 1), danger from ZTO+4 (Bereich 2)
+  const tempTone = tmax == null ? 'default' : tmax >= hi + 4 ? 'danger' : tmax >= hi + 1 ? 'warning' : 'default'
   const tendency = tendencyText(st.tendency)
   // the level MinerSentinel set last; the controller confirms it only after > 5 s (read back after 10 s)
   const base = auto.level
   const running = st.fan_set ?? st.fan_read
   const confirmed = st.fan_read === st.fan_set ||
     (st.fan_read_at && st.fan_set_at && Date.parse(st.fan_read_at) >= Date.parse(st.fan_set_at) + 10000)
-  // Wartung, Takt-Messung, Over Hot, miner silent: the data-service leaves these fields as they were
+  // Wartung, Over Hot, miner silent: the data-service leaves these fields as they were
   const regulating = REGULATING.has(st.phase) && !st.offline && !st.over_hot
-  // Lüfterstöße unten (Nutzer 28.10., dir 'down'): bei lo−1 Basisstufe −1 statt der Takterhöhung; Status wie beim
-  // Heizmodus. Die Lüfterstöße oben entfallen (Nutzer 28.10.)
-  const pulse = regulating && st.stoss?.dir === 'down' ? st.stoss : null
+  // Kühlmodus +n / Heizmodus −n: the running level relative to the Basisstufe (Nutzer 06.11.)
+  const delta = running != null && base != null ? running - base : 0
   const fanSub = [
     running === base ? '= Basisstufe' : 'Basisstufe ' + base,
-    pulse ? 'Lüfterstoß ' + pulse.n + '/2' : null,
-    st.phase === 'korrektur' && running > base ? 'Korrektur +' + (running - base) : null,
-    st.phase === 'ausnahme' ? 'Ausnahme' + (running != null && running < base ? ' −' + (base - running) : '') : null,
-    // after the Ausnahme the fan stays on the reduced level (plan, step 5); judged by the target: fan_set lags
-    // behind until the controller has taken a new base level
-    st.heat ? 'Heizmodus bis ' + lo + ' °C' : null,
-    !pulse && !st.heat && st.phase === 'normal' && st.fan_target != null && st.fan_target < base
-      ? 'reduziert nach Ausnahme −' + (base - st.fan_target) : null,
+    st.phase === 'kuehlmodus' ? 'Kühlmodus' + (delta > 0 ? ' +' + delta : '') : null,
+    st.phase === 'heizmodus' ? 'Heizmodus' + (delta < 0 ? ' −' + -delta : '') : null,
     st.fan_target != null && st.fan_target !== st.fan_set ? 'wird Stufe ' + st.fan_target : null,
     confirmed ? null : 'Rückmeldung folgt',
   ].filter(Boolean).join(' · ')
   const phase = phases(lo, hi)[st.phase] || { value: '—', sub: '' }
-  const pending = st.pending
-    ? (st.pending.kind === 'modus' ? 'Modus ' + String(st.pending.value).padStart(2, '0') : 'Takt ' + st.pending.value + ' MHz') +
-      ' wird übernommen' + (st.pending.attempt > 1 ? ' (Versuch ' + st.pending.attempt + ')' : '')
-    : null
-  const windowOpen = st.window_until && Date.parse(st.window_until) > Date.now()
   const restarting = Boolean(st.restart_req) || st.offline === 'neustart'
-  // Heizmodus (Nutzer 27.10.): als Status statt „Normalbetrieb“
-  const heating = regulating && st.phase === 'normal' && st.heat
-  const statusSub = !regulating ? phase.sub : [
-    pulse ? (pulse.step === 'an' ? 'Lüfter Stufe ' + pulse.level + ' für 6 s' : 'zurück auf Basisstufe') : null,
-    heating ? 'Lüfter Stufe 1 bis ' + lo + ' °C' : null,
-    pending,
-    windowOpen ? 'Beobachtungsfenster bis ' + clockTime(st.window_until, true) : null,
-    st.calm && Date.parse(st.calm.until) > Date.now() ? 'Taktsperre bis ' + clockTime(st.calm.until) : null,
-    st.start_hold && Date.parse(st.start_hold.until) > Date.now()
-      ? 'keine Takterhöhung bis ' + lo + ' °C, spätestens ' + clockTime(st.start_hold.until) : null,
-    st.learn_since ? 'lernt seit ' + clockTime(st.learn_since) : null,
-  ].filter(Boolean).join(' · ') || phase.sub
+  const statusSub = !regulating ? phase.sub : runningItems(st, lo).join(' · ') || phase.sub
   return (
     <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-5">
       <MetricCard variant="hero" layout="icon-left" icon={Hash} label="Hashrate"
@@ -312,20 +283,21 @@ function AutomationCards({ auto, st, roomTemp, lo, hi }) {
         value={fmt(tmax, 0, ' °C')}
         subtitle={[others.length ? 'weitere Boards ' + others.join(' / ') : null,
           st.t != null ? 'Regelwert ' + fmt(st.t, 0, ' °C') : null, tendency ? 'Tendenz ' + tendency : null,
-          'Ziel ' + lo + '–' + hi + ' °C'].filter(Boolean).join(' · ')} />
+          'Zieltemperatur ' + lo + '–' + hi + ' °C'].filter(Boolean).join(' · ')} />
       <MetricCard variant="hero" layout="icon-left" icon={Gauge} label="Takt laut Miner"
         value={fmt(st.clock_now, 0, ' MHz')}
-        subtitle={'gesetzt ' + setText + (st.mode_key ? ' · ' + (MODE_LABEL[st.mode_key] || st.mode_key) : '') +
+        subtitle={'gesetzt ' + fmt(st.clock_set, 0, ' MHz') + (st.mode_key ? ' · ' + (MODE_LABEL[st.mode_key] || st.mode_key) : '') +
           ' · Standard ' + fmt(st.stock_mhz, 0, ' MHz')} />
       <MetricCard variant="hero" layout="icon-left" icon={Fan} label="Lüfter läuft auf"
-        tone={st.phase === 'korrektur' ? 'warning' : 'default'}
+        tone={st.phase === 'kuehlmodus' ? 'warning' : 'default'}
         value={st.phase === 'wartung' ? 'Aus' : running == null ? '—' : 'Stufe ' + running}
         subtitle={[st.phase === 'wartung' ? 'Wartung · danach wieder Stufe ' + (auto.maintenance?.fan_before ?? base)
-          : fanSub, roomTemp != null ? 'Raum ' + fmt(roomTemp, 1, ' °C') : null].filter(Boolean).join(' · ')} />
+          : fanSub, roomTemp != null ? 'Raum ' + fmt(roomTemp, 1, ' °C') : null,
+          fanRpmText ? 'Fan speed ' + fanRpmText : null].filter(Boolean).join(' · ')} />
       {/* Neustart (Knopf oder nicht erreichbar während der Startpause): kein Fehler, sondern ein erwarteter Zustand */}
       <MetricCard variant="hero" layout="icon-left" icon={Activity} label="Status"
-        tone={st.phase === 'normal' && !restarting ? 'default' : 'warning'}
-        value={restarting ? 'Neustart' : pulse ? 'Lüfterstoß ' + pulse.n + '/2' : heating ? 'Heizmodus' : phase.value}
+        tone={CALM_PHASES.has(st.phase) && !restarting ? 'default' : 'warning'}
+        value={restarting ? 'Neustart' : phase.value}
         subtitle={restarting ? 'A15 startet neu' + (st.restart_req ? ' · gesendet ' + clockTime(st.restart_req) : '')
           : statusSub} />
     </div>
@@ -333,18 +305,21 @@ function AutomationCards({ auto, st, roomTemp, lo, hi }) {
 }
 
 // what the automation and the user did (protocol); the noisy kinds (learning period, stability check) only on the
-// Protokoll page
-const RECENT_KINDS = ['takt', 'modus', 'luefter', 'hohe_temperatur', 'rueckkehr', 'ausnahme', 'ausnahme_ende', 'lernwert',
+// Protokoll page; kinds no longer written since v2.2.7 stay so that old entries still show here
+const RECENT_KINDS = ['takt', 'modus', 'luefter', 'heizmodus', 'heizmodus_ende', 'kuehlmodus', 'kuehlmodus_ende',
+  'hohe_temperatur', 'rueckkehr', 'ausnahme', 'ausnahme_ende', 'lernwert',
   'start', 'neustart', 'over_hot', 'miner_offline', 'miner_online', 'firmware_takt', 'messung_start',
   'messung_ende', 'fehler', 'basisstufe', 'automatik_ein', 'automatik_aus', 'wartung_start', 'wartung_ende',
   'test_start', 'test_stufe', 'test_ziel', 'test_schritt', 'test_messung', 'test_ende', 'neustart_nutzer', 'taktsperre',
   'taktsperre_ende', 'startpause', 'startpause_ende', 'neustart_offline', 'neustart_online',
-  'einstellungsseite_aus', 'einstellungsseite_an', 'modus_wartet', 'heizmodus', 'heizmodus_ende', 'zielbereich',
+  'einstellungsseite_aus', 'einstellungsseite_an', 'modus_wartet', 'zielbereich',
   'luefterstoss', 'luefterstoss_ende', 'obergrenze', 'ertrag', 'neustart_auto', 'obergrenzen_loeschen']
 const RECENT_COUNT = 20
 const RECENT_REFRESH_MS = 10000
 const RECENT_LABEL = { takt: 'Takt', modus: 'Modus', luefter: 'Lüfter', start: 'Start' }
-const FAN_KINDS = new Set(['luefter', 'hohe_temperatur', 'rueckkehr', 'ausnahme', 'ausnahme_ende', 'luefterstoss'])
+// fan entries (amber, with the fan change): the fan modes of v2.2.7 and the old fan kinds
+const FAN_KINDS = new Set(['luefter', 'heizmodus', 'heizmodus_ende', 'kuehlmodus', 'kuehlmodus_ende', 'hohe_temperatur',
+  'rueckkehr', 'ausnahme', 'ausnahme_ende', 'luefterstoss'])
 const USER_KINDS = new Set(['basisstufe', 'automatik_ein', 'automatik_aus', 'wartung_start', 'wartung_ende',
   'zielbereich', 'obergrenzen_loeschen'])
 
@@ -456,61 +431,7 @@ function RecentEvents() {
   )
 }
 
-// Temperatur-Test (Nutzer 25.10., v2.0.6): the data-service runs the steps, the page starts and aborts it
-const TEST_QUESTION = 'Takt ab Lernwert zweimal +30 MHz, je 2 min warten und 20 min messen, danach Normalbetrieb. ' +
-  'Abbruch ab 96 °C.'
-
-// where the test is: Beginn (learned value, waits for ≤ lo+1 °C), then per step: clock being set, 2 min, measuring
-function testText(test, lo) {
-  if (test.step === 0) return 'Beginn: wartet auf ≤ ' + (lo + 1) + ' °C'
-  const head = 'Schritt ' + test.step + '/' + (test.steps || 2) + ' · ' + test.clock + ' MHz · '
-  if (test.phase === 'warten') return head + 'wartet 2 min'
-  if (test.phase === 'messen') return head + 'misst bis ' + (test.measure_ends ? clockTime(test.measure_ends) : '—')
-  return head + 'Takt wird eingestellt'
-}
-
-function TempTest({ auto, st, onCommand, busy, msg, lo }) {
-  const [confirm, setConfirm] = useState(false)
-  const test = st.test
-  if (test || auto.temp_test_at) {
-    return (
-      <div className="flex flex-wrap items-center gap-2 rounded-md border border-amber-500/60 bg-amber-500/10 p-2">
-        <p className="w-full text-sm font-medium text-amber-600 sm:w-auto sm:flex-1">
-          {test ? 'Temperatur-Test läuft: ' + testText(test, lo) : 'Temperatur-Test startet …'}
-        </p>
-        <Button size="sm" variant="outline" className="h-9 w-full sm:h-8 sm:w-auto" disabled={busy}
-          onClick={() => onCommand({ action: 'temp_test_abort' })}>
-          Test abbrechen
-        </Button>
-      </div>
-    )
-  }
-  return (
-    <div className="flex flex-wrap items-center gap-2">
-      {confirm ? (
-        <>
-          <span className="basis-full self-center sm:basis-auto">{TEST_QUESTION}</span>
-          <Button size="sm" className="h-9 flex-1 sm:h-8 sm:flex-none" disabled={busy}
-            onClick={() => { setConfirm(false); onCommand({ action: 'temp_test_start' }) }}>
-            Ja
-          </Button>
-          <Button size="sm" variant="secondary" className="h-9 flex-1 sm:h-8 sm:flex-none"
-            onClick={() => setConfirm(false)}>
-            Nein
-          </Button>
-        </>
-      ) : (
-        <Button size="sm" variant="outline" className="h-9 w-full sm:h-8 sm:w-auto" disabled={busy}
-          onClick={() => setConfirm(true)}>
-          Temperatur-Test starten
-        </Button>
-      )}
-      {msg && msg.tone !== 'ok' && <span className="basis-full text-destructive">{msg.text}</span>}
-    </div>
-  )
-}
-
-function AutomationPanel({ auto, here, port, level, locked, onCommand, busy, msg, roomTemp }) {
+function AutomationPanel({ auto, here, port, level, locked, onCommand, busy, roomTemp }) {
   const [confirmOff, setConfirmOff] = useState(false)
   const [confirmRestart, setConfirmRestart] = useState(false)
   const [restart, setRestart] = useState({ busy: false, msg: null })
@@ -538,13 +459,6 @@ function AutomationPanel({ auto, here, port, level, locked, onCommand, busy, msg
           {busy && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
           Einschalten (Port {port}, Basisstufe {level})
         </Button>
-        {/* Obergrenzen auch bei Automatik aus (Nutzer 28.10.): Tabelle mit der Spalte und der Knopf zum Löschen */}
-        {hasCaps(st.caps) && (
-          <div className="space-y-1.5 text-xs">
-            <LearnedTable learned={auto.learned} caps={st.caps} zb={st.zb} level={auto.level} lo={lo} hi={hi} />
-            <ClearCaps caps={st.caps} onCommand={onCommand} busy={busy} />
-          </div>
-        )}
       </div>
     )
   }
@@ -618,10 +532,8 @@ function AutomationPanel({ auto, here, port, level, locked, onCommand, busy, msg
           auf die Stufe von vorher.
         </p>
       )}
-      <TempTest auto={auto} st={st} onCommand={onCommand} busy={busy} msg={msg} lo={lo} />
       <AutomationCards auto={auto} st={st} roomTemp={roomTemp} lo={lo} hi={hi} />
-      <LearnedTable learned={auto.learned} caps={st.caps} zb={st.zb} level={auto.level} lo={lo} hi={hi} />
-      <ClearCaps caps={st.caps} onCommand={onCommand} busy={busy} />
+      <LearnedTable learned={auto.learned} zb={st.zb} level={auto.level} lo={lo} hi={hi} />
       {st.ac_error && <p className="text-amber-600">AC Infinity: {st.ac_error}</p>}
       {st.last_error && <p className="text-destructive">Fehler: {st.last_error}</p>}
       <RecentEvents />
@@ -801,7 +713,7 @@ function Controller({ dev, backups, automation, onReload }) {
         </div>
 
         <AutomationPanel auto={auto} here={autoHere} port={port} level={enableLevel} locked={locked}
-          busy={busy === 'auto'} onCommand={autoCommand} msg={msg} roomTemp={dev.temperature_c} />
+          busy={busy === 'auto'} onCommand={autoCommand} roomTemp={dev.temperature_c} />
 
         <div className="space-y-2 rounded-md border border-border/80 p-3">
           <div className="flex flex-wrap items-center gap-1.5 text-xs">
@@ -831,12 +743,6 @@ function Controller({ dev, backups, automation, onReload }) {
           </div>
           {own.length === 0 && (
             <p className="text-xs text-muted-foreground">Erst eine Sicherung erstellen, dann sind die Buttons frei.</p>
-          )}
-          {autoHere && auto.state?.phase === 'messung' && (
-            <p className="text-xs text-amber-600">
-              Takt-Messung läuft: Die Taktregelung pausiert, der Lüfter reagiert nur ab 85 °C (jetzt Stufe{' '}
-              {auto.state.fan_set ?? '—'}). Markiert ist die Basisstufe {auto.level}.
-            </p>
           )}
           {busy && busy !== 'backup' && busy !== 'restore' && (
             <p className="text-xs text-muted-foreground">Befehl gesendet, warte 5 s und lese die Stufe neu …</p>

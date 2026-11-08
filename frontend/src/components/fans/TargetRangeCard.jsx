@@ -1,6 +1,7 @@
 /**
- * Zielbereich der Temperatur-Automatik (Nutzer 27.10., Variante D „Skala antippen“): erst ein Ende, dann das andere
- * Ende antippen, „Übernehmen“ speichert; der data-service übernimmt den Bereich in seiner nächsten Runde.
+ * Zieltemperatur der Temperatur-Automatik (Nutzer 27.10., Variante D „Skala antippen“; bis v2.2.6 „Zielbereich“):
+ * erst ein Ende, dann das andere Ende antippen, „Übernehmen“ speichert; der data-service übernimmt die
+ * Zieltemperatur (ZTU–ZTO) in seiner nächsten Runde. Erlaubt 77–87 °C, 4 bis 5 Grad (Nutzer 06.11.).
  */
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -9,32 +10,35 @@ import { useLive } from '@/lib/LiveContext'
 import { Loader2, Target } from 'lucide-react'
 import { useEffect, useState } from 'react'
 
-const MIN = 76
-const MAX = 92
-const WIDTH_MIN = 2   // Grad, beide Grenzen mitgezählt: 82–83 = 2 Grad, 82–85 = 4 Grad
-const WIDTH_MAX = 4
+const MIN = 77
+const MAX = 87
+const WIDTH_MIN = 4   // Grad, beide Grenzen mitgezählt: 81–84 = 4 Grad, 81–85 = 5 Grad (Nutzer 06.11.)
+const WIDTH_MAX = 5
 const DEGREES = Array.from({ length: MAX - MIN + 1 }, (_, i) => MIN + i)
 
 const width = (lo, hi) => hi - lo + 1
 
-/** The stored range [L, U] of the automation (fixed 79–84 °C before 27.10.). */
+/** The stored Zieltemperatur [ZTU, ZTO] of the automation (fixed 79–84 °C before 27.10.). */
 export function targetOf(auto) {
   const lo = auto?.target_low
   const hi = auto?.target_high
   return Number.isInteger(lo) && Number.isInteger(hi) ? [lo, hi] : [79, 84]
 }
 
-// second tap: the range between both taps; wider than 4 Grad: cut to 4 from the first tap; one tile: 2 Grad
+// second tap: the range between both taps; wider than 5 Grad: cut to 5 from the first tap; narrower than 4 Grad:
+// extended to 4 upwards, shifted down at the top edge (Nutzer 06.11.)
 function pick(first, t) {
   let lo = Math.min(first, t)
   let hi = Math.max(first, t)
   if (width(lo, hi) > WIDTH_MAX) {
-    ;[lo, hi] = first <= t ? [first, first + WIDTH_MAX - 1] : [first - WIDTH_MAX + 1, first]
-    return [lo, hi, 'Höchstens 4 Grad – gekürzt auf ' + lo + '–' + hi + ' °C.']
+    lo = first <= t ? first : first - WIDTH_MAX + 1
+    hi = lo + WIDTH_MAX - 1
+    return [lo, hi, 'Höchstens ' + WIDTH_MAX + ' Grad – gekürzt auf ' + lo + '–' + hi + ' °C.']
   }
   if (width(lo, hi) < WIDTH_MIN) {
-    ;[lo, hi] = lo < MAX ? [lo, lo + 1] : [lo - 1, lo]
-    return [lo, hi, 'Mindestens 2 Grad – ergänzt auf ' + lo + '–' + hi + ' °C.']
+    hi = Math.min(lo + WIDTH_MIN - 1, MAX)
+    lo = hi - WIDTH_MIN + 1
+    return [lo, hi, 'Mindestens ' + WIDTH_MIN + ' Grad – ergänzt auf ' + lo + '–' + hi + ' °C.']
   }
   return [lo, hi, null]
 }
@@ -53,7 +57,7 @@ export default function TargetRangeCard({ automation, onReload }) {
   const [error, setError] = useState(null)
   const [selLo, selHi] = sel || [lo, hi]
   const changed = selLo !== lo || selHi !== hi
-  // the data-service has not yet taken over the stored range (state.zb)
+  // the data-service has not yet taken over the stored Zieltemperatur (state.zb)
   const zb = auto?.state?.zb
   const taking = auto?.enabled && !(Array.isArray(zb) && zb[0] === lo && zb[1] === hi)
 
@@ -81,7 +85,7 @@ export default function TargetRangeCard({ automation, onReload }) {
       onReload()
       live.refresh()
     } catch (err) {
-      setError(err?.response?.data?.error || 'Zielbereich nicht gespeichert.')
+      setError(err?.response?.data?.error || 'Zieltemperatur nicht gespeichert.')
     } finally {
       setBusy(false)
     }
@@ -92,11 +96,11 @@ export default function TargetRangeCard({ automation, onReload }) {
       <CardHeader className="pb-2">
         <CardTitle className="flex items-center gap-2 text-base font-semibold">
           <Target className="h-4 w-4 text-muted-foreground" />
-          Zielbereich
+          Zieltemperatur
         </CardTitle>
         <CardDescription className="text-xs">
-          Bereich, in dem der Takt den heißesten Chip der A15 hält. Erst ein Ende, dann das andere Ende antippen.
-          Erlaubt 76–92 °C, 2 bis 4 Grad (beide Grenzen mitgezählt).
+          Bereich, in dem der Takt den heißesten Chip der A15 hält (ZTU bis ZTO). Erst ein Ende, dann das andere Ende
+          antippen. Erlaubt 77–87 °C, 4 bis 5 Grad (beide Grenzen mitgezählt).
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-2 pt-0 text-xs">
@@ -107,7 +111,8 @@ export default function TargetRangeCard({ automation, onReload }) {
           </p>
           {taking && <span className="text-amber-600">wird übernommen</span>}
         </div>
-        <div className="grid grid-cols-9 gap-1 sm:grid-cols-[repeat(17,minmax(0,1fr))]">
+        {/* 11 tiles in one row on all widths (Nutzer 06.11.) */}
+        <div className="grid grid-cols-11 gap-1">
           {DEGREES.map((t) => {
             const inside = first === null && t >= selLo && t <= selHi
             return (

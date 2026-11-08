@@ -194,7 +194,7 @@ function ModeSwitch({ deviceId, state, ip, onChanged }) {
               type="button"
               size="sm"
               variant={current ? 'default' : 'secondary'}
-              disabled={busy || current || state.calibration_active}
+              disabled={busy || current}
               onClick={() => change(opt)}
             >
               {opt.label}
@@ -273,9 +273,6 @@ export default function ThrottleCard({ deviceId, throttle, ip }) {
       </CardHeader>
       <CardContent className="space-y-2 pt-0">
         {state.stale && <p className="text-xs text-destructive">{staleText(state)}</p>}
-        {!a15 && state.calibration_active && !state.calibration_paused && (
-          <p className="text-xs text-amber-600">Takt-Messung läuft – Drosseln ist gesperrt (Menü „Takt-Tabellen“).</p>
-        )}
         {lifted && !active && (
           <p className="text-xs text-amber-600">
             Drosselung auf{' '}
@@ -299,8 +296,7 @@ export default function ThrottleCard({ deviceId, throttle, ip }) {
               onChange={(e) => setTarget(e.target.value)}
             />
             <span className="text-sm text-muted-foreground">TH/s</span>
-            <Button type="submit" size="sm"
-              disabled={busy || !inRange || !max || (state.calibration_active && !state.calibration_paused)}>
+            <Button type="submit" size="sm" disabled={busy || !inRange || !max}>
               {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Setzen'}
             </Button>
             <Button

@@ -159,7 +159,6 @@ function PresetOrCustom({
 export default function DeviceControls({ make, deviceId, device }) {
   const online = isDeviceOnline(device)
   const [caps, setCaps] = useState(null)
-  const [calibrationActive, setCalibrationActive] = useState(false)
   const [loadingCaps, setLoadingCaps] = useState(true)
   const [busy, setBusy] = useState(null)
 
@@ -183,7 +182,6 @@ export default function DeviceControls({ make, deviceId, device }) {
         const res = await api.get(`/api/devices/${make}/${deviceId}/capabilities/`)
         if (!cancelled) {
           setCaps(res.data?.capabilities || {})
-          setCalibrationActive(!!res.data?.calibration_active)
         }
       } catch (err) {
         console.error(err)
@@ -229,7 +227,7 @@ export default function DeviceControls({ make, deviceId, device }) {
     }
   }, [device, fanMin])
 
-  const disabled = !online || !!busy || calibrationActive
+  const disabled = !online || !!busy
 
   async function runControl(action, params = {}) {
     setBusy(action)
@@ -297,15 +295,6 @@ export default function DeviceControls({ make, deviceId, device }) {
           role="status"
         >
           Device offline — controls stay disabled until the next successful poll.
-        </div>
-      )}
-
-      {calibrationActive && (
-        <div
-          className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-700 dark:text-amber-300"
-          role="status"
-        >
-          Takt-Messung läuft – die Steuerung ist bis zum Ende der Messung gesperrt (Menü „Takt-Tabellen“).
         </div>
       )}
 

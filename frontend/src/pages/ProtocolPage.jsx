@@ -36,7 +36,11 @@ const CYCLES_REFRESH_MS = 30000
 const HOUR_MS = 3600 * 1000
 const HISTORY_MAX_DAYS = 7    // Verlauf „frei“: longer ranges would load and draw far too many points
 
+// states of the regulation since v2.2.7 (heizmodus, basismodus, kuehlmodus); the older ones stay for old entries
 const PHASE_LABEL = {
+  heizmodus: 'Heizmodus',
+  basismodus: 'Basismodus',
+  kuehlmodus: 'Kühlmodus',
   normal: 'Normalbetrieb',
   korrektur: 'Korrekturphase',
   ausnahme: 'Ausnahme (Lüfter reduziert)',
@@ -46,14 +50,17 @@ const PHASE_LABEL = {
   start: 'Start',
   warten: 'Warten',
 }
-// background of the Verlauf per state; Normalbetrieb has none
+// background of the Verlauf per state; Basismodus and the old Normalbetrieb have none
 const PHASE_FILL = {
+  heizmodus: '#f97316',
+  kuehlmodus: '#2563eb',
   korrektur: '#f59e0b',
   ausnahme: '#0ea5e9',
   messung: '#8b5cf6',
   wartung: '#64748b',
 }
 const PHASE_FILL_OTHER = '#a3a3a3'
+const NO_FILL = new Set(['basismodus', 'normal'])
 
 const SOURCE_LABEL = { regelung: 'Regelung', nutzer: 'Nutzer' }
 const TARGET_LABEL = { 'miner-takt': 'Miner (Takt)', 'miner-modus': 'Miner (Modus)', lueftersteuerung: 'Lüftersteuerung' }
@@ -413,7 +420,7 @@ const DETAILS = {
   pruefung: ['Prüfung', (v) => CHECK_TEXT[v] || v],
   dauer_s: ['Dauer', (v) => fmt(v, 0, ' s')],
   berechnet: ['berechnet', mhzText],
-  alt: ['vorher'],     // Zielbereich (Nutzer 27.10.)
+  alt: ['vorher'],     // Zieltemperatur (Nutzer 27.10.)
   neu: ['neu'],
 }
 
@@ -766,7 +773,7 @@ function buildSeries(data) {
     if (last && last.phase === p.phase && last.x2 === p.ts) last.x2 = end
     else areas.push({ phase: p.phase, x1: p.ts, x2: end })
   })
-  return { points, events, areas: areas.filter((a) => a.phase && a.phase !== 'normal' && a.x2 > a.x1) }
+  return { points, events, areas: areas.filter((a) => a.phase && !NO_FILL.has(a.phase) && a.x2 > a.x1) }
 }
 
 function timeAxis(spanMs) {

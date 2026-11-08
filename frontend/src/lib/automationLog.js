@@ -2,14 +2,16 @@
  * Gemeinsame Texte und Formate für das Protokoll der Temperatur-Automatik (Seite „Protokoll“ und die Liste der
  * letzten Ereignisse auf der Lüfter-Seite).
  */
-// every kind of automation_log in plain German (fixed list of the contract)
+// every kind of automation_log in plain German (fixed list of the contract); kinds no longer written since v2.2.7
+// (Obergrenze, Ertrags-Prüfung, Lüfterstöße, Korrekturphase, Ausnahme, Stabilitätsprüfung, Taktsperre, Takt-Messung,
+// Temperatur-Test) stay so that old entries keep their label and filter
 export const KIND_LABEL = {
   basisstufe: 'Basisstufe gewählt',
   automatik_ein: 'Automatik ein',
   automatik_aus: 'Automatik aus',
   wartung_start: 'Wartung gestartet',
   wartung_ende: 'Wartung beendet',
-  zielbereich: 'Zielbereich',
+  zielbereich: 'Zieltemperatur',
   obergrenzen_loeschen: 'Obergrenzen gelöscht',
   start: 'Start (Starttakt)',
   takt: 'Taktbefehl',
@@ -42,6 +44,8 @@ export const KIND_LABEL = {
   modus_wartet: 'Moduswechsel wartet',
   heizmodus: 'Heizmodus',
   heizmodus_ende: 'Heizmodus beendet',
+  kuehlmodus: 'Kühlmodus',
+  kuehlmodus_ende: 'Kühlmodus beendet',
   over_hot: 'Over Hot',
   miner_offline: 'Miner antwortet nicht',
   miner_online: 'Miner antwortet wieder',

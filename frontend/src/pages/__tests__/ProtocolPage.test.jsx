@@ -214,6 +214,55 @@ describe('ProtocolPage', () => {
     expect(screen.getByText('Korrekturphase')).toBeInTheDocument()
   })
 
+  it('shows the fan modes of v2.2.7 in the Verlauf; the Basismodus has no background (like Normalbetrieb)', async () => {
+    const user = userEvent.setup()
+    const status = api.get.getMockImplementation()
+    const point = (t, phase) => ({ t, chip_temp: 80, clock_set: 300, clock_reported: 300, fan_level: 3, base_level: 3,
+      phase })
+    api.get.mockImplementation((url, config) => (url === '/api/automation/cycles/'
+      ? Promise.resolve({
+        data: {
+          bucket_s: 5,
+          points: [point('2026-11-06T10:00:00Z', 'heizmodus'), point('2026-11-06T10:00:05Z', 'basismodus'),
+            point('2026-11-06T10:00:10Z', 'basismodus'), point('2026-11-06T10:00:15Z', 'kuehlmodus'),
+            point('2026-11-06T10:00:20Z', 'kuehlmodus')],
+          events: [],
+        },
+      })
+      : status(url, config)))
+    render(<ProtocolPage />)
+    await user.click(screen.getByRole('tab', { name: 'Verlauf' }))
+    const legend = (await screen.findByText('Hintergrund:')).closest('p')
+    expect(within(legend).getByText('Heizmodus')).toBeInTheDocument()
+    expect(within(legend).getByText('Kühlmodus')).toBeInTheDocument()
+    expect(within(legend).queryByText('Basismodus')).not.toBeInTheDocument()
+  })
+
+  it('labels the new kinds and keeps the old ones for old entries', async () => {
+    const user = userEvent.setup()
+    const status = api.get.getMockImplementation()
+    const cool = { ...fanError, id: 5, kind: 'kuehlmodus', phase: 'basismodus', ok: null, error: '', fan_old: 3,
+      fan_new: 4, trigger: 'Chiptemperatur 88 °C (ZTO +3): Lüfter Basisstufe +1' }
+    api.get.mockImplementation((url, config) => {
+      if (url === '/api/automation/log/') {
+        return Promise.resolve({ data: { count: 1, page: 1, pages: 1, results: [cool] } })
+      }
+      if (url === '/api/automation/log/5/') return Promise.resolve({ data: cool })
+      return status(url, config)
+    })
+    render(<ProtocolPage />)
+    expect((await screen.findAllByText('Kühlmodus')).length).toBeGreaterThan(0)
+    await user.click(screen.getByText(/^Art:/))
+    for (const label of ['Kühlmodus', 'Kühlmodus beendet', 'Heizmodus', 'Heizmodus beendet', 'Zieltemperatur',
+      'Obergrenze', 'Ertrags-Prüfung', 'Lüfterstoß', 'Takt-Messung beginnt', 'Temperatur-Test gestartet']) {
+      expect(screen.getByRole('checkbox', { name: label })).toBeInTheDocument()
+    }
+    expect(screen.queryByRole('checkbox', { name: 'Zielbereich' })).not.toBeInTheDocument()
+    // the state before the entry in plain German
+    await user.click(screen.getAllByText('Chiptemperatur 88 °C (ZTO +3): Lüfter Basisstufe +1')[0])
+    expect(await screen.findByText('Basismodus')).toBeInTheDocument()
+  })
+
   it('loads no history over more than 7 days', async () => {
     const user = userEvent.setup()
     render(<ProtocolPage />)

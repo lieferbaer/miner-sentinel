@@ -1,9 +1,10 @@
 """Temperatur-Automatik: settings via /api/fans/automation/, user events in the protocol, locks for manual fan
-buttons; the Drosselung of the A15 is abolished."""
+buttons; the Drosselung of the A15 is abolished; Takt-Messung, Temperatur-Test and Obergrenzen are removed (v2.2.7)."""
 from unittest.mock import patch
 
 import pytest
 from api import acinfinity as ac
+from api.fan_views import STATE_KEYS
 from api.models import AutomationLog, Device, FanAutomation
 from django.contrib.auth.models import User
 from django.utils import timezone
@@ -69,27 +70,31 @@ def test_manual_fan_buttons_locked_and_no_manual_clock(client, a15, backup):
     assert res.status_code == 400 and not cmd.called       # the Drosselung of the A15 is abolished
 
 
-def test_run_start_needs_fan_and_switches_automation_on(client, a15, backup):
-    res = client.post('/api/devices/%d/calibration/' % a15.id, {'action': 'start_step', 'mode': '2/L4'},
-                      format='json')
-    assert res.status_code == 409                               # fan never set up
-    FanAutomation.objects.create(device=a15, ac_dev_id='dev1', ac_port=1, level=5, enabled=False)
-    res = client.post('/api/devices/%d/calibration/' % a15.id, {'action': 'start_step', 'mode': '2/L4'},
-                      format='json')
-    assert res.status_code == 200
-    assert FanAutomation.objects.get(device=a15).enabled is True
-
-
-def test_resume_lifts_old_manual_clock(client, a15, backup):
+def test_takt_messung_removed(client, a15, backup):
+    """Takt-Messung removed (v2.2.7, Nutzer 06.11.): no calibration endpoint; old runs stay in the table but lock
+    nothing (mode switch, Zieltemperatur) and are not touched by Wartung."""
     from api.models import CalibrationRun
-    FanAutomation.objects.create(device=a15, ac_dev_id='dev1', ac_port=1, level=5, enabled=True)
-    CalibrationRun.objects.create(device=a15, kind='step', modes=['2/L4'], status='paused', state={})
-    res = client.post('/api/devices/%d/calibration/' % a15.id, {'action': 'resume'}, format='json')
-    assert res.status_code == 200
-    assert Device.objects.get(pk=a15.pk).connection_config['throttle']['active'] is None
+    FanAutomation.objects.create(device=a15, ac_dev_id='dev1', ac_port=1, level=5, enabled=False)
+    run = CalibrationRun.objects.create(device=a15, kind='step', modes=['2/L4'], status='running', state={})
+    cal_url = '/api/devices/%d/calibration/' % a15.id
+    assert client.get(cal_url).status_code == 404
+    for body in ({'action': 'start_step', 'mode': '2/L4'}, {'action': 'resume'}, {'action': 'cancel'}):
+        assert client.post(cal_url, body, format='json').status_code == 404
+    assert FanAutomation.objects.get(device=a15).enabled is False            # not switched on by a run any more
+    with patch('api.views._a15_set_level', return_value=True) as set_level:
+        res = client.post('/api/devices/%d/workmode/' % a15.id, {'mode': 3}, format='json')
+    assert res.status_code == 200 and set_level.called                     # no lock „Takt-Messung läuft“
+    url = '/api/fans/automation/'
+    assert client.post(url, {'action': 'target', 'low': 80, 'high': 84}, format='json').status_code == 200
+    client.post(url, {'action': 'enable', 'dev_id': 'dev1', 'port': 1, 'level': 2}, format='json')
+    assert client.post(url, {'action': 'maintenance_start'}, format='json').status_code == 200
+    run.refresh_from_db()
+    assert (run.status, run.pause_reason) == ('running', '')                # Wartung no longer pauses a run
+    assert 'calibration' not in client.get('/api/live/').data
 
 
-def test_set_clock_is_the_latest_setter(client, a15):
+def test_set_clock_of_the_automation(client, a15):
+    """The A15 card shows the clock of the Temperatur-Automatik; a run of the former Takt-Messung counts no more."""
     from api.models import CalibrationRun
     from api.views import DeviceViewSet
     auto = FanAutomation.objects.create(device=a15, ac_dev_id='dev1', ac_port=1, level=3, enabled=True,
@@ -100,27 +105,28 @@ def test_set_clock_is_the_latest_setter(client, a15):
     assert view._last_set_clock(a15, auto) == (220, 'Automatik')
     auto.state = {'clock_set': 220, 'changed_at': '2026-10-21T00:30:00+00:00'}   # old regulation: not used
     assert view._last_set_clock(a15, auto) == (None, None)
+    auto.state = {'clock_set': None, 'clock_changed_at': '2026-10-21T00:30:00+00:00'}
+    assert view._last_set_clock(a15, auto) == (None, None)
+    assert view._last_set_clock(a15, None) == (None, None)
     auto.state = {'clock_set': 220, 'clock_changed_at': '2026-10-21T00:30:00+00:00'}
-    CalibrationRun.objects.create(device=a15, kind='step', modes=['2/L4'], status='running', state={
+    run = CalibrationRun.objects.create(device=a15, kind='step', modes=['2/L4'], status='running', state={
         'phase': 'measure', 'set_points': [150, 160, 170], 'changed_at': '2026-10-21T01:20:00+00:00'})
-    assert view._last_set_clock(a15, auto) == (160.0, 'Takt-Messung')     # the run set later
-    auto.state = {'clock_set': 230, 'clock_changed_at': '2026-10-21T01:30:00+00:00'}
-    assert view._last_set_clock(a15, auto) == (230, 'Automatik')
-    auto.state = {'clock_set': 220, 'clock_changed_at': '2026-10-21T00:30:00+00:00'}
-    run = CalibrationRun.objects.get(device=a15)
+    assert view._last_set_clock(a15, auto) == (220, 'Automatik')            # a later run: not used
     run.status, run.finished_at = 'done', timezone.now()
     run.save()
-    assert view._last_set_clock(a15, auto) == (None, None)                 # run ended later: firmware clocks
+    assert view._last_set_clock(a15, auto) == (220, 'Automatik')
+    a15.connection_config['throttle']['last_seen'] = {'points': [220, 220, 220], 'mode_key': '2/L4'}
+    a15.save()
+    data = client.get('/api/devices/%d/throttle/' % a15.id).data
+    assert (data['set_mhz'], data['set_by'], data['automation_active']) == (220, 'Automatik', True)
+    assert 'calibration_active' not in data and 'calibration_paused' not in data
 
 
-def test_maintenance_start_pauses_run_and_end(client, a15, backup):
-    from api.models import CalibrationRun
+def test_maintenance_start_and_end(client, a15, backup):
     client.post('/api/fans/automation/', {'action': 'enable', 'dev_id': 'dev1', 'port': 1, 'level': 2}, format='json')
-    run = CalibrationRun.objects.create(device=a15, kind='step', modes=['2/L4'], status='running', state={})
     res = client.post('/api/fans/automation/', {'action': 'maintenance_start'}, format='json')
     assert res.status_code == 200 and res.data['maintenance_at']
-    run.refresh_from_db()
-    assert run.status == 'paused' and run.pause_reason == 'wartung'
+    assert client.post('/api/fans/automation/', {'action': 'maintenance_start'}, format='json').status_code == 400
     assert client.get('/api/live/').data['automation']['maintenance_at']
     res = client.post('/api/fans/automation/', {'action': 'maintenance_end'}, format='json')
     assert res.data['maintenance_at'] is None
@@ -167,7 +173,7 @@ def test_user_events_in_protocol(client, a15, backup):
     url = '/api/fans/automation/'
     client.post(url, {'action': 'enable', 'dev_id': 'dev1', 'port': 1, 'level': 3}, format='json')
     auto = FanAutomation.objects.get(device=a15)
-    auto.state = {'v': 2, 'phase': 'normal', 't': 82, 'tendency': 1, 'seen_at': timezone.now().isoformat()}
+    auto.state = {'v': 2, 'phase': 'basismodus', 't': 82, 'tendency': 1, 'seen_at': timezone.now().isoformat()}
     auto.save()
     client.post(url, {'action': 'level', 'level': 4}, format='json')
     client.post(url, {'action': 'level', 'level': 4}, format='json')            # the same level again
@@ -183,7 +189,7 @@ def test_user_events_in_protocol(client, a15, backup):
     assert events[0].base_new == 3 and events[0].trigger == 'Nutzer: Automatik eingeschaltet (Basisstufe 3)'
     assert (events[1].base_old, events[1].base_new) == (3, 4)
     assert events[1].trigger == 'Nutzer: Basisstufe 4 gewählt'
-    assert (events[1].phase, events[1].chip_temp, events[1].tendency) == ('normal', 82.0, 1)
+    assert (events[1].phase, events[1].chip_temp, events[1].tendency) == ('basismodus', 82.0, 1)
     assert (events[2].base_old, events[2].base_new) == (4, 4)
 
 
@@ -210,147 +216,94 @@ def test_user_event_chip_temperature_only_when_current(client, a15, backup):
 
 
 def test_payload_state_of_the_new_regulation(client, a15, backup):
+    """State keys of v2.2.7 (Nutzer 06.11., SPEC 7): Heiz-/Basis-/Kühlmodus, locks of the clock increase, excursion
+    above ZTO; keys of the removed rules are not passed on."""
     client.post('/api/fans/automation/', {'action': 'enable', 'dev_id': 'dev1', 'port': 1, 'level': 3}, format='json')
     auto = FanAutomation.objects.get(device=a15)
+    locks = {'erhoehung': None, 'heizmodus': None, 'kuehlmodus': '2026-10-24T20:03:00+00:00',
+             'senkung': '2026-10-24T20:05:00+00:00'}
+    hot = {'band': 1, 'since': '2026-10-24T19:59:00+00:00', 'band_at': '2026-10-24T19:59:00+00:00',
+           'next_cut_at': '2026-10-24T20:01:00+00:00', 'dwell_s': 180, 'minus1': 10}
     auto.state = {
-        'v': 2, 'phase': 'korrektur', 't': 86, 'tendency': 1, 'boards': [86, 81, 78], 'clock_set': 250,
+        'v': 2, 'phase': 'kuehlmodus', 't': 88, 'tendency': 1, 'boards': [88, 81, 78], 'clock_set': 250,
         'clock_changed_at': '2026-10-24T20:00:00+00:00', 'clock_now': 251.5, 'mode_key': '2/L4', 'stock_mhz': 357.5,
         'fan_target': 4, 'fan_set': 4, 'fan_read': 4, 'fan_read_at': '2026-10-24T20:00:10+00:00',
-        'fan_set_at': '2026-10-24T20:00:00+00:00', 'window_until': '2026-10-24T20:00:30+00:00', 'window_active': True,
+        'fan_set_at': '2026-10-24T20:00:00+00:00', 'fan_changed_at': '2026-10-24T19:59:30+00:00',
         'pending': {'kind': 'takt', 'value': 250, 'sent_at': '2026-10-24T20:00:00+00:00', 'attempt': 2,
                     'points': [230, 250, 260, 270], 'log_id': 17, 'cmd': {'why': 'x'}},
-        'learn_since': None, 'cal': False, 'over_hot': None, 'offline': None, 'ac_error': None, 'last_error': None,
-        'seen_at': '2026-10-24T20:00:05+00:00', 'exc_active': False, 'queue': [], 'temps': [[1, 2]],
+        'learn_since': None, 'over_hot': None, 'offline': None, 'ac_error': None, 'last_error': None,
+        'seen_at': '2026-10-24T20:00:05+00:00', 'start_hold': None, 'restart_req': None,
+        'heat': None, 'cool': {'since': '2026-10-24T19:59:30+00:00', 'plus': 1}, 'locks': locks, 'hot': hot,
+        'cut_at': '2026-10-24T20:00:00+00:00', 'zb': [82, 85], 'queue': [], 'temps': [[1, 2]],
+        # keys of the removed rules (an old state until the data-service dropped them)
+        'window_until': '2026-10-24T20:00:30+00:00', 'window_active': True, 'cal': False, 'exc_active': False,
+        'calm': None, 'stoss': None, 'caps': {'3': 325}, 'test': {'started': '2026-10-24T18:00:00+00:00'},
         'learned': {'3': {'mhz': 240, 'temp_avg': 82.1, 'at': '2026-10-24T19:00:00+00:00', 'count': 2},
                     '2/L4': {'3': {'mhz': 231}}},
-        'log': [['2026-10-24T20:00:00+00:00', 'Korrekturphase']],
+        'log': [['2026-10-24T20:00:00+00:00', 'Kühlmodus +1']],
     }
+    auto.temp_test_at = timezone.now()                                         # old column: not shown
     auto.save()
     data = client.get('/api/fans/automation/').data
     st = data['state']
-    assert st['phase'] == 'korrektur' and st['t'] == 86 and st['clock_set'] == 250 and st['fan_target'] == 4
-    assert st['clock_changed_at'] and st['window_active'] is True and st['base'] == 3
+    assert st['phase'] == 'kuehlmodus' and st['t'] == 88 and st['clock_set'] == 250 and st['fan_target'] == 4
+    assert st['clock_changed_at'] and st['base'] == 3 and st['fan_changed_at'] == '2026-10-24T19:59:30+00:00'
+    assert st['heat'] is None and st['cool'] == {'since': '2026-10-24T19:59:30+00:00', 'plus': 1}
+    assert st['locks'] == locks and st['hot'] == hot and st['cut_at'] == '2026-10-24T20:00:00+00:00'
+    assert st['zb'] == [82, 85] and st['start_hold'] is None
     assert st['pending'] == {'kind': 'takt', 'value': 250, 'sent_at': '2026-10-24T20:00:00+00:00', 'attempt': 2}
-    assert 'queue' not in st and 'temps' not in st
+    assert set(st) == set(STATE_KEYS) | {'base', 'pending'}
+    for key in ('queue', 'temps', 'window_until', 'window_active', 'cal', 'exc_active', 'calm', 'stoss', 'caps',
+                'test'):
+        assert key not in st
+    assert 'temp_test_at' not in data
     assert data['learned'] == {'3': {'mhz': 240, 'temp_avg': 82.1, 'at': '2026-10-24T19:00:00+00:00', 'count': 2}}
-    assert data['log'] == [['2026-10-24T20:00:00+00:00', 'Korrekturphase']]
+    assert data['log'] == [['2026-10-24T20:00:00+00:00', 'Kühlmodus +1']]
+    assert client.get('/api/live/').data['automation']['state']['cool'] == {'since': '2026-10-24T19:59:30+00:00',
+                                                                             'plus': 1}
 
 
-def test_caps_in_payload_and_clear(client, a15, backup):
-    """Obergrenzen (Nutzer 28.10.): the payload shows the caps per fan stage; „Obergrenzen löschen“ only writes the
-    user event (the data-service clears the caps in its next round), with the automation on or off."""
-    url = '/api/fans/automation/'
-    client.post(url, {'action': 'enable', 'dev_id': 'dev1', 'port': 1, 'level': 3}, format='json')
-    auto = FanAutomation.objects.get(device=a15)
-    auto.state = {'v': 2, 'phase': 'normal', 't': 83, 'caps': {'3': 325, '5': 395}, 'caps_cleared_seen': 'x',
-                  'seen_at': timezone.now().isoformat()}
-    auto.save()
-    st = client.get(url).data['state']
-    assert st['caps'] == {'3': 325, '5': 395} and 'caps_cleared_seen' not in st
-    updated = FanAutomation.objects.get(device=a15).updated_at
-    res = client.post(url, {'action': 'caps_clear'}, format='json')
-    assert res.status_code == 200 and res.data['state']['caps'] == {'3': 325, '5': 395}   # until the data-service ran
-    auto = FanAutomation.objects.get(device=a15)
-    assert auto.updated_at == updated and auto.enabled and auto.state['caps'] == {'3': 325, '5': 395}
-    client.post(url, {'action': 'disable'}, format='json')
-    assert client.post(url, {'action': 'caps_clear'}, format='json').status_code == 200     # automation off: allowed
-    events = list(AutomationLog.objects.filter(kind='obergrenzen_loeschen').order_by('id'))
-    assert [(e.trigger, e.source, e.device_id, e.ok) for e in events] == [
-        ('Nutzer: Obergrenzen gelöscht', 'nutzer', a15.id, None)] * 2
-    assert (events[0].phase, events[0].chip_temp) == ('normal', 83.0)
+def test_state_keys_as_in_the_contract():
+    """SPEC v2.2.7 section 7: exactly these keys of fan_automation.state are passed to the web."""
+    assert STATE_KEYS == (
+        'phase', 't', 'tendency', 'boards', 'clock_set', 'clock_changed_at', 'clock_now', 'mode_key', 'stock_mhz',
+        'fan_target', 'fan_set', 'fan_read', 'fan_read_at', 'fan_set_at', 'fan_changed_at', 'learn_since',
+        'over_hot', 'offline', 'ac_error', 'last_error', 'seen_at', 'start_hold', 'restart_req', 'heat', 'cool',
+        'locks', 'hot', 'cut_at', 'zb')
 
 
-def test_caps_clear_without_a15(client):
-    assert client.post('/api/fans/automation/', {'action': 'caps_clear'}, format='json').status_code == 404
-    assert not AutomationLog.objects.exists()
-
-
-def test_temp_test_start_and_abort(client, a15, backup):
+@pytest.mark.parametrize('action', ['caps_clear', 'temp_test_start', 'temp_test_abort'])
+def test_removed_actions_refused(client, a15, backup, action):
+    """Obergrenzen and Temperatur-Test removed (v2.2.7, Nutzer 06.11.): their actions are refused like any unknown
+    action, change nothing and write no protocol entry."""
     url = '/api/fans/automation/'
     client.post(url, {'action': 'enable', 'dev_id': 'dev1', 'port': 1, 'level': 2}, format='json')
-    res = client.post(url, {'action': 'temp_test_start'}, format='json')
-    assert res.status_code == 200 and res.data['temp_test_at'] and res.data['state']['test'] is None
-    assert FanAutomation.objects.get(device=a15).temp_test_at
-    res = client.post(url, {'action': 'temp_test_start'}, format='json')
-    assert res.status_code == 409 and res.data['error'] == 'Ein Temperatur-Test läuft bereits.'
-    res = client.post(url, {'action': 'temp_test_abort'}, format='json')
-    assert res.status_code == 200 and res.data['temp_test_at'] is None
-    assert client.post(url, {'action': 'temp_test_abort'}, format='json').status_code == 200   # no test: no entry
-    events = list(AutomationLog.objects.filter(kind__startswith='test_').order_by('id'))
-    assert [(e.kind, e.trigger, e.source) for e in events] == [
-        ('test_start', 'Nutzer: Temperatur-Test gestartet', 'nutzer'),
-        ('test_ende', 'Nutzer: Temperatur-Test abgebrochen', 'nutzer')]
-    assert events[1].details == {'ergebnis': 'abgebrochen', 'grund': 'Nutzer'}
-
-
-def test_temp_test_start_refused(client, a15, backup):
-    from api.models import CalibrationRun
-    url = '/api/fans/automation/'
-    res = client.post(url, {'action': 'temp_test_start'}, format='json')
-    assert res.status_code == 409 and res.data['error'] == 'Temperatur-Test nur bei eingeschalteter Automatik.'
-    client.post(url, {'action': 'enable', 'dev_id': 'dev1', 'port': 1, 'level': 2}, format='json')
-    client.post(url, {'action': 'maintenance_start'}, format='json')
-    res = client.post(url, {'action': 'temp_test_start'}, format='json')
-    assert res.status_code == 409 and res.data['error'] == 'Während der Wartung ist kein Temperatur-Test möglich.'
-    client.post(url, {'action': 'maintenance_end'}, format='json')
-    run = CalibrationRun.objects.create(device=a15, kind='step', modes=['2/L4'], status='running', state={})
-    res = client.post(url, {'action': 'temp_test_start'}, format='json')
-    assert res.status_code == 409 and res.data['error'] == 'Während einer Takt-Messung ist kein Temperatur-Test möglich.'
-    run.status = 'paused'
-    run.save()
-    assert client.post(url, {'action': 'temp_test_start'}, format='json').status_code == 200
-    assert FanAutomation.objects.get(device=a15).temp_test_at
-    assert not AutomationLog.objects.filter(kind='test_ende').exists()
-
-
-@pytest.mark.parametrize('action, grund, kinds', [
-    ('disable', 'Automatik aus', ['automatik_aus', 'test_ende']),
-    ('maintenance_start', 'Wartung', ['wartung_start', 'test_ende']),
-])
-def test_disable_and_maintenance_end_the_test(client, a15, backup, action, grund, kinds):
-    url = '/api/fans/automation/'
-    client.post(url, {'action': 'enable', 'dev_id': 'dev1', 'port': 1, 'level': 2}, format='json')
-    client.post(url, {'action': 'temp_test_start'}, format='json')
-    start = AutomationLog.objects.get(kind='test_start').id
+    before = FanAutomation.objects.get(device=a15)
+    count = AutomationLog.objects.count()
     res = client.post(url, {'action': action}, format='json')
-    assert res.status_code == 200 and res.data['temp_test_at'] is None
-    assert FanAutomation.objects.get(device=a15).temp_test_at is None
-    events = list(AutomationLog.objects.filter(id__gt=start).order_by('id'))
-    assert [e.kind for e in events] == kinds
-    assert events[1].details == {'ergebnis': 'abgebrochen', 'grund': grund}
-    assert events[1].trigger == 'Nutzer: Temperatur-Test abgebrochen (%s)' % grund
+    assert res.status_code == 400 and res.data == {'error': 'Diese Aktion ist gerade nicht möglich.'}
+    auto = FanAutomation.objects.get(device=a15)
+    assert (auto.updated_at, auto.temp_test_at, auto.enabled) == (before.updated_at, None, True)
+    assert AutomationLog.objects.count() == count
 
 
-def test_level_keeps_the_test_the_data_service_ended(client, a15, backup):
+@pytest.mark.parametrize('action, body, kind', [
+    ('disable', {}, 'automatik_aus'),
+    ('maintenance_start', {}, 'wartung_start'),
+    ('target', {'low': 80, 'high': 84}, 'zielbereich'),
+])
+def test_actions_no_longer_end_a_test(client, a15, backup, action, body, kind):
+    """Automatik aus, Wartung and a new Zieltemperatur leave the unused column temp_test_at alone and write no
+    test_ende (Temperatur-Test removed, v2.2.7)."""
     url = '/api/fans/automation/'
     client.post(url, {'action': 'enable', 'dev_id': 'dev1', 'port': 1, 'level': 2}, format='json')
-    client.post(url, {'action': 'temp_test_start'}, format='json')
-    auto = FanAutomation.objects.get(device=a15)
-    FanAutomation.objects.filter(pk=auto.pk).update(temp_test_at=None)      # data-service: test over
-    with patch('api.fan_views._automation', return_value=(a15, auto)):     # loaded before that
-        client.post(url, {'action': 'level', 'level': 3}, format='json')
-    assert FanAutomation.objects.get(device=a15).temp_test_at is None
-
-
-def test_payload_temp_test(client, a15, backup):
-    url = '/api/fans/automation/'
-    client.post(url, {'action': 'enable', 'dev_id': 'dev1', 'port': 1, 'level': 2}, format='json')
-    test = {'started': '2026-10-25T18:00:00+00:00', 'stage': 2, 'delta': 4, 'band': [84, 88],
-            'stage_ends': '2026-10-25T20:00:00+00:00', 'ends': '2026-10-25T22:00:00+00:00'}
-    auto = FanAutomation.objects.get(device=a15)
-    auto.state = {'v': 2, 'phase': 'normal', 'test': test}
-    auto.save()
-    data = client.get(url).data
-    assert data['temp_test_at'] is None and data['state']['test'] is None    # no test set: state of an old one
-    client.post(url, {'action': 'temp_test_start'}, format='json')
-    data = client.get(url).data
-    assert data['temp_test_at'] and data['state']['test'] is None             # old test: not shown for the new one
-    auto.refresh_from_db()
-    test = dict(test, started=auto.temp_test_at.isoformat())                  # the data-service took the new test
-    auto.state = {'v': 2, 'phase': 'normal', 'test': test}
-    auto.save(update_fields=['state'])
-    assert client.get(url).data['state']['test'] == test
-    assert client.get('/api/live/').data['automation']['state']['test'] == test
+    old = timezone.now()
+    FanAutomation.objects.filter(device=a15).update(temp_test_at=old)          # left from before 06.11.
+    start = AutomationLog.objects.order_by('-id').first().id
+    res = client.post(url, dict(body, action=action), format='json')
+    assert res.status_code == 200 and 'temp_test_at' not in res.data
+    assert FanAutomation.objects.get(device=a15).temp_test_at == old
+    assert [e.kind for e in AutomationLog.objects.filter(id__gt=start).order_by('id')] == [kind]
 
 
 def test_restart_of_the_a15_is_logged(client, a15):
@@ -407,44 +360,48 @@ def test_restart_without_reply_counts_as_sent(client, a15):
 
 
 def test_target_range_stored_with_event(client, a15, backup):
-    """Zielbereich (Nutzer 27.10.): 76–92 °C, 2–4 Grad; stored, user event with old and new range, in the payload."""
+    """Zieltemperatur (Nutzer 06.11.): ZTU from 77, ZTO up to 87 °C, 4 to 5 Grad (both edges counted); stored, user
+    event with old and new range, in the payload."""
     url = '/api/fans/automation/'
     client.post(url, {'action': 'enable', 'dev_id': 'dev1', 'port': 1, 'level': 3}, format='json')
     auto = FanAutomation.objects.get(device=a15)
-    assert (auto.target_low, auto.target_high) == (82, 85)                    # start value
-    auto.state = {'v': 2, 'phase': 'normal', 'zb': [82, 85]}
+    assert (auto.target_low, auto.target_high) == (82, 85)                    # start value (4 Grad)
+    auto.state = {'v': 2, 'phase': 'basismodus', 'zb': [82, 85]}
     auto.save()
-    res = client.post(url, {'action': 'target', 'low': 80, 'high': 83}, format='json')
-    assert res.status_code == 200 and (res.data['target_low'], res.data['target_high']) == (80, 83)
+    res = client.post(url, {'action': 'target', 'low': 81, 'high': 84}, format='json')
+    assert res.status_code == 200 and (res.data['target_low'], res.data['target_high']) == (81, 84)
     assert res.data['state']['zb'] == [82, 85]                                 # not yet taken over
     auto.refresh_from_db()
-    assert (auto.target_low, auto.target_high, auto.level, auto.enabled) == (80, 83, 3, True)
+    assert (auto.target_low, auto.target_high, auto.level, auto.enabled) == (81, 84, 3, True)
     live = client.get('/api/live/').data['automation']
-    assert (live['target_low'], live['target_high']) == (80, 83)
-    for low, high in ((76, 79), (91, 92)):                                     # edges: 4 and 2 Grad
+    assert (live['target_low'], live['target_high']) == (81, 84)
+    for low, high in ((80, 83), (81, 85), (77, 80), (83, 87), (77, 81)):     # 4 and 5 Grad, at both edges
         assert client.post(url, {'action': 'target', 'low': low, 'high': high}, format='json').status_code == 200
     events = list(AutomationLog.objects.filter(kind='zielbereich').order_by('id'))
+    ranges = ['82–85', '81–84', '80–83', '81–85', '77–80', '83–87', '77–81']
     assert [(e.trigger, e.source, e.details) for e in events] == [
-        ('Nutzer: Zielbereich 80–83 °C gewählt (vorher 82–85 °C)', 'nutzer', {'alt': '82–85 °C', 'neu': '80–83 °C'}),
-        ('Nutzer: Zielbereich 76–79 °C gewählt (vorher 80–83 °C)', 'nutzer', {'alt': '80–83 °C', 'neu': '76–79 °C'}),
-        ('Nutzer: Zielbereich 91–92 °C gewählt (vorher 76–79 °C)', 'nutzer', {'alt': '76–79 °C', 'neu': '91–92 °C'})]
-    assert events[0].phase == 'normal'
+        ('Nutzer: Zieltemperatur %s °C gewählt (vorher %s °C)' % (new, old), 'nutzer',
+         {'alt': '%s °C' % old, 'neu': '%s °C' % new}) for old, new in zip(ranges, ranges[1:])]
+    assert events[1].trigger == 'Nutzer: Zieltemperatur 80–83 °C gewählt (vorher 81–84 °C)'      # SPEC example
+    assert events[0].phase == 'basismodus'
 
 
 @pytest.mark.parametrize('low, high', [
-    (75, 78), (90, 93), (82, 82), (82, 86), (85, 82), ('x', 85), (82.5, 85), (82, None), (True, 85)])
+    (76, 79), (76, 80), (84, 88), (83, 88),                    # outside 77–87
+    (82, 84), (77, 79), (85, 87), (82, 82),                    # 3 and 1 Grad: too narrow
+    (81, 86), (77, 82), (82, 87),                              # 6 Grad: too wide
+    (85, 82), ('x', 85), (82.5, 85), (82, None), (True, 85)])
 def test_target_range_invalid(client, a15, backup, low, high):
     url = '/api/fans/automation/'
     client.post(url, {'action': 'enable', 'dev_id': 'dev1', 'port': 1, 'level': 3}, format='json')
     res = client.post(url, {'action': 'target', 'low': low, 'high': high}, format='json')
-    assert res.status_code == 400 and res.data == {'error': 'Zielbereich 76–92 °C mit 2 bis 4 Grad wählen.'}
+    assert res.status_code == 400 and res.data == {'error': 'Zieltemperatur 77–87 °C mit 4 bis 5 Grad wählen.'}
     auto = FanAutomation.objects.get(device=a15)
     assert (auto.target_low, auto.target_high) == (82, 85)
     assert not AutomationLog.objects.filter(kind='zielbereich').exists()
 
 
-def test_target_range_allowed_with_automation_off_wartung_and_takt_messung(client, a15):
-    from api.models import CalibrationRun
+def test_target_range_allowed_with_automation_off_and_wartung(client, a15):
     url = '/api/fans/automation/'
     FanAutomation.objects.create(device=a15, ac_dev_id='dev1', ac_port=1, level=3, enabled=False)
     res = client.post(url, {'action': 'target', 'low': 79, 'high': 84}, format='json')
@@ -454,39 +411,17 @@ def test_target_range_allowed_with_automation_off_wartung_and_takt_messung(clien
     auto = FanAutomation.objects.get(device=a15)
     auto.maintenance_at = timezone.now()
     auto.save()
-    assert client.post(url, {'action': 'target', 'low': 80, 'high': 83}, format='json').status_code == 200
-    auto.maintenance_at = None
-    auto.save()
-    CalibrationRun.objects.create(device=a15, kind='step', modes=['2/L4'], status='running', state={})
-    assert client.post(url, {'action': 'target', 'low': 79, 'high': 82}, format='json').status_code == 200
+    assert client.post(url, {'action': 'target', 'low': 80, 'high': 84}, format='json').status_code == 200
     auto.refresh_from_db()
-    assert (auto.target_low, auto.target_high, auto.enabled) == (79, 82, False)
-    assert AutomationLog.objects.filter(kind='zielbereich').count() == 3
+    assert (auto.target_low, auto.target_high, auto.enabled) == (80, 84, False)
+    assert AutomationLog.objects.filter(kind='zielbereich').count() == 2
 
 
 def test_target_range_same_range_no_entry(client, a15, backup):
     url = '/api/fans/automation/'
     client.post(url, {'action': 'enable', 'dev_id': 'dev1', 'port': 1, 'level': 3}, format='json')
-    client.post(url, {'action': 'temp_test_start'}, format='json')
     updated = FanAutomation.objects.get(device=a15).updated_at
     res = client.post(url, {'action': 'target', 'low': 82, 'high': 85}, format='json')
     assert res.status_code == 200 and (res.data['target_low'], res.data['target_high']) == (82, 85)
-    assert res.data['temp_test_at']                                            # the test goes on
-    auto = FanAutomation.objects.get(device=a15)
-    assert auto.temp_test_at and auto.updated_at == updated
-    assert not AutomationLog.objects.filter(kind__in=('zielbereich', 'test_ende')).exists()
-
-
-def test_target_range_ends_running_test(client, a15, backup):
-    url = '/api/fans/automation/'
-    client.post(url, {'action': 'enable', 'dev_id': 'dev1', 'port': 1, 'level': 2}, format='json')
-    client.post(url, {'action': 'temp_test_start'}, format='json')
-    start = AutomationLog.objects.get(kind='test_start').id
-    res = client.post(url, {'action': 'target', 'low': 80, 'high': 82}, format='json')
-    assert res.status_code == 200 and res.data['temp_test_at'] is None
-    auto = FanAutomation.objects.get(device=a15)
-    assert (auto.temp_test_at, auto.target_low, auto.target_high) == (None, 80, 82)
-    events = list(AutomationLog.objects.filter(id__gt=start).order_by('id'))
-    assert [e.kind for e in events] == ['zielbereich', 'test_ende']
-    assert events[1].trigger == 'Nutzer: Temperatur-Test abgebrochen (Zielbereich geändert)'
-    assert events[1].details == {'ergebnis': 'abgebrochen', 'grund': 'Zielbereich geändert'}
+    assert FanAutomation.objects.get(device=a15).updated_at == updated
+    assert not AutomationLog.objects.filter(kind='zielbereich').exists()

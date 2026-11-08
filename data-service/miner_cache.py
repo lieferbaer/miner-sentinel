@@ -1,7 +1,7 @@
 """Shared miner readings and one-request-at-a-time per miner (Avalon, A15 web interface).
 
-The collector (every 10 s), the throttle controller and the Takt-Tabellen (every 15 s)
-all read the same miner. They run as threads of this process, so:
+The central reading (live_reader.py), the collector (every 10 s), the Temperatur-Automatik and the
+throttle controller (every 15 s) all use the same miner. They run as threads of this process, so:
   * every request to a miner goes through lock(ip): never two requests at the same time,
   * readings are kept here with their time (put/get); a job may use a reading that is
     at most max_age seconds old instead of asking the miner again,

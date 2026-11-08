@@ -37,16 +37,16 @@ def test_live_payload(client, a15):
     assert 'A15' in data['system']
     assert data['throttle'][a15.id]['family'] == 'a15' and data['throttle'][a15.id]['max_mhz'] == 360
     assert data['automation']['device']['id'] == a15.id
-    assert data['calibration']['run']['status'] == 'paused'
+    assert 'calibration' not in data                  # Takt-Messung removed (v2.2.7): old runs are not shown
+    assert 'calibration_active' not in data['throttle'][a15.id] and 'calibration_paused' not in data['throttle'][a15.id]
     assert data['server_now']
 
 
 def test_live_automation_clock(client, a15):
     FanAutomation.objects.create(device=a15, ac_dev_id='dev1', ac_port=1, level=3, enabled=True, state={
-        'v': 2, 'phase': 'normal', 't': 82, 'clock_set': 240, 'clock_changed_at': timezone.now().isoformat(),
-        'window_active': False})
+        'v': 2, 'phase': 'basismodus', 't': 82, 'clock_set': 240, 'clock_changed_at': timezone.now().isoformat()})
     data = client.get('/api/live/').data
-    assert data['automation']['state']['phase'] == 'normal' and data['automation']['state']['clock_set'] == 240
+    assert data['automation']['state']['phase'] == 'basismodus' and data['automation']['state']['clock_set'] == 240
     throttle = data['throttle'][a15.id]
     assert (throttle['set_mhz'], throttle['set_by'], throttle['automation_active']) == (240, 'Automatik', True)
 

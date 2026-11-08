@@ -1,7 +1,7 @@
 /**
  * One live poll for the whole UI: GET /api/live/ every 5 s while the app is open.
- * Overview, Over-Hot banner, throttle card, fan automation and the Takt-Tabellen run status all read
- * from here, so every page shows the same values at the same time.
+ * Overview, Over-Hot banner, throttle card and fan automation all read from here, so every page shows the
+ * same values at the same time.
  */
 import api from '@/lib/api'
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react'

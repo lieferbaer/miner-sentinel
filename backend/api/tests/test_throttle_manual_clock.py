@@ -2,7 +2,7 @@
 from unittest.mock import patch
 
 import pytest
-from api.models import CalibrationPoint, Device
+from api.models import CalibrationPoint, CalibrationRun, Device
 from api.views import DeviceViewSet
 from django.contrib.auth.models import User
 from rest_framework.test import APIClient
@@ -90,10 +90,22 @@ def test_migration_drops_old_a15_throttle(db):
     assert Device.objects.get(pk=nano.pk).connection_config['throttle']['active']['target_ths'] == 3.0
 
 
-def test_manual_points_listed_in_calibration(client):
+def test_calibration_endpoint_removed_data_kept(client):
+    """Takt-Tabellen and Takt-Messung removed (v2.2.7, Nutzer 06.11.): no endpoint any more, the measured points stay."""
     dev = _device('A15', 'Avalon A15')
     CalibrationPoint.objects.create(device=dev, kind='manual', mode_key='2/L4', mode_label='Power Mode 04',
                                     set_mhz=300.0, hashrate_ths=130.0)
-    res = client.get('/api/devices/%d/calibration/' % dev.id)
-    assert res.status_code == 200
-    assert [p['set_mhz'] for p in res.data['manual']] == [300.0]
+    assert client.get('/api/devices/%d/calibration/' % dev.id).status_code == 404
+    assert CalibrationPoint.objects.filter(device=dev).count() == 1
+
+
+def test_nano_throttle_not_locked_by_an_old_run(client, miner):
+    """A run of the former Takt-Messung left in the table no longer locks Drosseln („Takt-Messung läuft“)."""
+    dev = _device('nano3s-1', 'Avalon Nano 3S')
+    CalibrationRun.objects.create(device=dev, kind='step', modes=['2/L4'], status='running', state={})
+    dev.connection_config['throttle']['active'] = {'target_ths': 3.0, 'profile': '2/L4',
+                                                   'applied_points': [300, 300, 300]}
+    dev.save()
+    res = client.post('/api/devices/%d/throttle/' % dev.id, {'reset': True}, format='json')
+    assert res.status_code == 200, res.data
+    assert 'calibration_active' not in res.data and 'calibration_paused' not in res.data

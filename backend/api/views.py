@@ -17,8 +17,6 @@ from rest_framework.response import Response
 
 from .models import (
     AlertEvent,
-    CalibrationPoint,
-    CalibrationRun,
     CollectorSettings,
     Device,
     DeviceHardwareStats,
@@ -238,154 +236,6 @@ class DeviceViewSet(viewsets.ModelViewSet):
             out[device.device_id] = dict({k: values.get(k) for k in keys}, id=device.id, name=device.name)
         return Response(out)
 
-    # ---- Takt-Tabellen (A15): measurement runs, executed by data-service/calibration.py ----
-    CAL_MODES = [('2/L4', 'Power Mode 04'), ('2/L3', 'Power Mode 03'), ('2/L2', 'Power Mode 02'),
-                 ('2/L1', 'Power Mode 01'), ('2/L0', 'Power Mode 00'),
-                 ('1/-', 'High Performance')]
-    CAL_ACTIVE = ('running', 'paused', 'cancelling', 'finishing')
-    CAL_RUNNING = ('running', 'cancelling', 'finishing')      # paused: throttling is allowed
-
-    @staticmethod
-    def _cal_point(p):
-        data = p.data or {}
-        fields = dict(data.get('fields') or {})
-        for key, value in (data.get('summary') or {}).items():
-            fields.setdefault('summary.' + key, value)
-        return {'id': p.id, 'run': p.run_id, 'kind': p.kind, 'mode_key': p.mode_key, 'mode_label': p.mode_label,
-                'seq': p.seq, 'set_mhz': p.set_mhz, 'set_points': p.set_points, 'miner_mhz': p.miner_mhz,
-                'miner_points': p.miner_points, 'hashrate_ths': p.hashrate_ths, 'power_w': p.power_w,
-                'j_th': p.j_th, 'dh_pct': p.dh_pct, 'chip_temp_c': p.chip_temp_c, 'recorded_at': p.recorded_at,
-                'fan_level': data.get('fan_level'), 'power_spread_pct': data.get('power_spread_pct'),
-                'fields': fields}
-
-    def _cal_run(self, run):
-        labels = dict(self.CAL_MODES)
-        st = run.state or {}
-        set_points = st.get('set_points') or []
-        return {
-            'id': run.id, 'kind': run.kind, 'status': run.status, 'pause_reason': run.pause_reason,
-            'active': run.status in self.CAL_ACTIVE,
-            'modes': [{'key': k, 'label': labels.get(k, k)} for k in run.modes or []],
-            'mode_index': run.mode_index, 'step_index': run.step_index, 'message': run.message,
-            'phase': st.get('phase'), 'stable': bool(st.get('stable')), 'count': st.get('count', 0),
-            'steps_total': st.get('steps_total'),
-            'set_mhz': round(sum(set_points) / len(set_points), 1) if set_points else None,
-            'notes': st.get('notes') or {}, 'seen_at': st.get('seen_at'), 'last_error': st.get('last_error'),
-            'changed_at': st.get('changed_at'), 'server_now': timezone.now(),
-            'created_at': run.created_at, 'finished_at': run.finished_at,
-        }
-
-    @action(detail=True, methods=['get', 'post'], url_path='calibration')
-    def calibration(self, request, pk=None):
-        """GET ?mode=<key>: runs and measured points. POST {action: start_max|start_step|pause|resume|cancel}."""
-        device = self.get_object()
-        if self._throttle_family(device) != 'a15' or device.protocol != Device.PROTOCOL_CGMINER_TCP:
-            return Response({'error': 'Takt-Tabellen gibt es nur für den A15.'}, status=status.HTTP_400_BAD_REQUEST)
-        if request.method == 'POST':
-            return self._calibration_command(device, request.data)
-        keys = [k for k, _ in self.CAL_MODES]
-        mode = request.query_params.get('mode')
-        mode = mode if mode in keys else keys[0]
-        run = CalibrationRun.objects.filter(device=device).order_by('-created_at').first()
-
-        # max values: per mode the points of the latest run that measured it
-        max_points, max_notes, seen = [], {}, {}
-        for p in CalibrationPoint.objects.filter(device=device, kind='max').order_by('-recorded_at'):
-            seen.setdefault(p.mode_key, p.run_id)
-            if seen[p.mode_key] == p.run_id:
-                max_points.append(p)
-        max_points.sort(key=lambda p: (keys.index(p.mode_key) if p.mode_key in keys else 99, p.seq))
-        for r in CalibrationRun.objects.filter(device=device, kind='max').order_by('created_at'):
-            max_notes.update((r.state or {}).get('notes') or {})
-
-        last = CalibrationPoint.objects.filter(device=device, kind='step', mode_key=mode).order_by('-recorded_at').first()
-        step_points = list(CalibrationPoint.objects.filter(run_id=last.run_id, kind='step', mode_key=mode)
-                           .order_by('seq')) if last else []
-        step_run = CalibrationRun.objects.filter(pk=last.run_id).first() if last else None
-        manual = CalibrationPoint.objects.filter(device=device, kind='manual').order_by('-recorded_at')[:50]
-        return Response({
-            'device': {'id': device.id, 'name': device.name},
-            'modes': [{'key': k, 'label': lbl, 'stock_mhz': (((device.connection_config or {}).get('throttle') or {})
-                       .get('profiles') or {}).get(k, {}).get('avg_mhz')} for k, lbl in self.CAL_MODES],
-            'run': self._cal_run(run) if run else None,
-            'max': [self._cal_point(p) for p in max_points],
-            'max_notes': max_notes,
-            'step_mode': mode,
-            'step': [self._cal_point(p) for p in step_points],
-            'step_run': {'id': step_run.id, 'created_at': step_run.created_at, 'status': step_run.status}
-            if step_run else None,
-            'manual': [self._cal_point(p) for p in manual],
-        })
-
-    def _calibration_command(self, device, data):
-        action_name = data.get('action')
-        keys = [k for k, _ in self.CAL_MODES]
-        run = CalibrationRun.objects.filter(device=device, status__in=self.CAL_ACTIVE).order_by('-created_at').first()
-        now = timezone.now()
-        if action_name in ('start_max', 'start_step'):
-            if run:
-                return Response({'error': 'Es läuft bereits eine Messung.'}, status=status.HTTP_409_CONFLICT)
-            if action_name == 'start_max':
-                modes = [k for k in keys if k in (data.get('modes') or [])]
-                if not modes:
-                    return Response({'error': 'Bitte mindestens einen Modus wählen.'},
-                                    status=status.HTTP_400_BAD_REQUEST)
-            else:
-                if data.get('mode') not in keys:
-                    return Response({'error': 'Unbekannter Modus.'}, status=status.HTTP_400_BAD_REQUEST)
-                modes = [data.get('mode')]
-            failed = self._cal_fan_automation_on(device) or self._cal_lift_throttle(device)
-            if failed:
-                return failed
-            run = CalibrationRun.objects.create(device=device, kind=action_name[6:], modes=modes, status='running',
-                                                state={}, message='Gestartet.', created_at=now, updated_at=now)
-        elif action_name == 'pause' and run and run.status == 'running':
-            run.status, run.pause_reason, run.message = 'paused', 'user', 'Pausiert.'
-        elif action_name == 'resume' and run and run.status == 'paused':
-            # first the throttle set during the pause is lifted, then the last point is measured again
-            failed = self._cal_fan_automation_on(device) or self._cal_lift_throttle(device)
-            if failed:
-                return failed
-            st = dict(run.state or {})
-            st['resume'] = True
-            run.status, run.pause_reason, run.state = 'running', '', st
-            run.message = 'Wird fortgesetzt: letzter gespeicherter Punkt wird neu gemessen.'
-        elif action_name == 'cancel' and run and run.status != 'cancelling':
-            run.status, run.message = 'cancelling', 'Wird abgebrochen …'
-        else:
-            return Response({'error': 'Diese Aktion ist gerade nicht möglich.'}, status=status.HTTP_400_BAD_REQUEST)
-        run.updated_at = now
-        run.save()
-        return Response(self._cal_run(run))
-
-    @staticmethod
-    def _cal_fan_automation_on(device):
-        """A run needs the Temperatur-Automatik (the fan holds 80 degC): switched on here if it is off."""
-        auto = FanAutomation.objects.filter(device=device).first()
-        if not auto or not auto.ac_dev_id:
-            return Response({'error': 'Erst im Menü „Lüfter“ den Port wählen und die Temperatur-Automatik '
-                                      'einmal einschalten.'}, status=status.HTTP_409_CONFLICT)
-        if not auto.enabled:
-            auto.enabled, auto.updated_at = True, timezone.now()
-            auto.save(update_fields=['enabled', 'updated_at'])
-        return None
-
-    def _cal_lift_throttle(self, device):
-        """A running throttle is lifted before a measurement starts (the run lets the firmware set the clocks)."""
-        st = json.loads(json.dumps((device.connection_config or {}).get('throttle') or {}))
-        active = st.get('active')
-        if not active:
-            return None
-        # no clocks are set here: the measurement switches the mode via the web interface, so the
-        # firmware applies its own clocks
-        st['active'] = None
-        st['last_event'] = {'type': 'calibration', 'detail': 'für die Takt-Messung aufgehoben',
-                            'at': timezone.now().isoformat(), 'target_ths': active.get('target_ths'),
-                            'clock_mhz': active.get('clock_mhz')}
-        st['stable_since'] = None
-        self._throttle_save(device, st)
-        return None
-
     @action(detail=True, methods=['post'], url_path='restart')
     def restart(self, request, pk=None):
         """POST: reboot an Avalon miner (offered when it reports "Over Hot")."""
@@ -537,8 +387,6 @@ class DeviceViewSet(viewsets.ModelViewSet):
             mode = -1
         if mode not in [o['value'] for o in options]:
             return Response({'error': 'Unbekannter Modus.'}, status=status.HTTP_400_BAD_REQUEST)
-        if CalibrationRun.objects.filter(device=device, status__in=self.CAL_ACTIVE).exists():
-            return Response({'error': 'Takt-Messung läuft – Moduswechsel ist gesperrt.'}, status=status.HTTP_409_CONFLICT)
         if family == 'a15':
             try:
                 ok = _a15_set_level(device.ip_address, mode)
@@ -599,10 +447,8 @@ class DeviceViewSet(viewsets.ModelViewSet):
             'set_mhz': set_mhz,
             'set_by': set_by,
             'automation_active': bool(auto and auto.enabled),
-            'calibration_paused': CalibrationRun.objects.filter(device=device, status='paused').exists(),
             'min_mhz': round(stock_avg * self.THROTTLE_FLOOR) if stock_avg else None,
             'max_mhz': round(stock_avg) if stock_avg else None,
-            'calibration_active': CalibrationRun.objects.filter(device=device, status__in=self.CAL_ACTIVE).exists(),
             'seen_at': live.get('seen_at'),
             'stale': bool(seen_at and (timezone.now() - seen_at).total_seconds() > 60),
             'mode_label': live['mode_label'] if not active else (prof.get('mode_label') or live['mode_label']),
@@ -640,32 +486,20 @@ class DeviceViewSet(viewsets.ModelViewSet):
         }
 
     def _last_set_clock(self, device, auto):
-        """(MHz, by) of the clock MinerSentinel set last on the A15 - Takt-Messung or Temperatur-Automatik,
-        whichever was latest; (None, None) if the firmware's own clocks are in effect. (The A15 has no
-        Drosselung since 24.10.)"""
+        """(MHz, by) of the clock the Temperatur-Automatik set last on the A15; (None, None) if the firmware's own
+        clocks are in effect. (The A15 has no Drosselung since 24.10., the Takt-Messung is removed since 06.11.)"""
         from django.utils.dateparse import parse_datetime
-        candidates = []
-        run = CalibrationRun.objects.filter(device=device).order_by('-created_at').first()
-        rst = (run.state or {}) if run else {}
-        if run and run.status in self.CAL_ACTIVE:
-            if run.kind == 'step' and rst.get('set_points') and rst.get('phase') in ('measure', 'set_clock'):
-                points = rst['set_points']
-                candidates.append((rst.get('changed_at'), round(sum(points) / len(points), 1), 'Takt-Messung'))
-            else:
-                candidates.append((rst.get('changed_at'), None, 'Takt-Messung'))    # mode switch: firmware clocks
-        elif run and run.finished_at:
-            candidates.append((run.finished_at.isoformat(), None, 'Takt-Messung'))  # run ended: firmware clocks
         ast = (auto.state or {}) if auto else {}
-        if ast.get('clock_changed_at') and (auto.enabled or self._auto_clock_kept(device, ast)):
-            # also when the automation is off: its clock stays as it is (Automatik aus sends no clock)
-            candidates.append((ast['clock_changed_at'], ast.get('clock_set'), 'Automatik'))
-        dated = [(parse_datetime(at), mhz, by) for at, mhz, by in candidates if at and parse_datetime(at)]
-        if not dated:
+        changed = parse_datetime(ast.get('clock_changed_at') or '')
+        # also when the automation is off: its clock stays as it is (Automatik aus sends no clock)
+        if not changed or not (auto.enabled or self._auto_clock_kept(device, ast)):
             return None, None
-        _, mhz, by = max(dated, key=lambda c: c[0])
-        return (mhz, by) if mhz is not None else (None, None)
+        mhz = ast.get('clock_set')
+        return (mhz, 'Automatik') if mhz is not None else (None, None)
 
-    AUTO_OFF_TOL_MHZ = 25      # as OVERRIDE_MHZ of the data-service: the miner runs another clock
+    # Automatik aus, display only: the miner runs another clock (value of the former OVERRIDE_MHZ of the data-service;
+    # not changed with its 15-MHz rule of v2.2.7, which only applies while the automation reads the miner)
+    AUTO_OFF_TOL_MHZ = 25
     AUTO_OWN_SWITCH_S = 120    # as OWN_SWITCH_S of the data-service: a restart this soon follows its own mode switch
 
     @staticmethod
@@ -725,9 +559,6 @@ class DeviceViewSet(viewsets.ModelViewSet):
         if self._throttle_family(device) == 'a15':
             return Response({'error': 'Die Drosselung des A15 ist abgeschafft; den Takt regelt die '
                                       'Temperatur-Automatik.'}, status=status.HTTP_400_BAD_REQUEST)
-        # a running Takt-Messung blocks
-        if CalibrationRun.objects.filter(device=device, status__in=self.CAL_RUNNING).exists():
-            return Response({'error': 'Takt-Messung läuft – Drosseln ist gesperrt.'}, status=status.HTTP_409_CONFLICT)
         try:
             live = self._throttle_live(device)
         except OSError as exc:
@@ -1975,13 +1806,7 @@ def device_capabilities(request, make, device_id):
         'offline': not online,
         'capabilities': caps,
         'confirm_actions': sorted(CONTROL_CONFIRM_ACTIONS),
-        'calibration_active': _calibration_active(device),
     })
-
-
-def _calibration_active(device):
-    """A Takt-Tabellen run is active on this device: the generic controls are locked meanwhile."""
-    return CalibrationRun.objects.filter(device=device, status__in=DeviceViewSet.CAL_ACTIVE).exists()
 
 
 @api_view(['POST'])
@@ -2016,11 +1841,6 @@ def device_control(request, make, device_id):
     if not is_device_online_server(device):
         return Response(
             {'error': 'Device appears offline — controls are disabled'},
-            status=status.HTTP_409_CONFLICT,
-        )
-    if _calibration_active(device):
-        return Response(
-            {'error': 'Takt-Messung läuft – die Steuerung ist bis zum Ende der Messung gesperrt.'},
             status=status.HTTP_409_CONFLICT,
         )
 

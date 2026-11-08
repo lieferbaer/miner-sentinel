@@ -47,11 +47,10 @@ function mockApi({ devicesFail = false, devices = mockDevices } = {}) {
             data: {
               devices,
               mining: [{ device_id_str: 'A15', hashrate_ghs: 200000 }],
-              hardware: [{ device_id_str: 'A15', power_watts: 3500, temperature_chip_c: 81 }],
+              hardware: [{ device_id_str: 'A15', power_watts: 3500, temperature_chip_c: 81, fan_speed_rpm: 1520 }],
               system: { A15: { id: 3, name: 'Avalon A15', work_mode: 1, chip_temp_boards: [80, 81, 79] } },
               throttle: {},
               automation: null,
-              calibration: { device_id: null, run: null },
             },
           })
     }
@@ -113,6 +112,7 @@ describe('OverviewDashboard (per-device overview)', () => {
     expect(screen.queryAllByText(/Total hashrate/i).length).toBeGreaterThan(0)
     expect(screen.getByText('High Performance')).toBeInTheDocument()
     expect(screen.getByText('80 / 81 / 79 °C')).toBeInTheDocument()
+    expect(screen.getByText('1.520 rpm')).toBeInTheDocument()     // thousands with a dot (Nutzer 06.11.)
   })
 
   it('shows the empty state without devices', async () => {

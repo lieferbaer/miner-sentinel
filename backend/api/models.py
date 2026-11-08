@@ -699,9 +699,10 @@ class CollectorSettings(models.Model):
 
 
 class CalibrationRun(models.Model):
-    """Takt-Tabellen (A15): a measurement run executed by the data-service (calibration.py).
+    """Takt-Tabellen (A15): a measurement run of the former Takt-Messung (data-service calibration.py).
     kind 'max': two clean measurements per selected work mode at stock clocks;
-    kind 'step': one work mode from its stock clock downwards in 10 MHz steps."""
+    kind 'step': one work mode from its stock clock downwards in 10 MHz steps.
+    Unused since 06.11. (Takt-Messung removed, v2.2.7); the table and its data stay (Nutzer 06.11.)."""
     device = models.ForeignKey(Device, on_delete=models.CASCADE, related_name='calibration_runs')
     kind = models.CharField(max_length=10)
     status = models.CharField(max_length=12, default='running')   # running|paused|cancelling|done|cancelled
@@ -721,7 +722,8 @@ class CalibrationRun(models.Model):
 
 
 class CalibrationPoint(models.Model):
-    """One clean measurement of a calibration run; `data` holds every value the miner reported."""
+    """One clean measurement of a calibration run; `data` holds every value the miner reported.
+    Unused since 06.11. (Takt-Messung removed, v2.2.7); the table and its data stay (Nutzer 06.11.)."""
     device = models.ForeignKey(Device, on_delete=models.CASCADE, related_name='calibration_points')
     run = models.ForeignKey(CalibrationRun, on_delete=models.SET_NULL, null=True, blank=True, related_name='points')
     kind = models.CharField(max_length=10)
@@ -748,20 +750,19 @@ class CalibrationPoint(models.Model):
 
 class FanAutomation(models.Model):
     """Temperatur-Automatik (A15 + AC Infinity fan), executed by data-service/fan_automation.py.
-    The backend writes the settings (enabled, controller/port, chosen level); the data-service applies
-    them (lowering the fan only after lowering the clock) and writes only `state`."""
+    The backend writes the settings (enabled, controller/port, chosen level, Zieltemperatur); the data-service
+    applies them and writes only `state`."""
     device = models.OneToOneField(Device, on_delete=models.CASCADE, related_name='fan_automation')
     enabled = models.BooleanField(default=False)
     ac_dev_id = models.CharField(max_length=40, blank=True, default='')
     ac_port = models.IntegerField(default=1)
-    level = models.IntegerField(default=5)          # chosen fan level: the fan runs at it, never below
+    level = models.IntegerField(default=5)          # Basisstufe: the fan level of the Basismodus (Nutzer 06.11.)
     level_at = models.DateTimeField(blank=True, null=True)   # last click on a level (also the same level again)
     maintenance_at = models.DateTimeField(blank=True, null=True)   # Wartung announced (A15 is switched off by hand)
-    # Temperatur-Test (25.10.): start of the test, null = no test; the backend sets it (start) and clears it (abort,
-    # Automatik aus, Wartung, Zielbereich), the data-service clears it at the end of the test or on a safety abort
+    # start of the former Temperatur-Test (25.10.): unused since 06.11. (test removed, v2.2.7); the column stays
     temp_test_at = models.DateTimeField(blank=True, null=True)
-    # Zielbereich (Nutzer 27.10.): hottest chip (TMax, whole degrees) 76–92 °C, 2–4 Grad (82–85 = 4 Grad); the backend
-    # writes it, the data-service takes it over (state.zb)
+    # Zieltemperatur (Nutzer 06.11.): hottest chip (TMax, whole degrees), ZTU from 77, ZTO up to 87 °C, 4 to 5 Grad
+    # (both edges counted: 82–85 = 4 Grad); the backend writes it, the data-service takes it over (state.zb)
     target_low = models.IntegerField(default=82)
     target_high = models.IntegerField(default=85)
     state = models.JSONField(default=dict, blank=True)
@@ -777,7 +778,8 @@ class AutomationCycle(models.Model):
     # no single index on device: the index (device, -recorded_at) covers it
     device = models.ForeignKey(Device, on_delete=models.CASCADE, related_name='automation_cycles', db_index=False)
     recorded_at = models.DateTimeField(default=timezone.now)
-    phase = models.CharField(max_length=16)       # normal|korrektur|ausnahme|messung|wartung|aus|start|warten
+    # heizmodus|basismodus|kuehlmodus|wartung|aus; older rows also normal|korrektur|ausnahme|messung|start|warten
+    phase = models.CharField(max_length=16)
     chip_temp = models.FloatField(blank=True, null=True)       # hottest chip (TMax), null if not valid
     boards = models.JSONField(default=list, blank=True)        # MTmax per board
     tendency = models.IntegerField(blank=True, null=True)      # chip temperature now - reference (degC)
@@ -792,7 +794,7 @@ class AutomationCycle(models.Model):
     ghsspd_ths = models.FloatField(blank=True, null=True)
     dh_pct = models.FloatField(blank=True, null=True)
     status = models.CharField(max_length=40, blank=True, default='')   # SYSTEMSTATU
-    window_active = models.BooleanField(default=False)
+    window_active = models.BooleanField(default=False)          # 30-s window, removed 06.11.: only in older rows
     learn_since = models.DateTimeField(blank=True, null=True)
     pending = models.CharField(max_length=40, blank=True, default='')  # running command, e.g. 'takt 300'
     decision = models.CharField(max_length=200, blank=True, default='')

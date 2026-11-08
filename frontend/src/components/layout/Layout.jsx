@@ -27,7 +27,6 @@ import {
   ScrollText,
   Settings,
   Sun,
-  Table,
   TrendingUp,
   X,
 } from 'lucide-react'
@@ -78,12 +77,6 @@ const NAV_SECTIONS = [
         match: (p) => p === '/activity' || p.startsWith('/activity/'),
       },
       {
-        path: '/takt-tabellen',
-        label: 'Takt-Tabellen',
-        icon: Table,
-        match: (p) => p === '/takt-tabellen',
-      },
-      {
         path: '/luefter',
         label: 'Lüfter',
         icon: Fan,
@@ -127,10 +120,6 @@ const PAGE_META = {
   '/activity': {
     title: 'Activity',
     description: 'Alerts, records, and fleet events',
-  },
-  '/takt-tabellen': {
-    title: 'Takt-Tabellen',
-    description: 'A15: gemessene Takt-, Hashrate- und Leistungswerte je Modus',
   },
   '/luefter': {
     title: 'Lüfter',

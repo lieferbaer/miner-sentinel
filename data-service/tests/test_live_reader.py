@@ -1,4 +1,4 @@
-"""Central reading: one reading per miner, then the automation; throttle + Takt-Tabellen every 3rd reading."""
+"""Central reading: one reading per miner, then the automation; the throttle controller every 3rd reading."""
 import json
 
 import pytest
@@ -50,8 +50,40 @@ def test_offline_miner_does_not_stop_the_cycle(miners, monkeypatch):
     live_reader._cycle[0] = 0
     control = []
     for _ in range(3):
-        live_reader.run_live_cycle('db', lambda url: control.append('throttle'), lambda url: control.append('cal'))
+        live_reader.run_live_cycle('db', lambda url: control.append('throttle'))
     live_reader._control_worker.submit(lambda: None).result()  # wait for the worker
     assert ran == ['auto'] * 3                                # automation after every reading
-    assert control == ['throttle', 'cal']                      # every 3rd reading
+    assert control == ['throttle']                             # every 3rd reading (no Takt-Messung any more)
     assert ('10.0.0.15', 'estats') in miners
+
+
+def test_throttle_controller_no_longer_checks_the_takt_messung(monkeypatch):
+    """v2.2.7 (Nutzer 06.11.): the Takt-Messung is removed – only a running Temperatur-Automatik keeps the throttle
+    controller observing."""
+    import throttle_controller
+    seen = []
+
+    class Cur:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def execute(self, sql, args=None):
+            seen.append(sql)
+
+        def fetchall(self):
+            return []
+
+    class Conn:
+        def cursor(self, cursor_factory=None):
+            return Cur()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(throttle_controller.psycopg2, 'connect', lambda url: Conn())
+    throttle_controller.run_throttle_controller('db')
+    assert 'calibration_runs' not in seen[0]
+    assert 'EXISTS (SELECT 1 FROM fan_automation f WHERE f.device_id = devices.id AND f.enabled) AS calibrating' in seen[0]

@@ -6,7 +6,6 @@ import { TimeRangeProvider } from '@/lib/TimeRangeContext';
 import ActivityPage from '@/pages/ActivityPage';
 import AnalyticsDashboard from '@/pages/AnalyticsDashboard';
 import AvalonDeviceDetails from '@/pages/AvalonDeviceDetails';
-import CalibrationPage from '@/pages/CalibrationPage';
 import FansPage from '@/pages/FansPage';
 import BitAxeDeviceDetailsRedirect from '@/pages/BitAxeDeviceDetailsRedirect';
 import DeviceDetails from '@/pages/DeviceDetails';
@@ -60,7 +59,6 @@ function AppRoutes() {
           <Route path="/bitaxe/device/:deviceId" element={<BitAxeDeviceDetailsRedirect />} />
           <Route path="/avalon/device/:deviceId" element={<AvalonDeviceDetails />} />
           <Route path="/analytics" element={<AnalyticsDashboard />} />
-          <Route path="/takt-tabellen" element={<CalibrationPage />} />
           <Route path="/luefter" element={<FansPage />} />
           <Route path="/protokoll" element={<ProtocolPage />} />
           <Route path="/settings" element={<SettingsPage />} />

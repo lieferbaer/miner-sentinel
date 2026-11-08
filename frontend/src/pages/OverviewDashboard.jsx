@@ -57,7 +57,7 @@ const SERIES_REFRESH_MS = 60000
 const EFFECTIVE_CLOCK_INFO =
   'Effektiver Takt: der Durchschnittstakt, den der Miner selbst meldet (Freq, aktualisiert etwa alle 130 s). ' +
   'Er hängt davon ab, wie viele Chips auf welcher der 4 Takt-Stufen laufen. Drosselung (Nano 3S, Avalon Q) sowie ' +
-  'Temperatur-Automatik und Takt-Messung (A15) setzen die 4 Takt-Stufen und zeigen deren Mittel – deshalb weichen ' +
+  'Temperatur-Automatik (A15) setzen die 4 Takt-Stufen und zeigen deren Mittel – deshalb weichen ' +
   'die Zahlen voneinander ab.'
 const FAMILY_MODE_LABELS = { nano: ['Low', 'Medium', 'High'], q: ['Eco', 'Standard', 'Super'] }
 function deviceFamily(device) {
@@ -138,6 +138,8 @@ function DeviceSection({
   const temperature = hardware?.temperature_c || 0
   const chipTemperature = hardware?.temperature_chip_c || 0
   const fanRpm = hardware?.fan_speed_rpm || 0
+  // thousands with a dot like on the fan page (Nutzer 06.11.)
+  const fanRpmText = Number(fanRpm).toLocaleString('de-DE', { maximumFractionDigits: 0 }) + ' rpm'
   // AC Infinity fan of the Temperatur-Automatik: the level the controller reports (read back), not the set one
   const liveAuto = useLive().data?.automation
   const acFanLevel = liveAuto?.enabled && liveAuto.device?.id === device.id ? liveAuto.state?.fan_read ?? null : null
@@ -249,7 +251,7 @@ function DeviceSection({
           layout="icon-left"
           icon={Fan}
           label="Fan speed"
-          value={formatNumber(fanRpm, 0) + ' rpm' + (acFanText ? ' / ' + acFanText : '')}
+          value={fanRpmText + (acFanText ? ' / ' + acFanText : '')}
           subtitle={
             fanPercent || fanPercent === 0 ? formatNumber(fanPercent, 0) + '% duty' : 'Measured'
           }

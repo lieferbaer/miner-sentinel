@@ -86,6 +86,7 @@ class TestDeviceCapabilities:
         assert resp.data['capabilities']['set_pool'] is False
         assert resp.data['capabilities']['frequency'] is False
         assert resp.data['capabilities']['voltage'] is False
+        assert 'calibration_active' not in resp.data          # Takt-Messung removed (v2.2.7)
 
 
 class TestDeviceControl:
@@ -104,6 +105,15 @@ class TestDeviceControl:
         assert resp.status_code == 200
         assert resp.data['ok'] is True
         assert AlertEvent.objects.filter(event_type='user_reboot', device=online_bitaxe).exists()
+
+    @patch('requests.post')
+    def test_control_not_locked_by_an_old_run(self, mock_post, auth_client, online_avalon):
+        """A run of the former Takt-Messung left in the table no longer locks the controls (v2.2.7)."""
+        from api.models import CalibrationRun
+        CalibrationRun.objects.create(device=online_avalon, kind='step', modes=['2/L4'], status='running', state={})
+        mock_post.return_value = MagicMock(ok=True, status_code=200, json=lambda: {'ok': True, 'action': 'reboot'})
+        resp = auth_client.post('/api/devices/avalon/avalon-mini-3s/control/', {'action': 'reboot'}, format='json')
+        assert resp.status_code == 200 and mock_post.called
 
     def test_control_rejects_offline(self, auth_client, offline_bitaxe):
         resp = auth_client.post(

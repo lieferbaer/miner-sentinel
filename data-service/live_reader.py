@@ -3,8 +3,8 @@
 One reading per miner: estats + summary (and for the A15 its web interface settings every WEB_EVERY_S).
 They go into miner_cache; right after each reading
   * the Temperatur-Automatik runs (every reading),
-  * the throttle controller and the Takt-Tabellen run every CONTROL_EVERY readings (15 s), in their own
-    worker so a slow mode switch never delays the next reading.
+  * the throttle controller runs every CONTROL_EVERY readings (15 s), in its own worker so a slow mode switch
+    never delays the next reading (the Takt-Messung is removed, v2.2.7, Nutzer 06.11.).
 The collector (every 10 s) stores these readings in the database instead of asking the miners again.
 Nobody else reads the miners, except as fallback when the central reading is older than 15 s.
 """
@@ -23,7 +23,7 @@ from throttle_controller import family_of
 logger = logging.getLogger(__name__)
 
 READ_S = 5
-CONTROL_EVERY = 3            # throttle controller + Takt-Tabellen every 3rd reading = 15 s
+CONTROL_EVERY = 3            # throttle controller every 3rd reading = 15 s
 WEB_EVERY_S = 30             # A15 power level: changes rarely (own mode switches clear the cache at once)
 
 _cycle = [0]
@@ -58,15 +58,14 @@ def read_device(dev):
         return False
 
 
-def _control(database_url, run_throttle_controller, run_calibration):
+def _control(database_url, run_throttle_controller):
     try:
         run_throttle_controller(database_url)
-        run_calibration(database_url)
     finally:
         _control_busy.release()
 
 
-def run_live_cycle(database_url, run_throttle_controller, run_calibration):
+def run_live_cycle(database_url, run_throttle_controller):
     try:
         devices = _devices(database_url)
     except psycopg2.Error as exc:
@@ -79,4 +78,4 @@ def run_live_cycle(database_url, run_throttle_controller, run_calibration):
     run_fan_automation(database_url)
     _cycle[0] += 1
     if _cycle[0] % CONTROL_EVERY == 0 and _control_busy.acquire(blocking=False):
-        _control_worker.submit(_control, database_url, run_throttle_controller, run_calibration)
+        _control_worker.submit(_control, database_url, run_throttle_controller)

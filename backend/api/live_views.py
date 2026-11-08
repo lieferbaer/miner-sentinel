@@ -2,8 +2,8 @@
 
 Everything that is shown live comes from here, so all pages and cards show the same values:
 devices, latest mining/hardware/system values (as /api/mining/latest/, /api/hardware/latest/,
-/api/devices/system-latest/), the throttle state per Avalon (as GET /api/devices/<id>/throttle/),
-the Temperatur-Automatik (as /api/fans/automation/) and the current Takt-Tabellen run of the A15.
+/api/devices/system-latest/), the throttle state per Avalon (as GET /api/devices/<id>/throttle/)
+and the Temperatur-Automatik (as /api/fans/automation/). (The Takt-Messung of the A15 is removed since 06.11.)
 Only the database is read - no miner and no AC Infinity access.
 """
 from django.utils import timezone
@@ -11,8 +11,8 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from .fan_views import _a15, automation_payload
-from .models import CalibrationRun, Device
+from .fan_views import automation_payload
+from .models import Device
 from .serializers import DeviceSerializer
 
 
@@ -28,8 +28,6 @@ def live(request):
         seen = DeviceViewSet._throttle_seen(dev)
         throttle[dev.id] = (device_view._throttle_payload(dev, seen) if seen and seen['supported']
                             else {'supported': False})
-    a15 = _a15()
-    run = CalibrationRun.objects.filter(device=a15).order_by('-created_at').first() if a15 else None
     return Response({
         'server_now': timezone.now(),
         'devices': DeviceSerializer(devices, many=True).data,
@@ -38,5 +36,4 @@ def live(request):
         'system': device_view.system_latest(request).data,
         'throttle': throttle,
         'automation': automation_payload(),
-        'calibration': {'device_id': a15.id if a15 else None, 'run': device_view._cal_run(run) if run else None},
     })
