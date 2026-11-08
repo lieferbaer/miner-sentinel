@@ -72,14 +72,15 @@ LOCK_EARLY_END = 3            # locks erhoehung/heizmodus/kuehlmodus end at t > 
 # --- clock reduction above ZTO (Nutzer 06.11.)
 BAND_STEP = 3                 # Bereich 1 = ZTO+1..+3, 2 = +4..+6, 3 = +7..+9, 4 = from ZTO+10
 CUT_MINUS = {2: 20, 3: 20, 4: 50}
-ZT_SHORT_S, ZT_LONG_S = 60, 300   # Bereich 1 by the ZeitImZieltemperatur: < 60 s −15, 60–300 s −10, > 300 s −5
+ZT_LONG_S = 300               # Bereich 1 by the ZeitImZieltemperatur: 0–300 s −10, > 300 s −5 (Nutzer 08.11.)
 CUT_EVERY_S = 120             # same Bereich: every 2 min; lower Bereich: 2 min after arriving there
 CUT_GAP_S = 180               # excursion start less than 3 min after the last reduction: 3 min after that one
 CUT_LOCK_S = 5 * 60           # after every reduction 5 min no clock increase (never ends early)
 START_CLOCK = {1: 170, 2: 250, 3: 330, 4: 380, 5: 400, 6: 420, 7: 440, 8: 440, 9: 440, 10: 440}   # Nutzer 28.10.
 CLOCK_MIN, CLOCK_MAX = 100, 440
 MODE_TOP = {4: 360, 3: 380, 2: 400, 1: 420, 0: 440}   # oberer Takt je Modus (mode 04 ... mode 00)
-MODE_DOWN_MARGIN = 20         # Spielraum nach unten: Wechsel in den tieferen Modus erst 20 MHz unter dessen Obergrenze (Nutzer 26.10.)
+MODE_DOWN_MARGIN = 20         # Spielraum nach unten: Wechsel in den tieferen Modus erst unter dessen Obergrenze − 20 MHz
+                              # (Nutzer 26.10.; seit 08.11. „nur kleiner“: 340 bleibt mode 03, 335 → mode 04)
 TENDENCY_S = 30               # Tendenz (only shown, no rule uses it): gegen den Wert von vor höchstens 30 s
 START_HOLD_S = 10 * 60        # Startpause: nach einem Start mit kalten Chips keine Takterhöhung bis ZTU−5, höchstens 10 min
 START_HOLD_BELOW = 5          # ... ZTU−5 (Nutzer 06.11.; vorher bis ZTU)
@@ -177,13 +178,13 @@ def table_level(mhz):
 
 
 def required_level(mhz, current):
-    """Modus für einen Takt: aufwärts ab Obergrenze + 1, abwärts erst 20 MHz unter der Obergrenze des tieferen Modus."""
+    """Modus für einen Takt: aufwärts ab Obergrenze + 1, abwärts erst unter Obergrenze des tieferen Modus − 20 MHz."""
     if current is None:
         return table_level(mhz)
     level = current
     while level > 0 and mhz >= MODE_TOP[level] + 1:
         level -= 1
-    while level < 4 and mhz <= MODE_TOP[level + 1] - MODE_DOWN_MARGIN:
+    while level < 4 and mhz < MODE_TOP[level + 1] - MODE_DOWN_MARGIN:
         level += 1
     return level
 
@@ -209,9 +210,8 @@ def band_of(t, hi):
 
 
 def minus_band_1(dwell):
-    """Reduction in Bereich 1 by the ZeitImZieltemperatur in s: < 60 s −15, 60–300 s −10, > 300 s −5 MHz."""
-    if dwell < ZT_SHORT_S:
-        return 15
+    """Reduction in Bereich 1 by the ZeitImZieltemperatur in s: 0–300 s −10, > 300 s −5 MHz (Nutzer 08.11.; bis
+    v2.2.7 unter 60 s −15)."""
     return 10 if dwell <= ZT_LONG_S else 5
 
 
@@ -1138,7 +1138,10 @@ class Round:
         Afterwards 5 min no clock increase; the next one in this Bereich after 2 min."""
         st, t, now = self.st, self.t, self.now
         band = hot['band']
-        minus = hot['minus1'] if band == 1 else CUT_MINUS[band]
+        # Bereich 1 from the fixed ZeitImZieltemperatur, so a running excursion follows a rule change (Nutzer 08.11., ae)
+        minus = minus_band_1(hot['dwell_s']) if band == 1 else CUT_MINUS[band]
+        if band == 1:
+            hot = dict(hot, minus1=minus)
         old = int(round(st['clock_set']))
         if band == 1:
             why = 'Chiptemperatur %d °C (Bereich 1, ZeitImZieltemperatur %s): Takt −%d MHz' % (

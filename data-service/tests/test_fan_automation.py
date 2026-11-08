@@ -234,16 +234,18 @@ def test_start_without_learned_value_new_initial_values(miner, level, mhz, mode)
 
 # ---------------------------------------------------------------- Modus
 
-def test_mode_up_at_361_and_down_only_at_340(miner):
+def test_mode_up_at_361_and_down_only_below_340(miner):
     r = warm(miner, mhz=358)
     assert miner.level == 4
     r.go(15, temp=79)                                             # +5 → 363 → mode 03 zuerst
     assert miner.level == 3 and miner.clock() == 363 and miner.mode_sets == [3]
     assert [k for k in r.j.kinds() if k in ('modus', 'takt')][-2:] == ['modus', 'takt']
-    assert fa.required_level(341, 3) == 3 and fa.required_level(340, 3) == 4     # Spielraum 20 MHz (Nutzer 26.10.)
+    assert fa.required_level(340, 3) == 3 and fa.required_level(339, 3) == 4     # nur kleiner (Nutzer 08.11.)
+    assert fa.required_level(335, 3) == 4
     assert fa.required_level(361, 4) == 3 and fa.required_level(360, 4) == 4
-    assert fa.required_level(360, 2) == 3 and fa.required_level(361, 2) == 2
-    assert fa.required_level(400, 0) == 1 and fa.required_level(401, 0) == 0
+    assert fa.required_level(360, 2) == 2 and fa.required_level(359, 2) == 3
+    assert fa.required_level(380, 1) == 1 and fa.required_level(379, 1) == 2
+    assert fa.required_level(400, 0) == 0 and fa.required_level(399, 0) == 1
     assert fa.table_level(360) == 4 and fa.table_level(361) == 3 and fa.table_level(440) == 0
 
 
@@ -371,7 +373,7 @@ def test_no_clock_change_in_the_zieltemperatur(miner):
 def test_bands_and_band_1_minus_by_the_zeit_im_zieltemperatur():
     assert [fa.band_of(t, 85) for t in (84, 85, 86, 88, 89, 91, 92, 94, 95, 99, 120)] == \
         [None, None, 1, 1, 2, 2, 3, 3, 4, 4, 4]
-    assert [fa.minus_band_1(s) for s in (0, 59, 60, 300, 301, 3600)] == [15, 15, 10, 10, 5, 5]
+    assert [fa.minus_band_1(s) for s in (0, 59, 60, 300, 301, 3600)] == [10, 10, 10, 10, 5, 5]   # Nutzer 08.11.
 
 
 def test_example_of_the_approval_timing_within_an_excursion(miner):
@@ -406,9 +408,9 @@ def test_example_of_the_approval_timing_within_an_excursion(miner):
     assert r.st['locks']['senkung'] == (x + timedelta(minutes=11)).isoformat()
 
 
-@pytest.mark.parametrize('stay, minus', [(55, 15), (60, 10), (240, 10), (300, 10), (305, 5)])
+@pytest.mark.parametrize('stay, minus', [(55, 10), (60, 10), (240, 10), (300, 10), (305, 5)])
 def test_band_1_minus_by_the_time_in_the_zieltemperatur(miner, stay, minus):
-    """Beispiel der Freigabe: 4 min in 80–85, dann 86 → −10; unter 60 s −15, über 5 min −5."""
+    """Beispiel der Freigabe: 4 min in 80–85, dann 86 → −10; 0–5 min −10, über 5 min −5 (Nutzer 08.11.)."""
     r = warm(miner)                                               # 82 °C seit T0
     r.go(stay - 10, temp=82)
     r.go(5, temp=86)
@@ -416,66 +418,76 @@ def test_band_1_minus_by_the_time_in_the_zieltemperatur(miner, stay, minus):
     assert r.events('takt')[-1]['details']['zeit_im_ziel_s'] == stay
 
 
-def test_directly_from_below_ztu_to_86_minus_15(miner):
-    """Beispiel der Freigabe: direkt 79 → 86 → −15 (ein Wert unter ZTU beendet den Aufenthalt)."""
+def test_directly_from_below_ztu_to_86_minus_10(miner):
+    """Direkt 79 → 86 → −10 (ein Wert unter ZTU beendet den Aufenthalt; bis v2.2.7 −15, Nutzer 08.11.)."""
     r = warm(miner)
     r.go(5, temp=79)                                              # +5
     r.go(5, temp=86)
-    assert r.st['clock_set'] == 290 and r.st['hot']['dwell_s'] == 0
-    assert r.events('takt')[-1]['trigger'] == 'Chiptemperatur 86 °C (Bereich 1, ZeitImZieltemperatur 0 s): Takt −15 MHz'
+    assert r.st['clock_set'] == 295 and r.st['hot']['dwell_s'] == 0
+    assert r.events('takt')[-1]['trigger'] == 'Chiptemperatur 86 °C (Bereich 1, ZeitImZieltemperatur 0 s): Takt −10 MHz'
 
 
 def test_entry_from_above_starts_the_time_in_the_zieltemperatur(miner):
     r = warm(miner)
     r.go(45, temp=82)
-    r.go(5, temp=86)                                              # 55 s in ZT: −15
-    assert r.st['clock_set'] == 285
+    r.go(5, temp=86)                                              # 55 s in ZT: −10
+    assert r.st['clock_set'] == 290
     r.go(240, temp=84)                                            # von oben zurück: 4 min in ZT
     r.go(5, temp=86)                                              # letzte Senkung > 3 min her: sofort −10
-    assert r.st['clock_set'] == 275 and r.st['hot']['dwell_s'] == 240
+    assert r.st['clock_set'] == 280 and r.st['hot']['dwell_s'] == 240
 
 
 def test_excursion_start_less_than_3_min_after_the_last_reduction_waits_until_3_min(miner):
     r = warm(miner)
     r.go(45, temp=82)
     x = r.now
-    r.go(5, temp=86)                                              # −15
+    r.go(5, temp=86)                                              # −10
     r.go(30, temp=84)                                             # kurz in der Zieltemperatur
     r.go(5, temp=86)                                              # neuer Ausflug 35 s nach der Senkung: warten
-    assert r.st['clock_set'] == 285 and r.st['hot']['next_cut_at'] == (x + timedelta(minutes=3)).isoformat()
+    assert r.st['clock_set'] == 290 and r.st['hot']['next_cut_at'] == (x + timedelta(minutes=3)).isoformat()
     r.go(140, temp=86)
-    assert r.st['clock_set'] == 285
-    r.go(5, temp=86)                                              # 3 min nach der letzten Senkung (30 s in ZT: −15)
-    assert r.st['clock_set'] == 270
+    assert r.st['clock_set'] == 290
+    r.go(5, temp=86)                                              # 3 min nach der letzten Senkung (30 s in ZT: −10)
+    assert r.st['clock_set'] == 280
 
 
 def test_higher_band_reduces_at_once_even_during_the_3_min_wait(miner):
     r = warm(miner)
     r.go(45, temp=82)
-    r.go(5, temp=86)                                              # −15
+    r.go(5, temp=86)                                              # −10
     r.go(30, temp=84)
     r.go(5, temp=86)                                              # wartet bis 3 min nach der Senkung
     r.go(5, temp=89)                                              # Bereich 2: sofort −20
-    assert r.st['clock_set'] == 265
+    assert r.st['clock_set'] == 270
 
 
 def test_higher_band_after_a_short_dip_reduces_at_once(miner):
-    """Nutzer 08.11.: 86 °C −15, 30 s 84 °C, dann direkt 95 °C (Bereich 4) – sofort −50, nicht erst 3 min nach −15."""
+    """Nutzer 08.11.: 86 °C −10, 30 s 84 °C, dann direkt 95 °C (Bereich 4) – sofort −50, nicht erst 3 min nach −10."""
     r = warm(miner)
     r.go(45, temp=82)
-    r.go(5, temp=86)                                              # −15
+    r.go(5, temp=86)                                              # −10
     r.go(30, temp=84)                                             # kurz in der Zieltemperatur
     r.go(5, temp=95)                                              # Bereich 4 > Bereich 1 der letzten Senkung
-    assert r.st['clock_set'] == 235 and r.st['cut_band'] == 4
+    assert r.st['clock_set'] == 240 and r.st['cut_band'] == 4
     assert r.events('takt')[-1]['trigger'] == 'Chiptemperatur 95 °C (Bereich 4): Takt −50 MHz'
 
 
-@pytest.mark.parametrize('temp, minus, band', [(88, 15, 1), (91, 20, 2), (94, 20, 3), (96, 20, 3), (97, 50, 4),
+def test_running_excursion_with_the_old_minus_15_reduces_by_10(miner):
+    """Nutzer 08.11. (ae): ein beim Update laufender Ausflug mit dem alten Wert −15 senkt ab sofort um −10."""
+    r = warm(miner)
+    r.go(5, temp=86)                                              # −10
+    r.st['hot']['minus1'] = 15                                    # Zustand von v2.2.7
+    r.go(120, temp=86)                                            # 2 min später im selben Bereich: −10, nicht −15
+    assert r.st['clock_set'] == 280 and r.st['hot']['minus1'] == 10
+    assert r.events('takt')[-1]['trigger'].endswith('Takt −10 MHz')
+
+
+@pytest.mark.parametrize('temp, minus, band', [(88, 10, 1), (91, 20, 2), (94, 20, 3), (96, 20, 3), (97, 50, 4),
                                                (105, 50, 4)])
 def test_minus_by_band_relative_to_zto_without_96_cap(miner, temp, minus, band):
     """Zieltemperatur 83–87 °C: Bereich 1 ab 88, 2 ab 91, 3 ab 94, 4 ab 97 °C – kein Deckel bei 96 °C mehr."""
     r = warm(miner, zb=(83, 87), tmax=85)
-    r.go(5, temp=temp)                                            # 10 s in ZT: Bereich 1 −15
+    r.go(5, temp=temp)                                            # 10 s in ZT: Bereich 1 −10
     assert r.st['clock_set'] == 300 - minus and r.st['hot']['band'] == band
 
 
@@ -486,29 +498,29 @@ def test_reduction_replaces_a_pending_command(miner):
     r.go(5, temp=79)                                              # +5 gesendet, Miner übernimmt nicht
     assert r.st['pending']['value'] == 305
     r.go(5, temp=86)
-    assert r.st['clock_set'] == 290 and r.st['pending']['value'] == 290
+    assert r.st['clock_set'] == 295 and r.st['pending']['value'] == 295
     assert [e for e in r.events('takt') if e.get('clock_new') == 305][-1]['takeover_state'] == 'nicht gemessen'
 
 
 def test_lock_after_a_reduction_5_min_never_early(miner):
     r = warm(miner)
     x = r.now
-    r.go(5, temp=86)                                              # −15
-    assert r.st['clock_set'] == 285
+    r.go(5, temp=86)                                              # −10
+    assert r.st['clock_set'] == 290
     r.go(60, temp=84)                                             # über ZTU+3: die Sperre nach der Senkung bleibt
     assert r.st['locks']['senkung'] == (x + timedelta(minutes=5)).isoformat()
     r.go(235, temp=79)
-    assert r.st['clock_set'] == 285
-    r.go(5, temp=79)                                              # 5 min nach der Senkung
     assert r.st['clock_set'] == 290
+    r.go(5, temp=79)                                              # 5 min nach der Senkung
+    assert r.st['clock_set'] == 295
 
 
 def test_clock_below_100_is_an_error_and_not_sent(miner):
-    r = warm(miner, mhz=115)
-    r.go(5, temp=86)                                              # 115 − 15 = 100: erlaubt
+    r = warm(miner, mhz=110)
+    r.go(5, temp=86)                                              # 110 − 10 = 100: erlaubt
     assert miner.clock() == 100
     sends = len(miner.clock_sets)
-    r.go(125, temp=86)                                            # nach 2 min: 85 MHz – Fehler, nicht gesendet
+    r.go(125, temp=86)                                            # nach 2 min: 90 MHz – Fehler, nicht gesendet
     assert len(miner.clock_sets) == sends and r.st['clock_set'] == 100
     errors = [e for e in r.events('fehler') if e['details']['grund'] == 'takt_unter_100']
     assert len(errors) == 1                                       # nicht jede Runde, erst wieder nach 2 min
@@ -518,8 +530,8 @@ def test_reduction_with_mode_change_clock_first_then_mode_then_clock(miner):
     r = warm(miner, mhz=390)
     assert miner.level == 2 and miner.clock() == 390
     miner.clock_sets.clear()
-    r.go(15, temp=95)                                             # Bereich 4: 390 − 50 = 340 → mode 04
-    assert miner.mode_sets[-1] == 4 and miner.level == 4
+    r.go(15, temp=95)                                             # Bereich 4: 390 − 50 = 340 → mode 03 (04 erst unter 340)
+    assert miner.mode_sets[-1] == 3 and miner.level == 3
     assert miner.clock_sets[0] == pytest.approx(340, abs=1) and miner.clock() == 340
     assert len(miner.clock_sets) == 2                             # Takt, Modus, Takt erneut
 
@@ -529,8 +541,8 @@ def test_missing_stock_clock_is_estimated_and_never_blocks(miner):
     miner.level, miner.points = 1, list(STOCK['2/L1'])           # mode 01: kein Profil, kein gemerkter Standardtakt
     r = started(miner, ac, level=5, learned={'5': {'mhz': 410, 'temp_avg': 82, 'at': 'x', 'count': 1}})
     assert miner.clock() == 410
-    r.go(5, temp=86)                                              # 10 s in ZT: −15
-    assert miner.clock() == 395 and r.events('fehler')[0]['details']['grund'] == 'standardtakt_fehlt'
+    r.go(5, temp=86)                                              # 10 s in ZT: −10
+    assert miner.clock() == 400 and r.events('fehler')[0]['details']['grund'] == 'standardtakt_fehlt'
 
 
 # ---------------------------------------------------------------- Kühlmodus (Nutzer 06.11.)
@@ -576,7 +588,7 @@ def test_kuehlmodus_jump_to_plus_2_and_at_most_level_10(miner, base, temp, fan):
 def test_no_increase_3_min_after_the_kuehlmodus(miner):
     ac = FakeAC(level=3)
     r = warm(miner, ac, level=3)
-    r.go(5, temp=88)                                              # Kühlmodus, −15 (Sperre 5 min)
+    r.go(5, temp=88)                                              # Kühlmodus, −10 (Sperre 5 min)
     r.go(360, temp=84)                                            # Kühlmodus bleibt, Sperre nach der Senkung vorbei
     assert r.st['cool'] and not r.st['locks']['senkung']
     clock = r.st['clock_set']
@@ -737,12 +749,12 @@ def test_start_keeps_locks_last_reduction_and_zeit_im_zieltemperatur(miner):
     assert r.st['hot']['next_cut_at'] == (x + timedelta(minutes=3)).isoformat()   # neuer Ausflug: 3 min nach der Senkung
     assert r.st['clock_set'] == 300                               # Starttakt (Lernwert), Senkung erst dann
     r.go((x + timedelta(minutes=3) - r.now).total_seconds() + 5, temp=86)
-    assert r.st['clock_set'] == 285
+    assert r.st['clock_set'] == 290
 
 
 def test_automatik_off_on_keeps_locks_and_the_last_reduction(miner):
     r = warm(miner)
-    r.go(5, temp=86)                                              # −15, Sperre 5 min
+    r.go(5, temp=86)                                              # −10, Sperre 5 min
     x, lock = r.last, r.st['locks']['senkung']
     r.go(10, temp=82, enabled=False)
     r.go(5, temp=79, enabled=True)                                # Automatik ein: Start, Sperre läuft weiter
@@ -1175,7 +1187,7 @@ def test_start_hold_ends_at_a_jump_above_zto_and_the_reduction_follows(miner):
     r.go(30, temp=70)
     assert r.st.get('start_hold')
     r.go(5, temp=86)                                              # über ZTU−5: Pause vorbei; Senkung über ZTO
-    assert not r.st.get('start_hold') and r.st['clock_set'] == 285
+    assert not r.st.get('start_hold') and r.st['clock_set'] == 290
     assert r.events('startpause_ende')[-1]['trigger'] == 'Startpause beendet: 75 °C erreicht (nach 0 min)'
 
 
@@ -1416,7 +1428,7 @@ def test_settings_never_read_keeps_the_last_known_mode(miner):
     r.go(30, temp=82)
     miner.web_down = miner.never_read = True
     r.go(5, temp=86)
-    assert not r.events('miner_offline') and r.st['mode_key'] == '2/L4' and r.st['clock_set'] == 285
+    assert not r.events('miner_offline') and r.st['mode_key'] == '2/L4' and r.st['clock_set'] == 290
 
 
 def test_waiting_mode_switch_caps_the_clock_at_the_current_mode(miner):

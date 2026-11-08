@@ -90,8 +90,8 @@ function logicText(lo, hi) {
     ' °C, +40 bei ' + (lo - 21) + ' °C oder kälter (höchstens 440 MHz); danach keine Takterhöhung für 3 min ' +
     '(+5, +10) bzw. 2 min (+15, +20, +40). Diese Sperren und die nach Heiz- oder Kühlmodus enden früher ab ' +
     (lo + 4) + ' °C. Keine Takterhöhung, solange ein Befehl noch nicht übernommen ist. ' +
-    'Über ' + hi + ' °C Takt runter: Bereich 1 (' + (hi + 1) + '–' + (hi + 3) + ' °C) −15 / −10 / −5 MHz bei ' +
-    'einer ZeitImZieltemperatur davor (ununterbrochen in ' + range + ') unter 1 min / 1–5 min / über 5 min, ' +
+    'Über ' + hi + ' °C Takt runter: Bereich 1 (' + (hi + 1) + '–' + (hi + 3) + ' °C) −10 / −5 MHz bei ' +
+    'einer ZeitImZieltemperatur davor (ununterbrochen in ' + range + ') bis 5 min / über 5 min, ' +
     'Bereich 2 (' + (hi + 4) + '–' + (hi + 6) + ' °C) −20 MHz, Bereich 3 (' + (hi + 7) + '–' + (hi + 9) +
     ' °C) −20 MHz, Bereich 4 (ab ' + (hi + 10) + ' °C) −50 MHz; mindestens 100 MHz. Die erste Senkung sofort ' +
     '(lag die letzte unter 3 min zurück: 3 min nach ihr, in einem höheren Bereich als bei ihr sofort), im ' +
