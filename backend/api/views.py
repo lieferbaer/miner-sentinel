@@ -1331,6 +1331,75 @@ def device_analytics(request):
         'comparison': comparison,
     })
 
+
+POOL_DAILY_DAYS = 160                  # always 160 days (Nutzer 08.11.)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def pool_daily(request):
+    """Balance und Pool-Hashrate je Tag (v2.2.9, Nutzer 08.11.): per pool account the last 160 German calendar days
+    (Europe/Berlin) up to today (incl. today, partial), from pool_stats_hourly. Per day the account balance and the
+    pool 24-h hashrate of the day's last hour that has one (value at the end of the day); days without data are null.
+    Fixed window, independent of the page's time range (not parse_time_window: it caps at 90 days)."""
+    from datetime import datetime, time as dtime
+    from zoneinfo import ZoneInfo
+
+    from .models import PoolStatsHourly
+
+    berlin = ZoneInfo('Europe/Berlin')
+    today = timezone.now().astimezone(berlin).date()
+    first_day = today - timedelta(days=POOL_DAILY_DAYS - 1)
+    days = [first_day + timedelta(days=i) for i in range(POOL_DAILY_DAYS)]
+    start = datetime.combine(first_day, dtime.min, tzinfo=berlin)
+    end = datetime.combine(today + timedelta(days=1), dtime.min, tzinfo=berlin)
+
+    # accounts: the same rule as the accounts block of device_analytics (pool_stats {type, address} of the devices)
+    accounts = []
+    seen_accounts = set()
+    for device in Device.objects.all().order_by('name'):
+        pool_config = (device.connection_config or {}).get('pool_stats') or {}
+        address = pool_config.get('address')
+        pool_type = pool_config.get('type')
+        if not address or (pool_type, address) in seen_accounts:
+            continue
+        seen_accounts.add((pool_type, address))
+        latest_pool = (
+            PoolStats.objects.filter(pool_type=pool_type, pool_address=address)
+            .order_by('-recorded_at')
+            .values('pool_type', 'pool_address')
+            .first()
+        )
+        if not latest_pool:
+            continue
+        per_day = {}
+        rows = (PoolStatsHourly.objects.filter(pool_type=pool_type, pool_address=address, hour__gte=start,
+                                               hour__lt=end)
+                .order_by('hour').values_list('hour', 'balance_last', 'hashrate_1d_last'))
+        for hour, balance, hashrate in rows:
+            entry = per_day.setdefault(hour.astimezone(berlin).date(), {})
+            if balance is not None:               # ordered by hour: the day's last hour with a value wins
+                entry['balance_btc'] = balance
+            if hashrate is not None:
+                entry['hashrate_ghs'] = hashrate
+        accounts.append({
+            'pool_type': latest_pool['pool_type'],
+            'account': latest_pool['pool_address'],
+            'series': [{
+                'day': day.isoformat(),
+                'balance_btc': per_day.get(day, {}).get('balance_btc'),
+                'hashrate_ghs': per_day.get(day, {}).get('hashrate_ghs'),
+            } for day in days],
+        })
+
+    return Response({
+        'days': POOL_DAILY_DAYS,
+        'start': first_day.isoformat(),
+        'end': today.isoformat(),
+        'accounts': accounts,
+    })
+
+
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def refresh_network_data(request):

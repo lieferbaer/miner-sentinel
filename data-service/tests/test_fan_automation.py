@@ -102,11 +102,11 @@ def miner(monkeypatch):
 
 
 def row(state=None, level=5, enabled=True, level_at=None, maintenance_at=None, restart_req_at=None,
-        target_low=ZT[0], target_high=ZT[1]):
+        target_low=ZT[0], target_high=ZT[1], learned_del=None):
     return {'id': 1, 'device_id': 3, 'enabled': enabled, 'ac_dev_id': 'dev', 'ac_port': 1, 'level': level,
             'level_at': level_at, 'maintenance_at': maintenance_at, 'state': state or {},
             'restart_req_at': restart_req_at, 'target_low': target_low, 'target_high': target_high,
-            'ip_address': '10.0.0.15', 'port': 4028,
+            'ip_address': '10.0.0.15', 'port': 4028, 'learned_del': learned_del,
             'connection_config': {'throttle': {'profiles': PROFILES}}}
 
 
@@ -234,19 +234,24 @@ def test_start_without_learned_value_new_initial_values(miner, level, mhz, mode)
 
 # ---------------------------------------------------------------- Modus
 
-def test_mode_up_at_361_and_down_only_below_340(miner):
+def test_mode_up_at_361_and_down_only_below_335(miner):
     r = warm(miner, mhz=358)
     assert miner.level == 4
     r.go(15, temp=79)                                             # +5 → 363 → mode 03 zuerst
     assert miner.level == 3 and miner.clock() == 363 and miner.mode_sets == [3]
     assert [k for k in r.j.kinds() if k in ('modus', 'takt')][-2:] == ['modus', 'takt']
-    assert fa.required_level(340, 3) == 3 and fa.required_level(339, 3) == 4     # nur kleiner (Nutzer 08.11.)
-    assert fa.required_level(335, 3) == 4
+    assert fa.MODE_DOWN_MARGIN == 25                              # Nutzer 08.11. (vorher 20)
+    # abwärts nur kleiner als Obergrenze des tieferen Modus − 25 (Nutzer 08.11.)
+    assert fa.required_level(335, 3) == 3 and fa.required_level(334, 3) == 4     # mode 03 → 04 unter 335
+    assert fa.required_level(340, 3) == 3 and fa.required_level(339, 3) == 3     # bis v2.2.8 schon unter 340
+    assert fa.required_level(355, 2) == 2 and fa.required_level(354, 2) == 3     # mode 02 → 03 unter 355
+    assert fa.required_level(375, 1) == 1 and fa.required_level(374, 1) == 2     # mode 01 → 02 unter 375
+    assert fa.required_level(395, 0) == 0 and fa.required_level(394, 0) == 1     # mode 00 → 01 unter 395
+    assert fa.required_level(330, 0) == 4 and fa.required_level(354, 0) == 3     # mehrere Modi auf einmal
+    # aufwärts unverändert ab Obergrenze + 1
     assert fa.required_level(361, 4) == 3 and fa.required_level(360, 4) == 4
-    assert fa.required_level(360, 2) == 2 and fa.required_level(359, 2) == 3
-    assert fa.required_level(380, 1) == 1 and fa.required_level(379, 1) == 2
-    assert fa.required_level(400, 0) == 0 and fa.required_level(399, 0) == 1
-    assert fa.table_level(360) == 4 and fa.table_level(361) == 3 and fa.table_level(440) == 0
+    assert fa.required_level(381, 3) == 2 and fa.required_level(401, 2) == 1 and fa.required_level(421, 1) == 0
+    assert fa.table_level(360) == 4 and fa.table_level(361) == 3 and fa.table_level(440) == 0   # Start unverändert
 
 
 def test_clock_at_most_440(miner):
@@ -526,13 +531,14 @@ def test_clock_below_100_is_an_error_and_not_sent(miner):
     assert len(errors) == 1                                       # nicht jede Runde, erst wieder nach 2 min
 
 
-def test_reduction_with_mode_change_clock_first_then_mode_then_clock(miner):
-    r = warm(miner, mhz=390)
-    assert miner.level == 2 and miner.clock() == 390
+@pytest.mark.parametrize('start, mode', [(385, 3), (384, 4)])
+def test_reduction_with_mode_change_clock_first_then_mode_then_clock(miner, start, mode):
+    r = warm(miner, mhz=start)
+    assert miner.level == 2 and miner.clock() == start
     miner.clock_sets.clear()
-    r.go(15, temp=95)                                             # Bereich 4: 390 − 50 = 340 → mode 03 (04 erst unter 340)
-    assert miner.mode_sets[-1] == 3 and miner.level == 3
-    assert miner.clock_sets[0] == pytest.approx(340, abs=1) and miner.clock() == 340
+    r.go(15, temp=95)                                             # Bereich 4: −50 → 335 bleibt mode 03, 334 → mode 04
+    assert miner.mode_sets[-1] == mode and miner.level == mode    # (04 erst unter 335, Nutzer 08.11.)
+    assert miner.clock_sets[0] == pytest.approx(start - 50, abs=1) and miner.clock() == start - 50
     assert len(miner.clock_sets) == 2                             # Takt, Modus, Takt erneut
 
 
@@ -868,13 +874,57 @@ def test_learns_after_15_minutes_unchanged(miner):
     assert r.events('lernwert')
 
 
-def test_learning_in_the_zieltemperatur_mean_clock_is_stored(miner):
+def test_learning_in_the_zieltemperatur_set_clock_at_the_end_is_stored(miner):
+    """Nutzer 08.11. (ag C): Lernwert = gesetzter Takt am Ende der 15 min, kein Mittelwert mehr; daneben der mittlere
+    Takt laut Miner nur aus Runden ohne offenen Befehl."""
     ac = FakeAC(level=4)
     r = started(miner, ac, level=4, learned={'4': {'mhz': 280, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    since = r.st['learn_since']
     r.go(300, temp=82)
-    r.go(625, temp=83)
+    r.go(30, temp=79)                                             # kurzer Ausflug: +5 → 285, Lernperiode läuft weiter
+    assert r.st['learn_since'] == since and r.st['clock_set'] == 285
+    r.go(600, temp=83)
     lw = r.st['learned']['4']
-    assert lw['count'] == 2 and lw['mhz'] == 280
+    assert lw['count'] == 2 and lw['mhz'] == 285 and isinstance(lw['mhz'], int)   # Mittel wäre ≈ 281
+    assert 'learn_clock_sum' not in r.st
+    period = [c for c in r.j.cycles if since <= c['recorded_at'].isoformat() <= lw['at']]
+    free = [c['clock_reported'] for c in period if not c['pending']]
+    assert len(free) < len(period)                                # Runden mit offenem Befehl zählen nicht
+    assert lw['mhz_miner'] == round(sum(free) / len(free), 1)
+    assert lw['mhz_miner'] != round(sum(c['clock_reported'] for c in period) / len(period), 1)
+    ev = r.events('lernwert')[-1]
+    assert ev['details']['takt'] == 285 and ev['details']['takt_miner'] == lw['mhz_miner']
+    assert any(n[1] == 'Lernwert Stufe 4: 285 MHz (gesetzter Takt), Ø 82.5 °C (2. Mal).' for n in r.st['log'])
+
+
+def test_learned_value_without_miner_clock_while_a_command_stays_open(miner):
+    """Der Miner übernimmt den Takt nie (Befehl bleibt offen): kein Ø Takt laut Miner, das Feld fehlt."""
+    ac = FakeAC(level=4)
+    miner.ignore_clock = True
+    r = started(miner, ac, level=4, learned={'4': {'mhz': 280, 'temp_avg': 82, 'at': 'x', 'count': 1}})
+    r.go(15 * 60 + 30, temp=82)
+    lw = r.st['learned']['4']
+    assert lw['count'] == 2 and lw['mhz'] == 280 and 'mhz_miner' not in lw
+    assert r.events('lernwert')[-1]['details']['takt_miner'] is None
+
+
+def test_learning_period_running_at_the_update_does_not_fail(miner):
+    """Lernperiode von vor v2.2.9 (learn_clock_sum, ohne learn_mclk_*): endet normal, Ø Takt laut Miner aus den
+    Runden danach."""
+    ac = FakeAC(level=4)
+    miner.points = fa.points_for(STOCK['2/L4'], 280)
+    n = 179
+    state = {'v': fa.STATE_VERSION, 'seen_at': T0.isoformat(), 'level_seen': 'x', 'zb': list(ZT), 'elapsed': 900,
+             'learned': {'4': dict(LW, mhz=280)}, 'clock_set': 280, 'mode_key': '2/L4', 'stock': {},
+             'fan_target': 4, 'fan_set': 4, 'fan_read': 4, 'fan_read_at': T0.isoformat(),
+             'learn_since': (T0 - timedelta(seconds=15 * 60)).isoformat(), 'learn_level': 4,
+             'learn_sum': 82 * n, 'learn_n': n, 'learn_clock_sum': 280.0 * n, 'learn_dh_sum': 1.2 * n,
+             'learn_dh_n': n, 'learn_ths_sum': 150.0 * n, 'learn_ths_n': n, 'learn_w_sum': 2000.0 * n, 'learn_w_n': n}
+    r = Run(miner, ac, 4, state=state).go(5, temp=82)
+    lw = r.st['learned']['4']
+    assert not r.st.get('last_error') and lw['count'] == 2 and lw['mhz'] == 280
+    assert lw['mhz_miner'] == round(sum(miner.points) / 4, 1)    # nur die Runde nach dem Update
+    assert r.st['learn_mclk_n'] == 0 and r.st['learn_mclk_sum'] == 0.0    # neue Lernperiode
 
 
 def test_short_dip_below_ztu_keeps_learning_long_one_restarts(miner):
@@ -1770,7 +1820,7 @@ class _Cur:
         return []
 
 
-def test_select_reads_the_target_range_and_nothing_of_the_removed_features(monkeypatch):
+def _select_sql(monkeypatch):
     seen = []
 
     class Conn:
@@ -1783,10 +1833,136 @@ def test_select_reads_the_target_range_and_nothing_of_the_removed_features(monke
     monkeypatch.setenv('MINERSENTINEL_ENV', 'Live')
     monkeypatch.setattr(fa.psycopg2, 'connect', lambda url: Conn())
     fa.run_fan_automation('postgresql://x', ac=FakeAC())
-    sql = seen[0]
+    return seen[0]
+
+
+def test_select_reads_the_target_range_and_nothing_of_the_removed_features(monkeypatch):
+    sql = _select_sql(monkeypatch)
     assert 'f.target_low' in sql and 'f.target_high' in sql and "'heat_fan_due'" in sql
     for removed in ('cal_active', 'calibration_runs', 'temp_test_at', 'caps_cleared', 'obergrenzen_loeschen'):
         assert removed not in sql
+
+
+def test_select_reads_the_delete_requests_also_with_the_automatik_off(monkeypatch):
+    """Nutzer 08.11.: alle neuen Anfragen „Lernwert löschen“ (nach learned_del_seen) als Liste; die Zeile wird auch bei
+    ausgeschalteter Automatik gelesen, solange eine Anfrage offen ist."""
+    sql = _select_sql(monkeypatch)
+    assert "l.kind = 'lernwert_loeschen'" in sql and "l.source = 'nutzer'" in sql
+    assert "(f.state->>'learned_del_seen')::timestamptz" in sql and 'AS learned_del ' in sql
+    assert "json_build_object('recorded_at', l.recorded_at, 'details', l.details) ORDER BY l.recorded_at, l.id" in sql
+    where = sql.split(' WHERE f.enabled ')[1]
+    assert where.count('OR EXISTS (SELECT 1 FROM automation_log l') == 1 and "'lernwert_loeschen'" in where
+    assert 'pool_url' not in sql and 'pool_user' not in sql
+
+
+# ---------------------------------------------------------------- Lernwert löschen (Nutzer 08.11.)
+
+L4 = dict(LW, mhz=280, at='2026-10-24T11:00:00+00:00')
+L5 = dict(LW, at='2026-10-24T11:30:00+00:00')
+
+
+def _req(zt, level, at, when):
+    """A request row as the SELECT delivers it (learned_del)."""
+    return {'recorded_at': when.isoformat(), 'details': {'zieltemperatur': zt, 'stufe': level, 'at': at}}
+
+
+def test_delete_a_learned_value_of_the_current_range_learning_goes_on(miner):
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, learned={'4': L4, '5': L5})
+    r.go(60, temp=82)
+    since, before = r.st['learn_since'], r.st
+    when = r.now - timedelta(seconds=2)
+    r.go(5, temp=82, learned_del=[_req('80-85', 5, L5['at'], when)])   # Stufe 5 lernt gerade
+    r.kw['learned_del'] = None
+    assert r.st['learned'] == {'4': L4} and before['learned'] == {'4': L4, '5': L5}   # neue dicts, nie in place
+    assert r.st['learned_del_seen'] == when.isoformat()          # Zeit der Anfrage, nicht jetzt
+    assert any(n[1] == 'Lernwert Stufe 5 (80–85 °C) gelöscht (Nutzer).' for n in r.st['log'])
+    assert r.st['learn_since'] == since                           # die Lernperiode läuft unverändert weiter (ai ja)
+    assert not r.events('lernwert_loeschen') and not r.st.get('last_error')
+    r.go(15 * 60, temp=82)
+    assert r.st['learned']['5']['count'] == 1 and r.st['learned']['4'] == L4
+
+
+def test_delete_learned_values_of_other_ranges_two_requests_in_one_round(miner):
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, learned={'5': L5})
+    archive = {'82-86': {'5': L5}, '77-81': {'4': L4, '5': L5}}
+    r.st = dict(r.st, learned_zb=archive)
+    first, second = r.now - timedelta(seconds=3), r.now - timedelta(seconds=1)
+    r.go(5, temp=82, learned_del=[_req('82-86', 5, L5['at'], first), _req('77-81', 4, L4['at'], second)])
+    r.kw['learned_del'] = None
+    assert r.st['learned_zb'] == {'77-81': {'5': L5}}            # leer gewordener Eintrag 82-86 entfällt
+    assert archive == {'82-86': {'5': L5}, '77-81': {'4': L4, '5': L5}}
+    assert r.st['learned'] == {'5': L5} and r.st['learned_del_seen'] == second.isoformat()
+    log = [n[1] for n in r.st['log']]
+    assert 'Lernwert Stufe 5 (82–86 °C) gelöscht (Nutzer).' in log and 'Lernwert Stufe 4 (77–81 °C) gelöscht (Nutzer).' in log
+
+
+def test_delete_request_for_a_value_learned_again_or_gone_keeps_everything(miner):
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, learned={'4': L4, '5': L5})
+    r.st = dict(r.st, learned_zb={'82-86': {'5': L5}})
+    when = r.now - timedelta(seconds=1)
+    reqs = [_req('80-85', 4, 'älter', when), _req('80-85', 6, L5['at'], when), _req('82-86', 5, None, when),
+            _req('70-74', 5, L5['at'], when), {'recorded_at': when.isoformat(), 'details': {'zieltemperatur': ['x']}}]
+    r.go(5, temp=82, learned_del=reqs)
+    r.kw['learned_del'] = None
+    assert r.st['learned'] == {'4': L4, '5': L5} and r.st['learned_zb'] == {'82-86': {'5': L5}}
+    assert not r.st.get('last_error') and r.st['learned_del_seen'] == when.isoformat()
+    kept = [n[1] for n in r.st['log'] if 'nicht gelöscht: nicht mehr vorhanden oder neu gelernt.' in n[1]]
+    assert len(kept) == 5 and kept[0] == 'Lernwert Stufe 4 (80–85 °C) nicht gelöscht: nicht mehr vorhanden oder neu gelernt.'
+
+
+def test_delete_request_with_details_not_an_object_does_not_fail_the_round(miner):
+    """details is jsonb: a list, string or number must not fail the round (else learned_del_seen never moves on and
+    every later round fails the same way)."""
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, learned={'4': L4, '5': L5})
+    when = r.now - timedelta(seconds=1)
+    reqs = [{'recorded_at': when.isoformat(), 'details': d} for d in (['x'], 'x', 5)]
+    r.go(5, temp=82, learned_del=reqs)
+    r.kw['learned_del'] = None
+    assert r.st['learned'] == {'4': L4, '5': L5} and not r.st.get('last_error')
+    assert r.st['learned_del_seen'] == when.isoformat()
+    kept = [n[1] for n in r.st['log'] if 'nicht gelöscht: nicht mehr vorhanden oder neu gelernt.' in n[1]]
+    assert len(kept) == 3
+
+
+def test_delete_marker_survives_automatik_ein(miner):
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, learned={'4': L4, '5': L5})
+    r.go(10, enabled=False)
+    when = r.now - timedelta(seconds=1)
+    r.go(5, temp=82, enabled=True, learned_del=[_req('80-85', 4, L4['at'], when)])   # löschen und Automatik ein
+    r.kw['learned_del'] = None
+    assert r.events('start')[-1]['trigger'] == 'Automatik ein'
+    assert r.st['learned'] == {'5': L5} and r.st['learned_del_seen'] == when.isoformat()
+    r.go(10, temp=82, enabled=False)
+    r.go(10, temp=82, enabled=True)
+    assert r.st['learned_del_seen'] == when.isoformat() and r.st['learned'] == {'5': L5}
+
+
+def test_delete_while_the_automatik_is_off_only_deletes(miner):
+    """Zeile nur wegen der Anfrage gelesen (Aus-Runde lief schon): nur löschen und speichern – kein AC-Aufruf, kein
+    Minerbefehl, kein Lesen des Miners, nur die Aus-Runde im Protokoll wie bei v2.2.6."""
+    ac = FakeAC(level=5)
+    r = started(miner, ac, level=5, learned={'4': L4, '5': L5})
+    r.st = dict(r.st, learned_zb={'82-86': {'5': L5}})
+    r.go(10, enabled=False)
+    assert r.st['off'] and r.st['phase'] == 'aus'
+
+    def no_call(*args, **kw):
+        raise AssertionError('kein AC-Aufruf bei ausgeschalteter Automatik')
+    ac.speed_of = ac.set_fan_level = ac.set_fan_power = no_call
+    elapsed, sets, modes = miner.elapsed, len(miner.clock_sets), len(miner.mode_sets)
+    events, cycles = len(r.j.events), len(r.j.cycles)
+    when = r.now - timedelta(seconds=1)
+    r.go(5, learned_del=[_req('80-85', 4, L4['at'], when), _req('82-86', 5, L5['at'], when)])
+    r.kw['learned_del'] = None
+    assert r.st['learned'] == {'5': L5} and r.st['learned_zb'] == {} and r.st['learned_del_seen'] == when.isoformat()
+    assert miner.elapsed == elapsed and len(miner.clock_sets) == sets and len(miner.mode_sets) == modes
+    assert len(r.j.events) == events and len(r.j.cycles) == cycles + 1 and r.j.cycles[-1]['decision'] == 'Automatik aus'
+    assert r.st['off'] and r.st['phase'] == 'aus' and not r.st.get('last_error')
 
 
 # ---------------------------------------------------------------- Zustand vor v2.2.7 (Nutzer 06.11.)

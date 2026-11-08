@@ -1009,6 +1009,11 @@ if __name__ == '__main__':
     logger.info("Running initial data collection...")
     poll_all_sources()
 
+    # Balance und Pool-Hashrate je Tag (v2.2.9, Nutzer 08.11.): once at start, before the scheduler runs the regular
+    # rollup (no two rollups at the same time), the new hourly pool values for the remaining raw values – only while
+    # they are still missing
+    stats_rollup.run_pool_backfill(DATABASE_URL)
+
     # Schedule jobs using settings from database
     reschedule_jobs()
 

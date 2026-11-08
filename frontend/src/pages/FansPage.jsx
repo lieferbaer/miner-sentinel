@@ -131,81 +131,155 @@ function useAutomation(initial) {
   return [auto, setAuto]
 }
 
-/** Learned values per fan level: mean of the clock set by the regulation while the chip temperature stayed 15 min
- * in the Zieltemperatur (no Obergrenzen any more since v2.2.7, Nutzer 06.11.). */
-function LearnedTable({ learned, zb, level, lo, hi }) {
-  // only the per-level values of the regulation since 24.10. (older values per mode have no 'mhz' here)
-  const values = Object.fromEntries(Object.entries(learned || {}).filter(([, v]) => v && typeof v.mhz === 'number'))
+// only the per-level values of the regulation since 24.10. (older values per mode have no 'mhz' here)
+const perLevel = (learned) =>
+  Object.entries(learned || {}).filter(([, v]) => v && typeof v.mhz === 'number')
+    .sort(([a], [b]) => Number(a) - Number(b))
+
+/** The learned values of the other Zieltemperaturen ({"81-84": {"<stufe>": …}}), sorted by ZTU, then ZTO. */
+function otherEntries(others) {
+  return Object.entries(others || {})
+    .map(([key, values]) => [key, key.split('-').map(Number), values])
+    .filter(([, zb]) => zb.length === 2 && zb.every(Number.isInteger))
+    .sort(([, a], [, b]) => a[0] - b[0] || a[1] - b[1])
+    .flatMap(([key, zb, values]) =>
+      perLevel(values).map(([lv, v]) => ({ lv, v, range: zb[0] + '–' + zb[1] + ' °C', zbKey: key })))
+}
+
+/** Learned values per fan level after 15 min in the Zieltemperatur: the clock set by the regulation (since v2.2.9 the
+ * one at the end, before the mean) and the mean clock reported by the miner (Nutzer 08.11.; no Obergrenzen any more
+ * since v2.2.7, Nutzer 06.11.). The values of the current Zieltemperatur on top, below grey those of the other
+ * Zieltemperaturen (Nutzer 08.11., Variante B). Each value can be deleted (Nutzer 08.11.); the data-service deletes
+ * it, the live poll (every 5 s) then shows it gone. */
+function LearnedTable({ learned, others, zb, level, lo, hi, onCommand, busy, requested, setRequested }) {
+  const [confirm, setConfirm] = useState(null)
   // Zieltemperatur (Nutzer 28.10.): the learned values belong to the one the data-service has taken over (state.zb)
-  const range = Array.isArray(zb) && zb.length === 2 ? zb[0] + '–' + zb[1] + ' °C' : '—'
-  const rows = Object.keys(values).sort((a, b) => Number(a) - Number(b))
-  if (!rows.length) {
+  const known = Array.isArray(zb) && zb.length === 2
+  const range = known ? zb[0] + '–' + zb[1] + ' °C' : '—'
+  // without state.zb the current values cannot be addressed, so no delete button for them
+  const current = perLevel(learned).map(([lv, v]) => ({ lv, v, range, zbKey: known ? zb[0] + '-' + zb[1] : null }))
+  const other = otherEntries(others)
+  const none = (
+    <p className="text-muted-foreground">
+      Lernwerte: noch keine (nach 15 min stabil bei {lo}–{hi} °C und einer Fehlerrate unter 5 %).
+    </p>
+  )
+  if (!current.length && !other.length) return none
+  const OTHER = 'Andere Zieltemperaturen'
+  const item = (label, value) => (
+    <div>
+      <div className="text-xs font-normal text-muted-foreground">{label}</div>
+      <div className="whitespace-nowrap">{value}</div>
+    </div>
+  )
+  // Löschen with the inline question like Zurückschreiben; the request carries the 'at' of the shown value so that a
+  // value learned anew in the meantime is not deleted
+  const remove = ({ lv, v, zbKey }, size) => {
+    if (!zbKey) return null
+    const key = zbKey + '/' + lv + '/' + v.at
+    if (confirm === key) {
+      return (
+        <span className="flex flex-wrap items-center gap-2">
+          <span className="whitespace-nowrap">Lernwert wirklich löschen?</span>
+          <Button size="sm" variant="destructive" className={size} disabled={busy}
+            onClick={async () => {
+              setConfirm(null)
+              setRequested((prev) => [...prev, key])
+              // a failed request deletes nothing, so the value can be deleted again
+              const ok = await onCommand({ action: 'learned_delete', zb: zbKey, level: Number(lv), at: v.at })
+              if (!ok) setRequested((prev) => prev.filter((k) => k !== key))
+            }}>
+            Ja
+          </Button>
+          <Button size="sm" variant="secondary" className={size} onClick={() => setConfirm(null)}>
+            Nein
+          </Button>
+        </span>
+      )
+    }
     return (
-      <p className="text-muted-foreground">
-        Lernwerte: noch keine (nach 15 min stabil bei {lo}–{hi} °C und einer Fehlerrate unter 5 %).
-      </p>
+      <Button size="sm" variant="outline" className={size} disabled={busy || requested.includes(key)}
+        onClick={() => setConfirm(key)}>
+        Löschen
+      </Button>
     )
   }
+  // mobile: one entry per level like the Letzte Einträge (Nutzer 28.10.: Tabelle nicht mobil freundlich)
+  const entries = (list, muted) => (
+    <ul className={'divide-y divide-border/40 sm:hidden' + (muted ? ' text-muted-foreground' : '')}>
+      {list.map((row) => {
+        const { lv, v, range: r } = row
+        const action = remove(row, 'h-8 px-3 text-xs')
+        return (
+          <li key={r + lv} className={'py-1.5' + (!muted && Number(lv) === level ? ' font-semibold' : '')}>
+            <div className="flex items-baseline justify-between gap-2">
+              <span>Stufe {lv} · {r}</span>
+              <span className="tabular-nums text-muted-foreground">{when(v.at)}</span>
+            </div>
+            <div className="mt-0.5 grid grid-cols-2 gap-x-3 gap-y-1 tabular-nums">
+              {item('Gesetzter Takt', fmt(v.mhz, 0, ' MHz'))}
+              {item('Takt laut Miner (Ø)', fmt(v.mhz_miner, 0, ' MHz'))}
+              {item('Ø Temperatur', fmt(v.temp_avg, 1, ' °C'))}
+              {item('Ø Hashrate', fmt(v.ths_avg, 1, ' TH/s'))}
+              {item('Effizienz', fmt(v.j_th, 1, ' J/TH'))}
+              {item('Anzahl', v.count ?? '—')}
+            </div>
+            {action && <div className="mt-1">{action}</div>}
+          </li>
+        )
+      })}
+    </ul>
+  )
+  const rows = (list, muted) => list.map((row) => {
+    const { lv, v, range: r } = row
+    return (
+      <tr key={r + lv}
+        className={muted ? 'text-muted-foreground' : Number(lv) === level ? 'font-semibold' : ''}>
+        <td className="pr-3">{lv}</td>
+        <td className="whitespace-nowrap pr-3 tabular-nums">{r}</td>
+        <td className="pr-3 tabular-nums">{fmt(v.mhz, 0, ' MHz')}</td>
+        <td className="pr-3 tabular-nums">{fmt(v.mhz_miner, 0, ' MHz')}</td>
+        <td className="pr-3 tabular-nums">{fmt(v.temp_avg, 1, ' °C')}</td>
+        <td className="whitespace-nowrap pr-3 tabular-nums">{fmt(v.ths_avg, 1, ' TH/s')}</td>
+        <td className="whitespace-nowrap pr-3 tabular-nums">{fmt(v.j_th, 1, ' J/TH')}</td>
+        <td className="pr-3 tabular-nums">{v.count ?? '—'}</td>
+        <td className="pr-3 text-muted-foreground">{when(v.at)}</td>
+        <td className="py-0.5">{remove(row, 'h-6 px-2 text-xs')}</td>
+      </tr>
+    )
+  })
   return (
     <div className="pt-1">
-      <p className="font-medium">Lernwerte</p>
-      {/* mobile: one entry per level like the Letzte Einträge (Nutzer 28.10.: Tabelle nicht mobil freundlich) */}
-      <ul className="divide-y divide-border/40 sm:hidden">
-        {rows.map((lv) => {
-          const v = values[lv]
-          const item = (label, value) => (
-            <div>
-              <div className="text-xs font-normal text-muted-foreground">{label}</div>
-              <div className="whitespace-nowrap">{value}</div>
-            </div>
-          )
-          return (
-            <li key={lv} className={'py-1.5' + (Number(lv) === level ? ' font-semibold' : '')}>
-              <div className="flex items-baseline justify-between gap-2">
-                <span>Stufe {lv} · {range}</span>
-                <span className="tabular-nums text-muted-foreground">{when(v.at)}</span>
-              </div>
-              <div className="mt-0.5 grid grid-cols-2 gap-x-3 gap-y-1 tabular-nums">
-                {item('Gesetzter Takt (Ø)', fmt(v.mhz, 0, ' MHz'))}
-                {item('Ø Temperatur', fmt(v.temp_avg, 1, ' °C'))}
-                {item('Ø Hashrate', fmt(v.ths_avg, 1, ' TH/s'))}
-                {item('Effizienz', fmt(v.j_th, 1, ' J/TH'))}
-                {item('Anzahl', v.count ?? '—')}
-              </div>
-            </li>
-          )
-        })}
-      </ul>
+      {current.length ? <p className="font-medium">Lernwerte</p> : none}
+      {current.length > 0 && entries(current, false)}
+      {other.length > 0 && (
+        <p className="pt-1.5 text-muted-foreground sm:hidden">{OTHER}</p>
+      )}
+      {other.length > 0 && entries(other, true)}
       <div className="hidden overflow-x-auto sm:block">
         <table className="text-xs">
           <thead className="text-muted-foreground">
             <tr className="text-left">
               <th className="pr-3 font-medium">Stufe</th>
               <th className="pr-3 font-medium">Zieltemperatur</th>
-              <th className="pr-3 font-medium">Gesetzter Takt (Ø)</th>
+              <th className="pr-3 font-medium">Gesetzter Takt</th>
+              <th className="pr-3 font-medium">Takt laut Miner (Ø)</th>
               <th className="pr-3 font-medium">Ø Temperatur</th>
               <th className="pr-3 font-medium">Ø Hashrate</th>
               <th className="pr-3 font-medium">Effizienz</th>
               <th className="pr-3 font-medium">Anzahl</th>
-              <th className="font-medium">Zeit</th>
+              <th className="pr-3 font-medium">Zeit</th>
+              <th />
             </tr>
           </thead>
           <tbody>
-            {rows.map((lv) => {
-              const v = values[lv]
-              return (
-                <tr key={lv} className={Number(lv) === level ? 'font-semibold' : ''}>
-                  <td className="pr-3">{lv}</td>
-                  <td className="whitespace-nowrap pr-3 tabular-nums">{range}</td>
-                  <td className="pr-3 tabular-nums">{fmt(v.mhz, 0, ' MHz')}</td>
-                  <td className="pr-3 tabular-nums">{fmt(v.temp_avg, 1, ' °C')}</td>
-                  <td className="whitespace-nowrap pr-3 tabular-nums">{fmt(v.ths_avg, 1, ' TH/s')}</td>
-                  <td className="whitespace-nowrap pr-3 tabular-nums">{fmt(v.j_th, 1, ' J/TH')}</td>
-                  <td className="pr-3 tabular-nums">{v.count ?? '—'}</td>
-                  <td className="text-muted-foreground">{when(v.at)}</td>
-                </tr>
-              )
-            })}
+            {rows(current, false)}
+            {other.length > 0 && (
+              <tr className="text-muted-foreground">
+                <td colSpan={10} className="pt-1.5">{OTHER}</td>
+              </tr>
+            )}
+            {rows(other, true)}
           </tbody>
         </table>
       </div>
@@ -313,7 +387,8 @@ const RECENT_KINDS = ['takt', 'modus', 'luefter', 'heizmodus', 'heizmodus_ende',
   'test_start', 'test_stufe', 'test_ziel', 'test_schritt', 'test_messung', 'test_ende', 'neustart_nutzer', 'taktsperre',
   'taktsperre_ende', 'startpause', 'startpause_ende', 'neustart_offline', 'neustart_online',
   'einstellungsseite_aus', 'einstellungsseite_an', 'modus_wartet', 'zielbereich',
-  'luefterstoss', 'luefterstoss_ende', 'obergrenze', 'ertrag', 'neustart_auto', 'obergrenzen_loeschen']
+  'luefterstoss', 'luefterstoss_ende', 'obergrenze', 'ertrag', 'neustart_auto', 'obergrenzen_loeschen',
+  'lernwert_loeschen']
 const RECENT_COUNT = 20
 const RECENT_REFRESH_MS = 10000
 const RECENT_LABEL = { takt: 'Takt', modus: 'Modus', luefter: 'Lüfter', start: 'Start' }
@@ -321,7 +396,7 @@ const RECENT_LABEL = { takt: 'Takt', modus: 'Modus', luefter: 'Lüfter', start: 
 const FAN_KINDS = new Set(['luefter', 'heizmodus', 'heizmodus_ende', 'kuehlmodus', 'kuehlmodus_ende', 'hohe_temperatur',
   'rueckkehr', 'ausnahme', 'ausnahme_ende', 'luefterstoss'])
 const USER_KINDS = new Set(['basisstufe', 'automatik_ein', 'automatik_aus', 'wartung_start', 'wartung_ende',
-  'zielbereich', 'obergrenzen_loeschen'])
+  'zielbereich', 'obergrenzen_loeschen', 'lernwert_loeschen'])
 
 function recentTone(e) {
   if (isError(e)) return 'text-destructive'
@@ -334,7 +409,7 @@ function recentTone(e) {
 /** The change of one entry in a few words (clock, mode, fan level or the learned value). */
 function recentChange(e) {
   const d = e.details || {}
-  if (e.kind === 'lernwert') return 'Stufe ' + d.luefterstufe + ': ' + fmt(d.takt, 1, ' MHz')
+  if (e.kind === 'lernwert') return 'Stufe ' + d.luefterstufe + ': ' + fmt(d.takt, 0, ' MHz')
   if (e.kind === 'takt' || e.kind === 'start' || e.kind === 'firmware_takt') {
     const mode = has(e.mode_new) && e.mode_old !== e.mode_new && e.kind !== 'takt' ? ' · ' + modeText(e.mode_new) : ''
     return clockChange(e) + mode
@@ -435,6 +510,9 @@ function AutomationPanel({ auto, here, port, level, locked, onCommand, busy, roo
   const [confirmOff, setConfirmOff] = useState(false)
   const [confirmRestart, setConfirmRestart] = useState(false)
   const [restart, setRestart] = useState({ busy: false, msg: null })
+  // Lernwerte whose deletion was sent: the button stays disabled until the value disappears (Nutzer 08.11.); kept
+  // here so that switching the Automatik on or off does not reset it
+  const [requested, setRequested] = useState([])
   if (!auto) return null
   const st = auto.state || {}
   const [lo, hi] = targetOf(auto)
@@ -459,6 +537,11 @@ function AutomationPanel({ auto, here, port, level, locked, onCommand, busy, roo
           {busy && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
           Einschalten (Port {port}, Basisstufe {level})
         </Button>
+        {/* the learned values also while the Automatik is off, to look at and delete (Nutzer 08.11.) */}
+        <div className="text-xs">
+          <LearnedTable learned={auto.learned} others={auto.learned_zb} zb={st.zb} level={auto.level} lo={lo}
+            hi={hi} onCommand={onCommand} busy={busy} requested={requested} setRequested={setRequested} />
+        </div>
       </div>
     )
   }
@@ -533,7 +616,8 @@ function AutomationPanel({ auto, here, port, level, locked, onCommand, busy, roo
         </p>
       )}
       <AutomationCards auto={auto} st={st} roomTemp={roomTemp} lo={lo} hi={hi} />
-      <LearnedTable learned={auto.learned} zb={st.zb} level={auto.level} lo={lo} hi={hi} />
+      <LearnedTable learned={auto.learned} others={auto.learned_zb} zb={st.zb} level={auto.level} lo={lo}
+        hi={hi} onCommand={onCommand} busy={busy} requested={requested} setRequested={setRequested} />
       {st.ac_error && <p className="text-amber-600">AC Infinity: {st.ac_error}</p>}
       {st.last_error && <p className="text-destructive">Fehler: {st.last_error}</p>}
       <RecentEvents />
@@ -556,14 +640,17 @@ function Controller({ dev, backups, automation, onReload }) {
   const [auto, setAuto] = useAutomation(automation)
   const autoOn = auto?.enabled && auto.dev_id === dev.dev_id
   const autoHere = autoOn && auto.port === port
+  // true when the server took the command (the Lernwert delete needs to know)
   const autoCommand = async (body) => {
     setBusy('auto')
     setMsg(null)
     try {
       const { data } = await api.post('/api/fans/automation/', { dev_id: dev.dev_id, ...body })
       setAuto(data)
+      return true
     } catch (err) {
       setMsg({ tone: 'error', text: errText(err, 'Automatik-Befehl fehlgeschlagen.') })
+      return false
     } finally {
       setBusy(null)
     }
@@ -574,7 +661,8 @@ function Controller({ dev, backups, automation, onReload }) {
   const [busy, setBusy] = useState(null)
   const [msg, setMsg] = useState(null)
   const [results, setResults] = useState([])
-  const [confirmRestore, setConfirmRestore] = useState(null)
+  // the one open question of the backup list: { file, kind: 'restore' | 'delete' }
+  const [confirmBackup, setConfirmBackup] = useState(null)
   const own = backups.filter((b) => b.dev_id === dev.dev_id)
 
   const backup = async () => {
@@ -595,7 +683,7 @@ function Controller({ dev, backups, automation, onReload }) {
   const restore = async (file) => {
     setBusy('restore')
     setMsg(null)
-    setConfirmRestore(null)
+    setConfirmBackup(null)
     try {
       const { data } = await api.post('/api/fans/restore/', { file })
       setMsg({
@@ -608,6 +696,22 @@ function Controller({ dev, backups, automation, onReload }) {
     } finally {
       setBusy(null)
     }
+  }
+
+  // delete one backup (Nutzer 08.11., B): only offered with more than one, the backend keeps the last one anyway
+  const removeBackup = async (file) => {
+    setBusy('backup_delete')
+    setMsg(null)
+    setConfirmBackup(null)
+    try {
+      await api.post('/api/fans/backup/delete/', { file })
+      setMsg({ tone: 'ok', text: 'Sicherung gelöscht.' })
+    } catch (err) {
+      setMsg({ tone: 'error', text: errText(err, 'Löschen fehlgeschlagen.') })
+    } finally {
+      setBusy(null)
+    }
+    onReload()
   }
 
   const test = async (action, speed = 0) => {
@@ -691,20 +795,32 @@ function Controller({ dev, backups, automation, onReload }) {
                   <span>
                     {when(b.created_at)} · Ports {b.ports.join(', ') || '—'}
                   </span>
-                  {confirmRestore === b.file ? (
+                  {confirmBackup?.file === b.file ? (
                     <>
-                      <span>Wirklich zurückschreiben?</span>
-                      <Button size="sm" variant="destructive" disabled={!!busy} onClick={() => restore(b.file)}>
+                      <span>
+                        {confirmBackup.kind === 'delete' ? 'Sicherung wirklich löschen?' : 'Wirklich zurückschreiben?'}
+                      </span>
+                      <Button size="sm" variant="destructive" disabled={!!busy}
+                        onClick={() => (confirmBackup.kind === 'delete' ? removeBackup(b.file) : restore(b.file))}>
                         Ja
                       </Button>
-                      <Button size="sm" variant="secondary" disabled={!!busy} onClick={() => setConfirmRestore(null)}>
+                      <Button size="sm" variant="secondary" disabled={!!busy} onClick={() => setConfirmBackup(null)}>
                         Nein
                       </Button>
                     </>
                   ) : (
-                    <Button size="sm" variant="secondary" disabled={!!busy} onClick={() => setConfirmRestore(b.file)}>
-                      Zurückschreiben
-                    </Button>
+                    <>
+                      <Button size="sm" variant="secondary" disabled={!!busy}
+                        onClick={() => setConfirmBackup({ file: b.file, kind: 'restore' })}>
+                        Zurückschreiben
+                      </Button>
+                      {own.length > 1 && (
+                        <Button size="sm" variant="secondary" disabled={!!busy}
+                          onClick={() => setConfirmBackup({ file: b.file, kind: 'delete' })}>
+                          Löschen
+                        </Button>
+                      )}
+                    </>
                   )}
                 </li>
               ))}
@@ -744,7 +860,7 @@ function Controller({ dev, backups, automation, onReload }) {
           {own.length === 0 && (
             <p className="text-xs text-muted-foreground">Erst eine Sicherung erstellen, dann sind die Buttons frei.</p>
           )}
-          {busy && busy !== 'backup' && busy !== 'restore' && (
+          {busy && busy !== 'backup' && busy !== 'restore' && busy !== 'backup_delete' && (
             <p className="text-xs text-muted-foreground">Befehl gesendet, warte 5 s und lese die Stufe neu …</p>
           )}
           <p className="text-xs text-muted-foreground">

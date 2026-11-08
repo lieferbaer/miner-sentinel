@@ -907,6 +907,10 @@ class PoolStatsHourly(models.Model):
     hashrate_1h_avg = models.FloatField(blank=True, null=True)
     hashrate_1d_avg = models.FloatField(blank=True, null=True)
     workers_max = models.IntegerField(blank=True, null=True)
+    # Balance und Pool-Hashrate je Tag (v2.2.9, Nutzer 08.11.): last non-null value of the hour (f2pool account
+    # balance, pool 24-h hashrate = pool_stats.hashrate_1d_ghs)
+    balance_last = models.FloatField(blank=True, null=True)
+    hashrate_1d_last = models.FloatField(blank=True, null=True)
 
     class Meta:
         db_table = 'pool_stats_hourly'

@@ -39,6 +39,7 @@ urlpatterns = [
     path('overview/analytics/', views.overview_analytics, name='overview-analytics'),
     path('analytics/detailed/', views.detailed_analytics, name='detailed-analytics'),
     path('analytics/devices/', views.device_analytics, name='device-analytics'),
+    path('analytics/pool-daily/', views.pool_daily, name='pool-daily'),
     # Settings endpoints
     path('settings/collector/', views.collector_settings_view, name='collector-settings'),
     path('settings/collector/status/', views.collector_status_view, name='collector-status'),
@@ -57,6 +58,7 @@ urlpatterns = [
     path('fans/status/', fan_views.fans_status, name='fans-status'),
     path('fans/credentials/', fan_views.fans_credentials, name='fans-credentials'),
     path('fans/backup/', fan_views.fans_backup, name='fans-backup'),
+    path('fans/backup/delete/', fan_views.fans_backup_delete, name='fans-backup-delete'),
     path('fans/restore/', fan_views.fans_restore, name='fans-restore'),
     path('fans/test/', fan_views.fans_test, name='fans-test'),
     path('fans/session/', fan_views.fans_session, name='fans-session'),

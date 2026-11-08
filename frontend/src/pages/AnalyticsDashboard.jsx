@@ -3,6 +3,7 @@
  * then one full block per device, then a device-by-device comparison table.
  * Nothing is averaged across devices.
  */
+import PoolDailyCards from '@/components/analytics/PoolDailyCards'
 import { DashboardSkeleton, formatDifficulty, formatHashrate, formatNumber } from '@/components/dashboard'
 import MakeBadge from '@/components/devices/MakeBadge'
 import EmptyState from '@/components/feedback/EmptyState'
@@ -585,6 +586,9 @@ export default function AnalyticsDashboard() {
           ))}
         </div>
       )}
+
+      {/* v2.2.9 (Nutzer 08.11.): always the last 160 days, own fetch, independent of the time range */}
+      <PoolDailyCards />
 
       {data.devices.map((entry) => (
         <DeviceBlock

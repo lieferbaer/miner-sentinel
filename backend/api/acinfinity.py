@@ -13,8 +13,10 @@ Test environment (MINERSENTINEL_ENV=Test, e.g. a local copy on the iMac): it log
 Live (default) logs in again by itself, but only RELOGIN_PAUSE_S after another login took the session
 (test environment or phone app), or at once via "Live jetzt übernehmen" (takeover).
 """
+import fcntl
 import json
 import os
+import re
 import threading
 import time
 import urllib.error
@@ -59,6 +61,10 @@ class NotActive(ACError):
 
 class SessionTaken(ACError):
     """Live: another login took the session; Live logs in again after RELOGIN_PAUSE_S."""
+
+
+class LastBackup(ACError):
+    """The only backup of a controller is not deleted (Nutzer 08.11.)."""
 
 
 def _pause_until():
@@ -444,6 +450,30 @@ def make_backup(dev_id):
         json.dump({'dev_id': str(dev_id), 'created_at': now.isoformat(), 'ports': ports}, fh, indent=1)
     os.chmod(os.path.join(DATA_DIR, name), 0o600)
     return name, ports
+
+
+def delete_backup(name):
+    """Delete one backup file (only names of _backup_files()); the only backup of a controller stays (Nutzer 08.11.).
+    The controller is taken from the backup itself (as has_backup counts it), else from the file name
+    backup-YYYYmmdd-HHMMSS-<dev_id>.json.
+    Check and remove run under a file lock, so parallel deletes (several gunicorn workers) cannot remove the last one."""
+    if name not in _backup_files():
+        raise ACError('Sicherung %s nicht gefunden.' % name)
+    with open(os.path.join(DATA_DIR, 'backup.lock'), 'a', encoding='utf-8') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)          # released when the file is closed
+        if name not in _backup_files():
+            raise ACError('Sicherung %s nicht gefunden.' % name)
+        backups = list_backups()
+        dev_id = next((b['dev_id'] for b in backups if b['file'] == name), None)
+        if dev_id is None:
+            match = re.fullmatch(r'backup-\d{8}-\d{6}-(.+)\.json', name)
+            dev_id = match.group(1) if match else None
+        if not any(b['file'] != name and b['dev_id'] == dev_id for b in backups):
+            raise LastBackup('Die letzte Sicherung dieses Controllers bleibt erhalten.')
+        try:
+            os.remove(os.path.join(DATA_DIR, name))
+        except FileNotFoundError:
+            raise ACError('Sicherung %s nicht gefunden.' % name) from None
 
 
 def restore_backup(name):

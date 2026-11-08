@@ -13,6 +13,7 @@ export const KIND_LABEL = {
   wartung_ende: 'Wartung beendet',
   zielbereich: 'Zieltemperatur',
   obergrenzen_loeschen: 'Obergrenzen gelöscht',
+  lernwert_loeschen: 'Lernwert gelöscht',
   start: 'Start (Starttakt)',
   takt: 'Taktbefehl',
   modus: 'Modusbefehl',

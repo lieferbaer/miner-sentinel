@@ -2,6 +2,7 @@
 settings and state of the Temperatur-Automatik (A15)."""
 import json
 import logging
+import re
 import time
 
 from django.db import DatabaseError, transaction
@@ -31,6 +32,10 @@ TMAX_FRESH_S = 30     # the collector writes the chip temperatures every 10 s
 # 81–85 = 5 Grad)
 TARGET_MIN, TARGET_MAX = 77, 87
 TARGET_ERROR = 'Zieltemperatur 77–87 °C mit 4 bis 5 Grad wählen.'
+# delete a single Lernwert (Nutzer 08.11.): the data-service deletes it in its next round
+LEARNED_NOT_FOUND = 'Lernwert nicht gefunden.'
+LEARNED_GONE = 'Lernwert nicht mehr vorhanden oder neu gelernt.'
+LEARNED_NOT_DELETED = 'Lernwert nicht gelöscht.'
 
 
 def _a15():
@@ -58,6 +63,11 @@ def _latest_tmax(dev):
     return (max(valid) if valid else None), boards, (row or {}).get('recorded_at')
 
 
+def _per_level(learned):
+    """Learned values per fan level only (entries with 'mhz'; the per-mode values before 24.10. are dropped)."""
+    return {k: v for k, v in (learned or {}).items() if isinstance(v, dict) and 'mhz' in v}
+
+
 def automation_payload():
     dev, auto = _automation()
     if not auto:
@@ -77,7 +87,9 @@ def automation_payload():
         'state': state,
         # learned values per fan level ({"<stufe>": {mhz, temp_avg, at, count}}); the former per-mode values
         # of the old regulation are not shown
-        'learned': {k: v for k, v in (st.get('learned') or {}).items() if isinstance(v, dict) and 'mhz' in v},
+        'learned': _per_level(st.get('learned')),
+        # those of the other Zieltemperaturen ({"81-84": {"<stufe>": …}}, only with values; Nutzer 08.11.)
+        'learned_zb': {zb: _per_level(v) for zb, v in (st.get('learned_zb') or {}).items() if _per_level(v)},
         'log': (st.get('log') or [])[-15:][::-1],
     }
 
@@ -120,19 +132,57 @@ def _chip_temp_now(dev, st, now):
     return (tmax if at and (now - at).total_seconds() <= TMAX_FRESH_S else None), None
 
 
-def _user_event(dev, auto, kind, trigger, **fields):
-    """User event in the protocol of the automation (automation_log, source 'nutzer'); phase as the data-service
-    last wrote it. A missing table never blocks the user's action."""
+def _user_row(dev, auto, kind, trigger, **fields):
+    """Row of a user event in automation_log (source 'nutzer'); phase as the data-service last wrote it.
+    Raises DatabaseError."""
     st = auto.state or {}
     now = timezone.now()
     chip_temp, tendency = _chip_temp_now(dev, st, now)
+    with transaction.atomic():
+        AutomationLog.objects.create(
+            device=dev, recorded_at=now, kind=kind, source='nutzer', trigger=trigger,
+            phase=str(st.get('phase') or '')[:16], chip_temp=chip_temp, tendency=tendency, **fields)
+
+
+def _user_event(dev, auto, kind, trigger, **fields):
+    """User event in the protocol of the automation. A missing table never blocks the user's action."""
     try:
-        with transaction.atomic():
-            AutomationLog.objects.create(
-                device=dev, recorded_at=now, kind=kind, source='nutzer', trigger=trigger,
-                phase=str(st.get('phase') or '')[:16], chip_temp=chip_temp, tendency=tendency, **fields)
+        _user_row(dev, auto, kind, trigger, **fields)
     except DatabaseError as exc:
         logger.warning('Protokoll: Nutzer-Ereignis %s nicht gespeichert: %s', kind, exc)
+
+
+def _learned_delete(request, dev, auto):
+    """Delete one Lernwert (Nutzer 08.11.): only a request row in automation_log (kind 'lernwert_loeschen'); the
+    data-service deletes the value in its next round if it still has this 'at' (also with the automation off).
+    auto.state is only read here."""
+    zb, level, at = request.data.get('zb'), _whole_number(request.data.get('level')), request.data.get('at')
+    match = re.fullmatch(r'(\d{1,3})-(\d{1,3})', zb) if isinstance(zb, str) else None
+    if not match or level is None or not 1 <= level <= 10:
+        return Response({'error': LEARNED_NOT_FOUND}, status=status.HTTP_400_BAD_REQUEST)
+    lo, hi = int(match.group(1)), int(match.group(2))
+    zb = '%d-%d' % (lo, hi)
+    st = auto.state or {}
+    try:
+        current = '%d-%d' % tuple(st['zb'])
+    except (KeyError, TypeError, ValueError):
+        current = None                        # no Zieltemperatur taken over yet: only the other ones
+    if zb == current:
+        values = st.get('learned')
+    else:
+        others = st.get('learned_zb')
+        values = others.get(zb) if isinstance(others, dict) else None
+    entry = values.get(str(level)) if isinstance(values, dict) else None
+    if not isinstance(entry, dict) or not isinstance(at, str) or entry.get('at') != at:
+        return Response({'error': LEARNED_GONE}, status=status.HTTP_409_CONFLICT)
+    try:
+        _user_row(dev, auto, 'lernwert_loeschen', 'Nutzer: Lernwert Stufe %d (%d–%d °C) gelöscht' % (level, lo, hi),
+                  details={'zieltemperatur': zb, 'stufe': level, 'at': at, 'takt': entry.get('mhz'),
+                           'temp_mittel': entry.get('temp_avg'), 'anzahl': entry.get('count')})
+    except DatabaseError as exc:
+        logger.warning('Protokoll: Lernwert-Löschung nicht gespeichert: %s', exc)
+        return Response({'error': LEARNED_NOT_DELETED}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    return Response(automation_payload())
 
 
 def _whole_number(value):
@@ -177,14 +227,17 @@ def fans_status(request):
 def fans_automation(request):
     """Temperatur-Automatik (A15). GET: settings + state. POST {action: enable, dev_id, port, level} |
     {action: level, level} | {action: disable} | {action: maintenance_start|maintenance_end} |
-    {action: target, low, high} (Zieltemperatur, also with the automation off or during Wartung). The data-service
-    applies the changes. The actions of the removed Temperatur-Test (temp_test_start|temp_test_abort) and Obergrenzen
-    (caps_clear) are refused like any unknown action (v2.2.7, Nutzer 06.11.)."""
+    {action: target, low, high} (Zieltemperatur, also with the automation off or during Wartung) |
+    {action: learned_delete, zb: 'lo-hi', level, at} (one Lernwert, also with the automation off; Nutzer 08.11.).
+    The data-service applies the changes. The actions of the removed Temperatur-Test (temp_test_start|
+    temp_test_abort) and Obergrenzen (caps_clear) are refused like any unknown action (v2.2.7, Nutzer 06.11.)."""
     dev, auto = _automation()
     if not auto:
         return Response({'error': 'Kein Avalon A15 gefunden.'}, status=status.HTTP_404_NOT_FOUND)
     if request.method == 'POST':
         action = request.data.get('action')
+        if action == 'learned_delete':
+            return _learned_delete(request, dev, auto)
         try:
             level = int(request.data.get('level')) if request.data.get('level') is not None else auto.level
         except (TypeError, ValueError):
@@ -286,6 +339,20 @@ def fans_backup(request):
         return _error(exc)
     return Response({'file': name, 'ports': {p: {'ok': v['ok'], 'code': v['code'], 'msg': v['msg']}
                                              for p, v in ports.items()}, 'backups': ac.list_backups()})
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def fans_backup_delete(request):
+    """POST {file}: delete one backup; the last backup of a controller stays (Nutzer 08.11.)."""
+    name = str(request.data.get('file') or '')
+    try:
+        ac.delete_backup(name)
+    except ac.LastBackup as exc:
+        return Response({'error': str(exc)}, status=status.HTTP_409_CONFLICT)
+    except ac.ACError as exc:
+        return Response({'error': str(exc)}, status=status.HTTP_404_NOT_FOUND)
+    return Response({'deleted': name, 'backups': ac.list_backups()})
 
 
 @api_view(['POST'])

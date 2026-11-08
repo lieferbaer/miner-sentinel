@@ -2,7 +2,9 @@
 
 The Analytics page reads them for periods over 24 h; the raw values are kept 30 days, the hourly values for good.
   * rollup: every 5 min, from the last stored hour on (on the first run: all raw values = the one-time back-fill),
-  * prune_raw: every night, raw values older than 30 days – only hours that are in the hourly tables are deleted.
+  * prune_raw: every night, raw values older than 30 days – only hours that are in the hourly tables are deleted,
+  * backfill_pool (v2.2.9, Nutzer 08.11.): once at data-service start, balance_last / hashrate_1d_last for the hours
+    of the remaining raw pool values (from their first full hour on), only while such an hour still lacks them.
 """
 import logging
 from datetime import datetime, timedelta, timezone
@@ -53,17 +55,47 @@ ON CONFLICT (device_id, hour) DO UPDATE SET
     efficiency_avg = EXCLUDED.efficiency_avg, efficiency_n = EXCLUDED.efficiency_n
 """
 
+
+def _balance_sql(details):
+    """Balance (Nutzer 08.11.) from `details`: f2pool reports it as a string or a number; anything else (or a value
+    that would not fit a double) is NULL – a bad value must never fail the whole rollup. Only ASCII white space around
+    the number: float8in skips no other ([[:space:]] would also match Unicode spaces, Review 08.11.)."""
+    value = "(%s->'balance'->>'balance')" % details
+    space = '[ \\t\\n\\r\\f\\v]*'
+    return ("CASE WHEN %s ~ '^%s[-+]?[0-9]{1,20}([.][0-9]{0,40})?([eE][-+]?[0-9]{1,2})?%s$' "
+            "THEN %s::double precision END" % (value, space, space, value))
+
+
+# balance_last / hashrate_1d_last (v2.2.9, Nutzer 08.11.): the last non-null value of the hour
 POOL_SQL = """
 INSERT INTO pool_stats_hourly (pool_type, pool_address, hour, samples, hashrate_1m_avg, hashrate_1h_avg,
-    hashrate_1d_avg, workers_max)
+    hashrate_1d_avg, workers_max, balance_last, hashrate_1d_last)
 SELECT pool_type, pool_address, date_trunc('hour', recorded_at), count(*), avg(hashrate_1m_ghs),
-    avg(hashrate_1h_ghs), avg(hashrate_1d_ghs), max(workers)
-FROM pool_stats WHERE recorded_at >= %(since)s AND recorded_at < %(until)s
+    avg(hashrate_1h_ghs), avg(hashrate_1d_ghs), max(workers),
+    (array_agg(balance ORDER BY recorded_at DESC) FILTER (WHERE balance IS NOT NULL))[1],
+    (array_agg(hashrate_1d_ghs ORDER BY recorded_at DESC) FILTER (WHERE hashrate_1d_ghs IS NOT NULL))[1]
+FROM (
+    SELECT pool_type, pool_address, recorded_at, hashrate_1m_ghs, hashrate_1h_ghs, hashrate_1d_ghs, workers,
+        %s AS balance
+    FROM pool_stats WHERE recorded_at >= %%(since)s AND recorded_at < %%(until)s
+) p
 GROUP BY 1, 2, 3
 ON CONFLICT (pool_type, pool_address, hour) DO UPDATE SET
     samples = EXCLUDED.samples, hashrate_1m_avg = EXCLUDED.hashrate_1m_avg, hashrate_1h_avg = EXCLUDED.hashrate_1h_avg,
-    hashrate_1d_avg = EXCLUDED.hashrate_1d_avg, workers_max = EXCLUDED.workers_max
-"""
+    hashrate_1d_avg = EXCLUDED.hashrate_1d_avg, workers_max = EXCLUDED.workers_max,
+    balance_last = EXCLUDED.balance_last, hashrate_1d_last = EXCLUDED.hashrate_1d_last
+""" % _balance_sql('details')
+
+# One-time back-fill (v2.2.9): needed while an hourly row from `since` on has no balance although raw values of that
+# hour carry one
+POOL_BACKFILL_NEEDED_SQL = """
+SELECT EXISTS (
+    SELECT 1 FROM pool_stats_hourly h
+    WHERE h.hour >= %%(since)s AND h.balance_last IS NULL AND EXISTS (
+        SELECT 1 FROM pool_stats r
+        WHERE r.pool_type = h.pool_type AND r.pool_address = h.pool_address AND r.recorded_at >= h.hour
+            AND r.recorded_at < h.hour + interval '1 hour' AND (%s) IS NOT NULL))
+""" % _balance_sql('r.details')
 
 # (hourly table, its raw tables, the rollup statement)
 TABLES = (
@@ -116,6 +148,45 @@ def run_rollup(database_url):
         conn.rollback()
         logger.error('Stundenwerte: Fehler: %s', exc)
         return {}
+    finally:
+        conn.close()
+
+
+def backfill_pool(conn, until=None):
+    """One-time back-fill (v2.2.9, Nutzer 08.11.): the pool rollup once from the first FULL hour of the remaining raw
+    pool_stats (the first hour may be cut by prune_raw) up to `until` – only while an hourly row from there on has no
+    balance_last although raw values of its hour carry a balance; afterwards nothing is needed any more (idempotent).
+    Returns the start, or None when nothing was needed."""
+    until = until or datetime.now(timezone.utc) + timedelta(hours=1)
+    with conn.cursor() as cur:
+        cur.execute('SELECT min(recorded_at) FROM pool_stats')
+        first = cur.fetchone()[0]
+        if first is None:
+            return None
+        since = _hour(first) + timedelta(hours=1)
+        cur.execute(POOL_BACKFILL_NEEDED_SQL, {'since': since})
+        if not cur.fetchone()[0]:
+            return None
+        cur.execute(POOL_SQL, {'since': since, 'until': until})
+    conn.commit()
+    return since
+
+
+def run_pool_backfill(database_url):
+    try:
+        conn = psycopg2.connect(database_url)
+    except psycopg2.Error as exc:
+        logger.warning('Pool-Stundenwerte nachtragen: keine Datenbank: %s', exc)
+        return None
+    try:
+        since = backfill_pool(conn)
+        if since is not None:
+            logger.info('Pool-Stundenwerte (Balance, 24-h-Hashrate) nachgetragen ab %s', since.isoformat())
+        return since
+    except psycopg2.Error as exc:
+        conn.rollback()
+        logger.error('Pool-Stundenwerte nachtragen: Fehler: %s', exc)
+        return None
     finally:
         conn.close()
 

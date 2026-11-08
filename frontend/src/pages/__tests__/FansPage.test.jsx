@@ -1,6 +1,7 @@
 import api from '@/lib/api'
 import { LiveProvider } from '@/lib/LiveContext'
-import { render, screen, within } from '@testing-library/react'
+import { act, render, screen, waitFor, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import FansPage from '../FansPage'
@@ -23,13 +24,14 @@ const automation = (state) => ({
   state: { phase: 'basismodus', t: 86, fan_target: 4, fan_set: 4, fan_read: 4, zb: [82, 85], ...state },
 })
 
-function mockApi(auto) {
+function mockApi(auto, status = {}) {
   api.get.mockImplementation((url) => {
     if (url === '/api/fans/status/') {
       return Promise.resolve({
         data: {
           configured: true, session: { test: false }, backups: [], automation: auto,
           devices: [{ dev_id: 'ac1', name: 'Controller', online: true, ports: [{ port: 1, speak: 4 }] }],
+          ...status,
         },
       })
     }
@@ -297,18 +299,18 @@ describe('FansPage removed features', () => {
     const table = (await screen.findByRole('columnheader', { name: 'Zieltemperatur' })).closest('table')
     const rows = within(table).getAllByRole('row').slice(1).map((r) => within(r).getAllByRole('cell').map((c) => c.textContent))
     // a level with only an old Obergrenze gets no row
-    expect(rows).toEqual([['3', '82–85 °C', '320 MHz', '83,2 °C', '—', '—', '2', expect.any(String)]])
+    expect(rows).toEqual([['3', '82–85 °C', '320 MHz', '—', '83,2 °C', '—', '—', '2', expect.any(String), 'Löschen']])
     expect(screen.queryByText(/Obergrenze/)).not.toBeInTheDocument()
     expect(screen.queryByText(/325 MHz|395 MHz/)).not.toBeInTheDocument()
   })
 
-  it('automation off: no table of learned values and no button, also with old caps', async () => {
+  it('automation off: no Obergrenze, also with old caps', async () => {
     const learned = { 3: { mhz: 320, temp_avg: 83.2, at: '2026-10-28T09:00:00Z', count: 2 } }
     mockApi({ ...automation({ phase: 'aus', caps: { 3: 325 } }), enabled: false, learned })
     renderPage()
     expect(await screen.findByRole('button', { name: /Einschalten/ })).toBeInTheDocument()
-    expect(screen.queryByRole('columnheader', { name: 'Gesetzter Takt (Ø)' })).not.toBeInTheDocument()
     expect(screen.queryByText(/Obergrenze/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/325 MHz/)).not.toBeInTheDocument()
   })
 })
 
@@ -345,6 +347,28 @@ describe('FansPage Letzte Einträge', () => {
     expect(kinds).toEqual(expect.arrayContaining(['heizmodus', 'heizmodus_ende', 'kuehlmodus', 'kuehlmodus_ende',
       'zielbereich']))
   })
+
+  it('a deleted Lernwert is loaded and shown as a user entry (Nutzer 08.11.)', async () => {
+    mockApi(automation({}))
+    const status = api.get.getMockImplementation()
+    api.get.mockImplementation((url, config) => {
+      if (url === '/api/automation/log/') {
+        return Promise.resolve({
+          data: {
+            results: [{ id: 1, kind: 'lernwert_loeschen', recorded_at: '2026-11-08T10:00:00Z', chip_temp: 83,
+              trigger: 'Nutzer: Lernwert Stufe 3 (82–85 °C) gelöscht' }],
+          },
+        })
+      }
+      return status(url, config)
+    })
+    renderPage()
+    const labels = await screen.findAllByText('Lernwert gelöscht')
+    expect(labels[0]).toHaveClass('text-muted-foreground')
+    expect(screen.getAllByText('Nutzer: Lernwert Stufe 3 (82–85 °C) gelöscht').length).toBeGreaterThan(0)
+    const kinds = api.get.mock.calls.find(([url]) => url === '/api/automation/log/')[1].params.kind.split(',')
+    expect(kinds).toContain('lernwert_loeschen')
+  })
 })
 
 describe('FansPage Lernwerte', () => {
@@ -352,17 +376,17 @@ describe('FansPage Lernwerte', () => {
     vi.clearAllMocks()
   })
 
-  it('Zieltemperatur right after Stufe (the one of the learned values = state.zb), Takt as Gesetzter Takt (Ø)', async () => {
+  it('Zieltemperatur right after Stufe (the one of the learned values = state.zb), Takt as Gesetzter Takt', async () => {
     const learned = { 2: { mhz: 275, temp_avg: 82, ths_avg: 133.4, j_th: 16.9, at: '2026-10-28T12:39:51Z', count: 13 } }
     // Zieltemperatur 83–86 gewählt, der data-service hat noch 82–85: die Lernwerte gehören zu 82–85
     mockApi({ ...automation({ zb: [82, 85] }), target_low: 83, target_high: 86, learned })
     renderPage()
     const table = (await screen.findByRole('columnheader', { name: 'Zieltemperatur' })).closest('table')
     const heads = within(table).getAllByRole('columnheader').map((c) => c.textContent)
-    expect(heads).toEqual(['Stufe', 'Zieltemperatur', 'Gesetzter Takt (Ø)', 'Ø Temperatur', 'Ø Hashrate', 'Effizienz',
-      'Anzahl', 'Zeit'])
+    expect(heads).toEqual(['Stufe', 'Zieltemperatur', 'Gesetzter Takt', 'Takt laut Miner (Ø)', 'Ø Temperatur',
+      'Ø Hashrate', 'Effizienz', 'Anzahl', 'Zeit', ''])
     const cells = within(within(table).getAllByRole('row')[1]).getAllByRole('cell').map((c) => c.textContent)
-    expect(cells.slice(0, 7)).toEqual(['2', '82–85 °C', '275 MHz', '82,0 °C', '133,4 TH/s', '16,9 J/TH', '13'])
+    expect(cells.slice(0, 8)).toEqual(['2', '82–85 °C', '275 MHz', '—', '82,0 °C', '133,4 TH/s', '16,9 J/TH', '13'])
   })
 
   it('mobile: one entry per level instead of the wide table', async () => {
@@ -373,8 +397,8 @@ describe('FansPage Lernwerte', () => {
     expect(first.closest('ul')).toHaveClass('sm:hidden')
     // label above value, two per line
     const pairs = (li) => [...li.querySelectorAll('.grid > div')].map((d) => [...d.children].map((c) => c.textContent))
-    expect(pairs(first)).toEqual([['Gesetzter Takt (Ø)', '260 MHz'], ['Ø Temperatur', '81,9 °C'],
-      ['Ø Hashrate', '131,6 TH/s'], ['Effizienz', '17,1 J/TH'], ['Anzahl', '21']])
+    expect(pairs(first)).toEqual([['Gesetzter Takt', '260 MHz'], ['Takt laut Miner (Ø)', '—'],
+      ['Ø Temperatur', '81,9 °C'], ['Ø Hashrate', '131,6 TH/s'], ['Effizienz', '17,1 J/TH'], ['Anzahl', '21']])
     expect(within(first.closest('ul')).getAllByRole('listitem')).toHaveLength(1)
   })
 
@@ -385,6 +409,62 @@ describe('FansPage Lernwerte', () => {
     const table = (await screen.findByRole('columnheader', { name: 'Zieltemperatur' })).closest('table')
     const cells = within(within(table).getAllByRole('row')[1]).getAllByRole('cell').map((c) => c.textContent)
     expect(cells.slice(0, 3)).toEqual(['3', '—', '320 MHz'])
+  })
+
+  it('Takt laut Miner (Ø) right after Gesetzter Takt, — for old values without it (Nutzer 08.11.)', async () => {
+    const learned = {
+      2: { mhz: 275, mhz_miner: 271.6, temp_avg: 82, at: '2026-11-08T12:39:51Z', count: 3 },
+      3: { mhz: 320, temp_avg: 83.2, at: '2026-10-28T09:00:00Z', count: 2 },
+    }
+    const others = { '81-84': { 4: { mhz: 400, mhz_miner: 396.2, temp_avg: 82.5, at: '2026-11-07T10:00:00Z', count: 1 } } }
+    mockApi({ ...automation({ zb: [82, 85] }), learned, learned_zb: others })
+    renderPage()
+    const table = (await screen.findByRole('columnheader', { name: 'Takt laut Miner (Ø)' })).closest('table')
+    const rows = within(table).getAllByRole('row').slice(1)
+    expect(rows.map((r) => within(r).getAllByRole('cell').slice(2, 4).map((c) => c.textContent))).toEqual([
+      ['275 MHz', '272 MHz'], ['320 MHz', '—'], [], ['400 MHz', '396 MHz']])
+    expect(within(table).getByText('Andere Zieltemperaturen')).toHaveAttribute('colspan', '10')
+    // mobile: after Gesetzter Takt in each entry
+    const pairs = (text) => [...screen.getByText(text).closest('li').querySelectorAll('.grid > div')]
+      .slice(0, 2).map((d) => [...d.children].map((c) => c.textContent))
+    expect(pairs(/^Stufe 2 · 82–85 °C$/)).toEqual([['Gesetzter Takt', '275 MHz'], ['Takt laut Miner (Ø)', '272 MHz']])
+    expect(pairs(/^Stufe 3 · 82–85 °C$/)).toEqual([['Gesetzter Takt', '320 MHz'], ['Takt laut Miner (Ø)', '—']])
+    expect(pairs(/^Stufe 4 · 81–84 °C$/)).toEqual([['Gesetzter Takt', '400 MHz'], ['Takt laut Miner (Ø)', '396 MHz']])
+  })
+
+  it('the other Zieltemperaturen grey below the current one, sorted by ZTU then ZTO (Nutzer 08.11., B)', async () => {
+    const learned = { 3: { mhz: 360, temp_avg: 81.6, at: '2026-11-08T18:55:39Z', count: 1 } }
+    const others = {
+      '82-86': { 2: { mhz: 275.4, temp_avg: 82.7, at: '2026-11-08T20:49:00Z', count: 5 } },
+      '81-84': { 3: { mhz: 360, temp_avg: 82, at: '2026-11-08T16:11:00Z', count: 2 },
+        2: { mhz: 260, temp_avg: 81.9, at: '2026-11-08T12:44:00Z', count: 3 } },
+      '82-85': { 4: { mhz: 405, temp_avg: 83, at: '2026-10-27T02:08:00Z', count: 1 } },
+    }
+    mockApi({ ...automation({ zb: [81, 85] }), target_low: 81, target_high: 85, learned, learned_zb: others })
+    renderPage()
+    const table = (await screen.findByRole('columnheader', { name: 'Zieltemperatur' })).closest('table')
+    const rows = within(table).getAllByRole('row').slice(1)
+    expect(rows.map((r) => within(r).getAllByRole('cell').slice(0, 3).map((c) => c.textContent))).toEqual([
+      ['3', '81–85 °C', '360 MHz'], ['Andere Zieltemperaturen'], ['2', '81–84 °C', '260 MHz'],
+      ['3', '81–84 °C', '360 MHz'], ['4', '82–85 °C', '405 MHz'], ['2', '82–86 °C', '275 MHz']])
+    expect(rows[0]).not.toHaveClass('text-muted-foreground')
+    expect(rows.slice(1).every((r) => r.classList.contains('text-muted-foreground'))).toBe(true)
+    // mobile: the current entries in one list, the others grey in a second one
+    const lists = screen.getAllByRole('list').filter((ul) => ul.classList.contains('sm:hidden'))
+    expect(lists.map((ul) => within(ul).getAllByRole('listitem').length)).toEqual([1, 4])
+    expect(lists[1]).toHaveClass('text-muted-foreground')
+  })
+
+  it('no learned value in the current Zieltemperatur: the note, below the other Zieltemperaturen', async () => {
+    const others = { '81-84': { 2: { mhz: 260, temp_avg: 81.9, at: '2026-11-08T12:44:00Z', count: 3 } } }
+    mockApi({ ...automation({}), learned_zb: others })
+    renderPage()
+    expect(await screen.findByText('Lernwerte: noch keine (nach 15 min stabil bei 82–85 °C und einer Fehlerrate unter 5 %).'))
+      .toBeInTheDocument()
+    const table = screen.getByRole('columnheader', { name: 'Zieltemperatur' }).closest('table')
+    const rows = within(table).getAllByRole('row').slice(1)
+    expect(rows.map((r) => within(r).getAllByRole('cell').slice(0, 3).map((c) => c.textContent))).toEqual([
+      ['Andere Zieltemperaturen'], ['2', '81–84 °C', '260 MHz']])
   })
 
   it('no learned values yet: 15 min stable in the Zieltemperatur with an error rate below 5 %', async () => {
@@ -441,5 +521,220 @@ describe('FansPage Lernwerte', () => {
     renderPage()
     expect(await screen.findByText('Basismodus')).toBeInTheDocument()
     expect(screen.queryByText(/Fan speed/)).not.toBeInTheDocument()
+  })
+})
+
+describe('FansPage Lernwert löschen (Nutzer 08.11.)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  const learned = { 3: { mhz: 320, temp_avg: 83.2, at: '2026-10-28T09:00:00Z', count: 2 } }
+  const others = { '81-84': { 2: { mhz: 260, temp_avg: 81.9, at: '2026-11-08T12:44:00Z', count: 3 } } }
+  const desktop = async () => (await screen.findByRole('columnheader', { name: 'Zieltemperatur' })).closest('table')
+  const rowOf = (table, range) => within(table).getAllByRole('row')
+    .find((r) => within(r).queryAllByRole('cell')[1]?.textContent === range)
+
+  it('Löschen: question, Nein sends nothing, Ja sends Zieltemperatur, Stufe and at of the value', async () => {
+    const user = userEvent.setup()
+    const auto = { ...automation({ zb: [82, 85] }), learned }
+    mockApi(auto)
+    api.post.mockResolvedValue({ data: auto })
+    renderPage()
+    const table = await desktop()
+    expect(within(table).getAllByRole('columnheader').at(-1)).toHaveTextContent(/^$/)
+    await user.click(within(table).getByRole('button', { name: 'Löschen' }))
+    expect(within(table).getByText('Lernwert wirklich löschen?')).toBeInTheDocument()
+    expect(within(table).getByRole('button', { name: 'Ja' })).toHaveClass('bg-destructive')
+    expect(within(table).getByRole('button', { name: 'Nein' })).toHaveClass('bg-secondary')
+    await user.click(within(table).getByRole('button', { name: 'Nein' }))
+    expect(screen.queryByText('Lernwert wirklich löschen?')).not.toBeInTheDocument()
+    expect(api.post).not.toHaveBeenCalled()
+
+    await user.click(within(table).getByRole('button', { name: 'Löschen' }))
+    await user.click(within(table).getByRole('button', { name: 'Ja' }))
+    expect(api.post).toHaveBeenCalledTimes(1)
+    expect(api.post).toHaveBeenCalledWith('/api/fans/automation/',
+      { dev_id: 'ac1', action: 'learned_delete', zb: '82-85', level: 3, at: '2026-10-28T09:00:00Z' })
+    // the answer still has the value (the data-service deletes it): the button stays disabled, also on the phone
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Automatik beenden' })).toBeEnabled())
+    expect(screen.getAllByRole('button', { name: 'Löschen' })).toHaveLength(2)
+    for (const button of screen.getAllByRole('button', { name: 'Löschen' })) expect(button).toBeDisabled()
+  })
+
+  it('the value disappears with the live poll (every 5 s) once the data-service has deleted it', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
+      const auto = { ...automation({ zb: [82, 85] }), learned }
+      let live = auto
+      mockApi(auto)
+      const status = api.get.getMockImplementation()
+      api.get.mockImplementation((url) => {
+        if (url === '/api/live/') {
+          return Promise.resolve({ data: { devices: [], mining: [], system: {}, hardware: [], automation: live } })
+        }
+        return status(url)
+      })
+      api.post.mockResolvedValue({ data: auto })
+      render(<LiveProvider><MemoryRouter><FansPage /></MemoryRouter></LiveProvider>)
+      const table = await desktop()
+      await user.click(within(table).getByRole('button', { name: 'Löschen' }))
+      await user.click(within(table).getByRole('button', { name: 'Ja' }))
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Automatik beenden' })).toBeEnabled())
+      expect(within(table).getByRole('button', { name: 'Löschen' })).toBeDisabled()
+      live = { ...auto, learned: {} }
+      await act(() => vi.advanceTimersByTimeAsync(5000))
+      expect(screen.getByText('Lernwerte: noch keine (nach 15 min stabil bei 82–85 °C und einer Fehlerrate unter 5 %).'))
+        .toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: 'Löschen' })).not.toBeInTheDocument()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('without state.zb no button for the current values, the other Zieltemperaturen keep theirs', async () => {
+    mockApi({ ...automation({ zb: null }), learned, learned_zb: others })
+    renderPage()
+    const table = await desktop()
+    expect(within(rowOf(table, '—')).queryByRole('button')).not.toBeInTheDocument()
+    expect(within(rowOf(table, '81–84 °C')).getByRole('button', { name: 'Löschen' })).toBeInTheDocument()
+    expect(within(screen.getByText(/^Stufe 3 · —$/).closest('li')).queryByRole('button')).not.toBeInTheDocument()
+    expect(within(screen.getByText(/^Stufe 2 · 81–84 °C$/).closest('li')).getByRole('button', { name: 'Löschen' }))
+      .toBeInTheDocument()
+  })
+
+  it('Automatik off: the table below the Einschalten button, Löschen of another Zieltemperatur on the phone', async () => {
+    const user = userEvent.setup()
+    const auto = { ...automation({ phase: 'aus', zb: [82, 85] }), enabled: false, learned, learned_zb: others }
+    mockApi(auto)
+    api.post.mockResolvedValue({ data: auto })
+    renderPage()
+    const enable = await screen.findByRole('button', { name: /Einschalten/ })
+    const table = await desktop()
+    expect(enable.compareDocumentPosition(table) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(within(table).getAllByRole('button', { name: 'Löschen' })).toHaveLength(2)
+    const entry = screen.getByText(/^Stufe 2 · 81–84 °C$/).closest('li')
+    await user.click(within(entry).getByRole('button', { name: 'Löschen' }))
+    await user.click(within(entry).getByRole('button', { name: 'Ja' }))
+    expect(api.post).toHaveBeenCalledWith('/api/fans/automation/',
+      { dev_id: 'ac1', action: 'learned_delete', zb: '81-84', level: 2, at: '2026-11-08T12:44:00Z' })
+  })
+
+  it('an error of the server is shown like the other Automatik commands', async () => {
+    const user = userEvent.setup()
+    mockApi({ ...automation({ zb: [82, 85] }), learned })
+    api.post.mockRejectedValue({ response: { status: 409, data: { error: 'Lernwert nicht mehr vorhanden oder neu gelernt.' } } })
+    renderPage()
+    const table = await desktop()
+    await user.click(within(table).getByRole('button', { name: 'Löschen' }))
+    await user.click(within(table).getByRole('button', { name: 'Ja' }))
+    expect(await screen.findByText('Lernwert nicht mehr vorhanden oder neu gelernt.')).toHaveClass('text-destructive')
+  })
+
+  it('a failed request deletes nothing: Löschen is free again', async () => {
+    const user = userEvent.setup()
+    mockApi({ ...automation({ zb: [82, 85] }), learned })
+    api.post.mockRejectedValue({ response: { status: 500, data: { error: 'Lernwert nicht gelöscht.' } } })
+    renderPage()
+    const table = await desktop()
+    await user.click(within(table).getByRole('button', { name: 'Löschen' }))
+    await user.click(within(table).getByRole('button', { name: 'Ja' }))
+    expect(await screen.findByText('Lernwert nicht gelöscht.')).toHaveClass('text-destructive')
+    for (const button of screen.getAllByRole('button', { name: 'Löschen' })) expect(button).toBeEnabled()
+  })
+
+  it('switching the Automatik off while the value is not yet deleted keeps Löschen disabled', async () => {
+    const user = userEvent.setup()
+    const auto = { ...automation({ zb: [82, 85] }), learned }
+    mockApi(auto)
+    api.post.mockResolvedValueOnce({ data: auto })
+      .mockResolvedValueOnce({ data: { ...auto, enabled: false, state: { ...auto.state, phase: 'aus' } } })
+    renderPage()
+    const table = await desktop()
+    await user.click(within(table).getByRole('button', { name: 'Löschen' }))
+    await user.click(within(table).getByRole('button', { name: 'Ja' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Automatik beenden' })).toBeEnabled())
+    await user.click(screen.getByRole('button', { name: 'Automatik beenden' }))
+    await user.click(screen.getByRole('button', { name: 'Ja' }))
+    expect(await screen.findByRole('button', { name: /Einschalten/ })).toBeInTheDocument()
+    expect(screen.getAllByRole('button', { name: 'Löschen' })).toHaveLength(2)
+    for (const button of screen.getAllByRole('button', { name: 'Löschen' })) expect(button).toBeDisabled()
+  })
+})
+
+describe('FansPage Sicherung löschen (Nutzer 08.11., B)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  const backup = (file, at) => ({ file, dev_id: 'ac1', created_at: at, ports: [0, 1] })
+  const one = [backup('backup-20261107-100000-ac1.json', '2026-11-07T10:00:00Z')]
+  const two = [...one, backup('backup-20261108-090000-ac1.json', '2026-11-08T09:00:00Z')]
+  const list = async () => (await screen.findByText('Sicherung (Einstellungen Port 0–4)')).parentElement.querySelector('ul')
+
+  it('no Löschen with only one backup of the controller (one of another controller does not count)', async () => {
+    const foreign = { ...backup('backup-20261108-090000-other.json', '2026-11-08T09:00:00Z'), dev_id: 'other' }
+    mockApi(automation({}), { backups: [...one, foreign] })
+    renderPage()
+    const ul = await list()
+    expect(within(ul).getAllByRole('listitem')).toHaveLength(1)
+    expect(within(ul).getByRole('button', { name: 'Zurückschreiben' })).toBeInTheDocument()
+    expect(within(ul).queryByRole('button', { name: 'Löschen' })).not.toBeInTheDocument()
+  })
+
+  it('two backups: Löschen with question, one question at a time, Ja posts the file and reloads', async () => {
+    const user = userEvent.setup()
+    mockApi(automation({}), { backups: two })
+    let answer
+    api.post.mockImplementation(() => new Promise((resolve) => { answer = resolve }))
+    renderPage()
+    const ul = await list()
+    const [first, second] = within(ul).getAllByRole('listitem')
+    expect(within(ul).getAllByRole('button', { name: 'Löschen' })).toHaveLength(2)
+    await user.click(within(first).getByRole('button', { name: 'Löschen' }))
+    expect(within(first).getByText('Sicherung wirklich löschen?')).toBeInTheDocument()
+    expect(within(first).getByRole('button', { name: 'Ja' })).toHaveClass('bg-destructive')
+    expect(within(first).getByRole('button', { name: 'Nein' })).toHaveClass('bg-secondary')
+    // the restore question of the other backup closes the delete question
+    await user.click(within(second).getByRole('button', { name: 'Zurückschreiben' }))
+    expect(screen.queryByText('Sicherung wirklich löschen?')).not.toBeInTheDocument()
+    expect(within(second).getByText('Wirklich zurückschreiben?')).toBeInTheDocument()
+    await user.click(within(first).getByRole('button', { name: 'Löschen' }))
+    expect(screen.queryByText('Wirklich zurückschreiben?')).not.toBeInTheDocument()
+    await user.click(within(first).getByRole('button', { name: 'Nein' }))
+    expect(api.post).not.toHaveBeenCalled()
+
+    const loads = api.get.mock.calls.filter(([url]) => url === '/api/fans/status/').length
+    await user.click(within(first).getByRole('button', { name: 'Löschen' }))
+    await user.click(within(first).getByRole('button', { name: 'Ja' }))
+    expect(api.post).toHaveBeenCalledTimes(1)
+    expect(api.post).toHaveBeenCalledWith('/api/fans/backup/delete/', { file: 'backup-20261107-100000-ac1.json' })
+    expect(screen.queryByText(/Befehl gesendet/)).not.toBeInTheDocument()
+    await act(async () => answer({ data: { deleted: 'backup-20261107-100000-ac1.json', backups: one } }))
+    expect(await screen.findByText('Sicherung gelöscht.')).toHaveClass('text-emerald-600')
+    await waitFor(() => expect(api.get.mock.calls.filter(([url]) => url === '/api/fans/status/').length).toBe(loads + 1))
+  })
+
+  it('an error of the server is shown', async () => {
+    const user = userEvent.setup()
+    mockApi(automation({}), { backups: two })
+    api.post.mockRejectedValue({ response: { status: 409, data: { error: 'Die letzte Sicherung dieses Controllers bleibt erhalten.' } } })
+    renderPage()
+    const ul = await list()
+    await user.click(within(ul).getAllByRole('button', { name: 'Löschen' })[0])
+    await user.click(within(ul).getByRole('button', { name: 'Ja' }))
+    expect(await screen.findByText('Die letzte Sicherung dieses Controllers bleibt erhalten.')).toHaveClass('text-destructive')
+  })
+
+  it('without a text of the server: Löschen fehlgeschlagen.', async () => {
+    const user = userEvent.setup()
+    mockApi(automation({}), { backups: two })
+    api.post.mockRejectedValue(new Error('Network Error'))
+    renderPage()
+    const ul = await list()
+    await user.click(within(ul).getAllByRole('button', { name: 'Löschen' })[1])
+    await user.click(within(ul).getByRole('button', { name: 'Ja' }))
+    expect(await screen.findByText('Löschen fehlgeschlagen.')).toBeInTheDocument()
   })
 })

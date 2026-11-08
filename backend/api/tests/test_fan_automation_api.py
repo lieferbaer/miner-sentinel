@@ -240,6 +240,8 @@ def test_payload_state_of_the_new_regulation(client, a15, backup):
         'calm': None, 'stoss': None, 'caps': {'3': 325}, 'test': {'started': '2026-10-24T18:00:00+00:00'},
         'learned': {'3': {'mhz': 240, 'temp_avg': 82.1, 'at': '2026-10-24T19:00:00+00:00', 'count': 2},
                     '2/L4': {'3': {'mhz': 231}}},
+        'learned_zb': {'81-84': {'2': {'mhz': 260, 'temp_avg': 81.9, 'at': '2026-11-08T13:44:00+00:00', 'count': 3}},
+                       '79-83': {}, '80-84': {'2/L4': {'3': {'mhz': 231}}}},
         'log': [['2026-10-24T20:00:00+00:00', 'Kühlmodus +1']],
     }
     auto.temp_test_at = timezone.now()                                         # old column: not shown
@@ -258,6 +260,9 @@ def test_payload_state_of_the_new_regulation(client, a15, backup):
         assert key not in st
     assert 'temp_test_at' not in data
     assert data['learned'] == {'3': {'mhz': 240, 'temp_avg': 82.1, 'at': '2026-10-24T19:00:00+00:00', 'count': 2}}
+    # the other Zieltemperaturen (Nutzer 08.11.): only those with values per fan level
+    assert data['learned_zb'] == {'81-84': {'2': {'mhz': 260, 'temp_avg': 81.9, 'at': '2026-11-08T13:44:00+00:00',
+                                                  'count': 3}}}
     assert data['log'] == [['2026-10-24T20:00:00+00:00', 'Kühlmodus +1']]
     assert client.get('/api/live/').data['automation']['state']['cool'] == {'since': '2026-10-24T19:59:30+00:00',
                                                                              'plus': 1}
@@ -425,3 +430,107 @@ def test_target_range_same_range_no_entry(client, a15, backup):
     assert res.status_code == 200 and (res.data['target_low'], res.data['target_high']) == (82, 85)
     assert FanAutomation.objects.get(device=a15).updated_at == updated
     assert not AutomationLog.objects.filter(kind='zielbereich').exists()
+
+
+def _learned_state():
+    return {
+        'v': 2, 'phase': 'basismodus', 't': 83, 'tendency': 0, 'seen_at': timezone.now().isoformat(), 'zb': [82, 85],
+        'learned': {'3': {'mhz': 240, 'temp_avg': 83.1, 'at': '2026-11-08T10:00:00+00:00', 'count': 4},
+                    '4': {'mhz': 255, 'temp_avg': 82.7, 'at': '2026-11-08T11:00:00+00:00', 'count': 1}},
+        'learned_zb': {'81-84': {'3': {'mhz': 230, 'temp_avg': 82.0, 'at': '2026-11-07T09:00:00+00:00',
+                                       'count': 2}}},
+    }
+
+
+def test_learned_delete_writes_request(client, a15):
+    """Lernwert löschen (Nutzer 08.11.): only a request row for the data-service; auto.state stays unchanged."""
+    state = _learned_state()
+    auto = FanAutomation.objects.create(device=a15, ac_dev_id='dev1', ac_port=1, level=3, enabled=True, state=state)
+    updated = auto.updated_at
+    res = client.post('/api/fans/automation/', {'action': 'learned_delete', 'zb': '82-85', 'level': 3,
+                                                'at': '2026-11-08T10:00:00+00:00'}, format='json')
+    assert res.status_code == 200 and res.data['enabled'] is True
+    assert res.data['learned']['3']['mhz'] == 240                 # deleted by the data-service in its next round
+    events = list(AutomationLog.objects.all())
+    assert len(events) == 1
+    e = events[0]
+    assert (e.kind, e.source, e.device_id, e.ok) == ('lernwert_loeschen', 'nutzer', a15.id, None)
+    assert e.trigger == 'Nutzer: Lernwert Stufe 3 (82–85 °C) gelöscht'
+    assert (e.phase, e.chip_temp, e.tendency) == ('basismodus', 83.0, 0)
+    assert e.details == {'zieltemperatur': '82-85', 'stufe': 3, 'at': '2026-11-08T10:00:00+00:00', 'takt': 240,
+                         'temp_mittel': 83.1, 'anzahl': 4}
+    auto.refresh_from_db()
+    assert auto.state == state and auto.updated_at == updated
+
+
+def test_learned_delete_other_target_and_automation_off(client, a15):
+    """Allowed with the automation off (Nutzer 08.11.); the learned values are in the payload then too; another
+    Zieltemperatur is looked up in learned_zb."""
+    state = _learned_state()
+    FanAutomation.objects.create(device=a15, ac_dev_id='dev1', ac_port=1, level=3, enabled=False, state=state)
+    url = '/api/fans/automation/'
+    data = client.get(url).data
+    assert data['enabled'] is False and set(data['learned']) == {'3', '4'} and set(data['learned_zb']) == {'81-84'}
+    res = client.post(url, {'action': 'learned_delete', 'zb': '81-84', 'level': '3',
+                            'at': '2026-11-07T09:00:00+00:00'}, format='json')
+    assert res.status_code == 200 and res.data['enabled'] is False
+    e = AutomationLog.objects.get()
+    assert e.trigger == 'Nutzer: Lernwert Stufe 3 (81–84 °C) gelöscht'
+    assert e.details == {'zieltemperatur': '81-84', 'stufe': 3, 'at': '2026-11-07T09:00:00+00:00', 'takt': 230,
+                         'temp_mittel': 82.0, 'anzahl': 2}
+    assert FanAutomation.objects.get(device=a15).state == state
+
+
+@pytest.mark.parametrize('zb, level, at', [
+    ('82-85', 3, '2026-11-08T10:00:01+00:00'),          # learned again since
+    ('82-85', 3, None),
+    ('82-85', 5, '2026-11-08T10:00:00+00:00'),          # no value for this level
+    ('81-84', 4, '2026-11-08T11:00:00+00:00'),
+    ('80-84', 3, '2026-11-08T10:00:00+00:00'),          # no values for this Zieltemperatur
+])
+def test_learned_delete_gone(client, a15, zb, level, at):
+    FanAutomation.objects.create(device=a15, ac_dev_id='dev1', ac_port=1, level=3, enabled=True,
+                                 state=_learned_state())
+    body = {'action': 'learned_delete', 'zb': zb, 'level': level}
+    if at is not None:
+        body['at'] = at
+    res = client.post('/api/fans/automation/', body, format='json')
+    assert res.status_code == 409 and res.data == {'error': 'Lernwert nicht mehr vorhanden oder neu gelernt.'}
+    assert not AutomationLog.objects.exists()
+
+
+def test_learned_delete_without_current_target(client, a15):
+    """No Zieltemperatur taken over yet (no state['zb']): every key is one of learned_zb."""
+    state = _learned_state()
+    del state['zb']
+    FanAutomation.objects.create(device=a15, ac_dev_id='dev1', ac_port=1, level=3, enabled=True, state=state)
+    url = '/api/fans/automation/'
+    res = client.post(url, {'action': 'learned_delete', 'zb': '82-85', 'level': 3,
+                            'at': '2026-11-08T10:00:00+00:00'}, format='json')
+    assert res.status_code == 409
+    res = client.post(url, {'action': 'learned_delete', 'zb': '81-84', 'level': 3,
+                            'at': '2026-11-07T09:00:00+00:00'}, format='json')
+    assert res.status_code == 200 and AutomationLog.objects.get().details['zieltemperatur'] == '81-84'
+
+
+@pytest.mark.parametrize('zb, level', [
+    ('82_85', 3), ('', 3), (None, 3), ('a-b', 3), ('82-85-1', 3), (8285, 3), ('82-85 ', 3),
+    ('82-85', 0), ('82-85', 11), ('82-85', 'x'), ('82-85', 2.5), ('82-85', True), ('82-85', None)])
+def test_learned_delete_invalid(client, a15, zb, level):
+    FanAutomation.objects.create(device=a15, ac_dev_id='dev1', ac_port=1, level=3, enabled=True,
+                                 state=_learned_state())
+    res = client.post('/api/fans/automation/', {'action': 'learned_delete', 'zb': zb, 'level': level,
+                                                'at': '2026-11-08T10:00:00+00:00'}, format='json')
+    assert res.status_code == 400 and res.data == {'error': 'Lernwert nicht gefunden.'}
+    assert not AutomationLog.objects.exists()
+
+
+def test_learned_delete_db_error(client, a15):
+    """The request row is the deletion: unlike other user events, a database error is reported."""
+    from django.db import DatabaseError
+    FanAutomation.objects.create(device=a15, ac_dev_id='dev1', ac_port=1, level=3, enabled=True,
+                                 state=_learned_state())
+    with patch.object(AutomationLog.objects, 'create', side_effect=DatabaseError('no table')):
+        res = client.post('/api/fans/automation/', {'action': 'learned_delete', 'zb': '82-85', 'level': 3,
+                                                    'at': '2026-11-08T10:00:00+00:00'}, format='json')
+    assert res.status_code == 500 and res.data == {'error': 'Lernwert nicht gelöscht.'}

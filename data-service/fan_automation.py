@@ -27,11 +27,13 @@ Taktsperre, Obergrenzen, Ertrags-Prüfung, Temperatur-Test and Takt-Messung are 
     6 = 420, from 7 = 440 MHz). Heiz- and Kühlmodus end without a lock, fan = Basisstufe.
   * Startpause after a start with cold chips (Neustart, Wartung, Over Hot): no clock increase until ZTU−5, at most
     10 min. „Nicht erreichbar“ around a restart is a restart entry, not an error.
-  * Clock 100–440 MHz, the mode follows the clock (20 MHz margin downwards).
+  * Clock 100–440 MHz, the mode follows the clock (25 MHz margin downwards, Nutzer 08.11.; was 20).
   * Takt laut Miner weicht ab: more than 15 MHz off the set clock for 15 min without a break → set clock sent again.
   * Fehlerrate (DH): over 10 % for 30 min without a break → automatic restart, at most one per 6 h.
   * Learning: 15 min in ZTU..ZTO at an unchanged fan level → learned value of the active level, only at a mean error
-    rate below 5 %; learned values are remembered per Zieltemperatur.
+    rate below 5 %; learned values are remembered per Zieltemperatur. Its clock is the set clock at the end of the
+    15 min (Nutzer 08.11.; was the mean), beside it the mean clock reported by the miner. The user can delete a single
+    learned value (Nutzer 08.11.), also with the Automatik off.
   * New Zieltemperatur: new limits at once, no start.
   * Every round and every decision goes into the protocol (automation_journal.py).
 Live only (MINERSENTINEL_ENV != Test). The AC Infinity client is the backend's (backend/api/acinfinity.py,
@@ -79,8 +81,8 @@ CUT_LOCK_S = 5 * 60           # after every reduction 5 min no clock increase (n
 START_CLOCK = {1: 170, 2: 250, 3: 330, 4: 380, 5: 400, 6: 420, 7: 440, 8: 440, 9: 440, 10: 440}   # Nutzer 28.10.
 CLOCK_MIN, CLOCK_MAX = 100, 440
 MODE_TOP = {4: 360, 3: 380, 2: 400, 1: 420, 0: 440}   # oberer Takt je Modus (mode 04 ... mode 00)
-MODE_DOWN_MARGIN = 20         # Spielraum nach unten: Wechsel in den tieferen Modus erst unter dessen Obergrenze − 20 MHz
-                              # (Nutzer 26.10.; seit 08.11. „nur kleiner“: 340 bleibt mode 03, 335 → mode 04)
+MODE_DOWN_MARGIN = 25         # Spielraum nach unten: Wechsel in den tieferen Modus erst unter dessen Obergrenze − 25 MHz
+                              # (Nutzer 08.11.; vorher 20), „nur kleiner“: 335 bleibt mode 03, 334 → mode 04
 TENDENCY_S = 30               # Tendenz (only shown, no rule uses it): gegen den Wert von vor höchstens 30 s
 START_HOLD_S = 10 * 60        # Startpause: nach einem Start mit kalten Chips keine Takterhöhung bis ZTU−5, höchstens 10 min
 START_HOLD_BELOW = 5          # ... ZTU−5 (Nutzer 06.11.; vorher bis ZTU)
@@ -178,7 +180,8 @@ def table_level(mhz):
 
 
 def required_level(mhz, current):
-    """Modus für einen Takt: aufwärts ab Obergrenze + 1, abwärts erst unter Obergrenze des tieferen Modus − 20 MHz."""
+    """Modus für einen Takt: aufwärts ab Obergrenze + 1, abwärts erst unter Obergrenze des tieferen Modus − 25 MHz
+    (mode 00→01 unter 395, 01→02 unter 375, 02→03 unter 355, 03→04 unter 335; Nutzer 08.11.)."""
     if current is None:
         return table_level(mhz)
     level = current
@@ -784,7 +787,8 @@ class Round:
             self.base_event(kind='lernen_ende', trigger=reason, details={'ergebnis': 'abgebrochen', 'grund': reason,
                                                                          'seit': st['learn_since']})
         st['learn_since'] = None
-        st['learn_sum'], st['learn_n'], st['learn_clock_sum'] = 0, 0, 0.0
+        st['learn_sum'], st['learn_n'] = 0, 0
+        st['learn_mclk_sum'], st['learn_mclk_n'] = 0.0, 0
         st['learn_dh_sum'], st['learn_dh_n'] = 0.0, 0
         st['learn_ths_sum'], st['learn_ths_n'] = 0.0, 0
         st['learn_w_sum'], st['learn_w_n'] = 0.0, 0
@@ -793,9 +797,11 @@ class Round:
         """Lernperiode 15 min auf derselben Lüfterstufe. Taktschritte setzen sie nicht zurück, kurze Ausflüge
         aus ZTU..ZTO bis 60 s auch nicht (Nutzer 25.10.: sonst entstand nie ein Lernwert). Neu beginnt sie bei Wechsel
         der Lüfterstufe, Moduswechsel, einem Wert über ZTO oder länger als 60 s außerhalb ZTU..ZTO.
-        Gespeichert (Lernwert der aktiven Stufe): Mittelwert des gesetzten Takts, der Chiptemperatur und der Hashrate der
-        15 min, dazu die Effizienz (Ø Leistung / Ø Hashrate, J/TH) – nur bei mittlerer Fehlerrate unter 5 % (Nutzer
-        06.11.; vorher 4 %), sonst verworfen und neu begonnen. No cap limits it any more."""
+        Gespeichert (Lernwert der aktiven Stufe): der gesetzte Takt am Ende der 15 min (Nutzer 08.11.; vorher sein
+        Mittelwert), Mittelwert der Chiptemperatur und der Hashrate der 15 min, dazu die Effizienz (Ø Leistung /
+        Ø Hashrate, J/TH) und der mittlere Takt laut Miner (mhz_miner, nur Runden ohne offenen Takt-/Modusbefehl;
+        Nutzer 08.11.) – nur bei mittlerer Fehlerrate unter 5 % (Nutzer 06.11.; vorher 4 %), sonst verworfen und neu
+        begonnen. No cap limits it any more."""
         st, t, now = self.st, self.t, self.now
         lo, hi = self.lo, self.hi
         level = st.get('fan_target')
@@ -824,13 +830,17 @@ class Round:
             if not (lo <= t <= hi):
                 return                                   # eine Lernperiode beginnt nur in der Zieltemperatur
             st.update({'learn_since': _iso(now), 'learn_level': level, 'learn_sum': 0, 'learn_n': 0,
-                       'learn_clock_sum': 0.0, 'learn_dh_sum': 0.0, 'learn_dh_n': 0, 'learn_ths_sum': 0.0,
-                       'learn_ths_n': 0, 'learn_w_sum': 0.0, 'learn_w_n': 0, 'learn_out_since': None})
+                       'learn_mclk_sum': 0.0, 'learn_mclk_n': 0, 'learn_dh_sum': 0.0, 'learn_dh_n': 0,
+                       'learn_ths_sum': 0.0, 'learn_ths_n': 0, 'learn_w_sum': 0.0, 'learn_w_n': 0,
+                       'learn_out_since': None})
             self.base_event(kind='lernen_start', trigger='Chiptemperatur %d °C in %d–%d °C' % (t, lo, hi),
                             details={'takt': st.get('clock_set'), 'luefterstufe': level})
         st['learn_sum'] += t
-        st['learn_clock_sum'] = (st.get('learn_clock_sum') or 0.0) + float(st.get('clock_set') or 0)
         st['learn_n'] += 1
+        if st.get('clock_now') is not None and not self.busy():
+            # Takt laut Miner only while no clock/mode command waits for its takeover (Nutzer 08.11.)
+            st['learn_mclk_sum'] = (st.get('learn_mclk_sum') or 0.0) + float(st['clock_now'])
+            st['learn_mclk_n'] = (st.get('learn_mclk_n') or 0) + 1
         if self.m.get('dh') is not None:
             st['learn_dh_sum'] = (st.get('learn_dh_sum') or 0.0) + float(self.m['dh'])
             st['learn_dh_n'] = (st.get('learn_dh_n') or 0) + 1
@@ -843,7 +853,7 @@ class Round:
         if _age(st['learn_since'], now) >= LEARN_S:
             n = max(st['learn_n'], 1)
             avg_t = round(st['learn_sum'] / n, 1)
-            mhz = round(st['learn_clock_sum'] / n, 1)
+            mhz = int(round(st.get('clock_set') or 0))   # the set clock at the end of the 15 min (Nutzer 08.11.)
             key = str(level)
             dh_n = st.get('learn_dh_n') or 0
             dh = st['learn_dh_sum'] / dh_n if dh_n else None
@@ -858,6 +868,8 @@ class Round:
             else:
                 prev = (st.get('learned') or {}).get(key)
                 entry = {'mhz': mhz, 'temp_avg': avg_t, 'at': _iso(now), 'count': (prev or {}).get('count', 0) + 1}
+                if st.get('learn_mclk_n'):                    # Ø Takt laut Miner (Nutzer 08.11.)
+                    entry['mhz_miner'] = round(st['learn_mclk_sum'] / st['learn_mclk_n'], 1)
                 if st.get('learn_ths_n'):
                     entry['ths_avg'] = round(st['learn_ths_sum'] / st['learn_ths_n'], 1)   # Ø Hashrate (Nutzer 28.10.)
                     if st.get('learn_w_n'):                   # Effizienz J/TH (Nutzer 28.10.)
@@ -865,14 +877,60 @@ class Round:
                                               / st['learn_ths_sum'], 1)
                 st.setdefault('learned', {})[key] = entry
                 log_id = self.base_event(kind='lernwert', trigger='15 min auf Stufe %s, Ø %.1f °C' % (key, avg_t),
-                                         details={'luefterstufe': level, 'takt': mhz, 'temp_mittel': avg_t,
+                                         details={'luefterstufe': level, 'takt': mhz,
+                                                  'takt_miner': entry.get('mhz_miner'), 'temp_mittel': avg_t,
                                                   'anzahl': entry['count'], 'vorher': prev})
                 self.base_event(kind='lernen_ende', trigger='15 min erreicht', details={'ergebnis': 'gespeichert'})
-                self.note('Lernwert Stufe %s: %.1f MHz (Mittel), Ø %.1f °C (%d. Mal).' % (key, mhz, avg_t, entry['count']))
+                self.note('Lernwert Stufe %s: %d MHz (gesetzter Takt), Ø %.1f °C (%d. Mal).' % (key, mhz, avg_t,
+                                                                                    entry['count']))
                 self.decide('Lernwert gespeichert', log_id)
-            st.update({'learn_since': _iso(now), 'learn_sum': 0, 'learn_n': 0, 'learn_clock_sum': 0.0,
-                       'learn_dh_sum': 0.0, 'learn_dh_n': 0, 'learn_ths_sum': 0.0, 'learn_ths_n': 0,
-                       'learn_w_sum': 0.0, 'learn_w_n': 0})
+            st.update({'learn_since': _iso(now), 'learn_sum': 0, 'learn_n': 0, 'learn_mclk_sum': 0.0,
+                       'learn_mclk_n': 0, 'learn_dh_sum': 0.0, 'learn_dh_n': 0, 'learn_ths_sum': 0.0,
+                       'learn_ths_n': 0, 'learn_w_sum': 0.0, 'learn_w_n': 0})
+
+    # --- Lernwert löschen (Nutzer 08.11.)
+    def learned_delete(self):
+        """Requests of the user (automation_log kind 'lernwert_loeschen', newer than learned_del_seen; read with the
+        row, also with the Automatik off): each deletes one learned value – of the current Zieltemperatur from learned,
+        of another one from learned_zb (an archive entry left empty goes) – only if it still is the one the user saw
+        (same 'at'). A running learning period goes on unchanged (Nutzer 08.11.). New dicts only: row['state'] stays
+        untouched if the round fails later. learned_del_seen = time of the last request read."""
+        st, requests = self.st, self.row.get('learned_del') or []
+        if not requests:
+            return
+        zb = st.get('zb')
+        current = '%d-%d' % tuple(zb) if zb else None
+        for req in requests:
+            details = req.get('details')
+            if not isinstance(details, dict):
+                details = {}                             # details not an object (jsonb): never fails the round
+            zt, level, at = details.get('zieltemperatur'), details.get('stufe'), details.get('at')
+            key = str(level)
+            label = 'Lernwert Stufe %s (%s °C)' % (level, str(zt).replace('-', '–'))
+            if not isinstance(zt, str):
+                values = {}                              # malformed request: never fails the round
+            elif zt == current:
+                values = st.get('learned') or {}
+            else:
+                values = (st.get('learned_zb') or {}).get(zt) or {}
+            entry = values.get(key)
+            if at is None or not isinstance(entry, dict) or entry.get('at') != at:
+                self.note(label + ' nicht gelöscht: nicht mehr vorhanden oder neu gelernt.')
+                continue
+            values = {k: v for k, v in values.items() if k != key}
+            if zt == current:
+                st['learned'] = values
+            else:
+                archive = dict(st.get('learned_zb') or {})
+                if values:
+                    archive[zt] = values
+                else:
+                    archive.pop(zt, None)
+                st['learned_zb'] = archive
+            self.note(label + ' gelöscht (Nutzer).')
+        seen = requests[-1].get('recorded_at')        # not now: a request written meanwhile is read next round
+        if seen is not None:
+            st['learned_del_seen'] = _iso(seen) if isinstance(seen, datetime) else str(seen)
 
     # --- Zieltemperatur
     def target_range(self):
@@ -1284,6 +1342,7 @@ class Round:
     # --- main
     def run(self):
         """One round, in this order:
+          0. Lernwert löschen (requests of the user), also with the Automatik off (Nutzer 08.11.).
           1. Automatik aus: Heizmodus ends (fan = Basisstufe), no clock; protocol, done.
           2. Automatik ein (or another STATE_VERSION): state anew (start 'Automatik ein'); state keys of the removed
              rules go once; Zieltemperatur taken over; Neustart button remembered.
@@ -1298,6 +1357,7 @@ class Round:
              lock) → locks (end early above ZTU+3) → clock reduction above ZTO → clock increase below ZTU.
           9. Fan command, then miner commands (not during Over Hot), learning (valid temperature), read the fan.
          10. Phase (heizmodus | basismodus | kuehlmodus) and the protocol of the round (automation_cycle)."""
+        self.learned_delete()
         st, row, now = self.st, self.row, self.now
         if not row['enabled']:
             if not st.get('off'):
@@ -1313,7 +1373,7 @@ class Round:
             # and the ZeitImZieltemperatur stay over a start, heat/cool end in it (Nutzer 06.11.)
             keep = ('log', 'stock', 'fan_set', 'fan_read', 'fan_read_at', 'fan_set_at', 'elapsed', 'mode_key',
                     'maint', 'maint_ended_at', 'offline', 'over_hot', 'restart_req_seen', 'zb', 'learned_zb',
-                    'auto_restart_at', 'heat', 'cool', 'locks', 'cut_at', 'cut_band', 'zt_since')
+                    'auto_restart_at', 'heat', 'cool', 'locks', 'cut_at', 'cut_band', 'zt_since', 'learned_del_seen')
             new = {k: st[k] for k in keep if k in st}
             new['learned'] = (st.get('learned') or {}) if st.get('v') == STATE_VERSION else {}
             if new.get('stock') is None:
@@ -1502,6 +1562,12 @@ def step(row, now, ac, journal=None):
     return Round(row, now, ac, journal or automation_journal.MemoryJournal()).run()
 
 
+# requests „Lernwert löschen“ not yet processed (Nutzer 08.11.), inside the main SELECT (f = fan_automation, d = devices)
+LEARNED_DEL_SQL = ("FROM automation_log l WHERE l.device_id = d.id AND l.kind = 'lernwert_loeschen' "
+                   "AND l.source = 'nutzer' AND l.recorded_at > "
+                   "COALESCE((f.state->>'learned_del_seen')::timestamptz, '-infinity'::timestamptz)")
+
+
 def run_fan_automation(database_url, ac=None):
     if (os.environ.get('MINERSENTINEL_ENV') or 'Live').lower() == 'test':
         return
@@ -1517,10 +1583,13 @@ def run_fan_automation(database_url, ac=None):
                 "f.target_low, f.target_high, "
                 "d.id AS device_id, d.ip_address, d.port, "
                 "(SELECT max(l.recorded_at) FROM automation_log l WHERE l.device_id = d.id AND l.kind = 'neustart_nutzer') "
-                "AS restart_req_at, d.connection_config "
+                "AS restart_req_at, d.connection_config, "
+                "(SELECT json_agg(json_build_object('recorded_at', l.recorded_at, 'details', l.details) "
+                "ORDER BY l.recorded_at, l.id) " + LEARNED_DEL_SQL + ") AS learned_del "
                 "FROM fan_automation f JOIN devices d ON d.id = f.device_id "
                 "WHERE f.enabled OR NOT COALESCE((f.state->>'off')::boolean, false) "
-                "OR COALESCE((f.state->>'heat_fan_due')::boolean, false)")     # Automatik aus: Lüfterbefehl wiederholen
+                "OR COALESCE((f.state->>'heat_fan_due')::boolean, false) "     # Automatik aus: Lüfterbefehl wiederholen
+                "OR EXISTS (SELECT 1 " + LEARNED_DEL_SQL + ")")   # Automatik aus: Lernwert trotzdem löschen (Nutzer 08.11.)
             rows = cur.fetchall()
         jconn = automation_journal.connect(database_url) if rows else None
         for row in rows:
