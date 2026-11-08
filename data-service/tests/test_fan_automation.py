@@ -551,6 +551,103 @@ def test_missing_stock_clock_is_estimated_and_never_blocks(miner):
     assert miner.clock() == 400 and r.events('fehler')[0]['details']['grund'] == 'standardtakt_fehlt'
 
 
+# ---------------------------------------------------------------- Basisstufe 1: nach −5 MHz (Nutzer 09.11.)
+
+def _cut5(miner, level=1, mhz=200):
+    """Basisstufe `level`, 6 min in 80–85 °C, then 86 °C: Bereich 1 −5 MHz at x (10:00 of the example)."""
+    ac = FakeAC(level=level)
+    r = warm(miner, ac, level=level, mhz=mhz)                     # 82 °C seit T0
+    r.go(350, temp=82)
+    x = r.now
+    r.go(5, temp=86)
+    assert r.st['clock_set'] == mhz - 5 and r.st['cut5_at'] == x.isoformat()
+    return r, x
+
+
+def test_base_level_1_no_increase_at_ztu_minus_2_and_1_for_30_min_after_minus_5(miner):
+    """Beispiel (ar, as): 10:00 86 °C nach 6 min −5; 10:10 79 °C kein +5; 10:12 77 °C +5 (ZTU −3, hebt die Sperre
+    nicht auf); 10:31 79 °C +5. Kein Protokolleintrag für die verhinderte Erhöhung."""
+    r, x = _cut5(miner)
+    r.go(595, temp=84)                                            # 10:10, Sperre nach der Senkung vorbei
+    n, logs = len(r.j.events), list(r.st['log'])
+    r.go(5, temp=79)
+    assert r.st['clock_set'] == 195 and not any(r.st['locks'].values())
+    r.go(5, temp=78)
+    assert r.st['clock_set'] == 195 and len(r.j.events) == n      # still: kein Eintrag
+    assert r.st['log'] == logs                                    # ... und kein Hinweis
+    r.go(110, temp=82)
+    r.go(5, temp=77)                                              # 10:12: ZTU −3 wie bisher
+    assert r.st['clock_set'] == 200 and r.st['cut5_at'] == x.isoformat()
+    r.go(475, temp=82)
+    r.go(5, temp=79)                                              # 10:20: Sperre nach der Erhöhung vorbei, Block nicht
+    assert r.st['clock_set'] == 200
+    r.go(655, temp=82)
+    r.go(5, temp=79)                                              # 10:31: Block vorbei
+    assert r.st['clock_set'] == 205 and miner.clock() == 205
+
+
+def test_block_after_minus_5_ends_exactly_after_30_min(miner):
+    r, x = _cut5(miner)
+    r.go((x + timedelta(seconds=1795) - r.now).total_seconds(), temp=84)
+    r.go(5, temp=79)                                              # 29 min 55 s
+    assert r.st['clock_set'] == 195
+    r.go(5, temp=79)                                              # genau 30 min
+    assert r.st['clock_set'] == 200
+
+
+def test_block_after_minus_5_not_at_base_level_3(miner):
+    r, x = _cut5(miner, level=3, mhz=300)
+    r.go(595, temp=84)
+    r.go(5, temp=79)                                              # 10:10: +5
+    assert r.st['clock_set'] == 300 and r.st['cut5_at'] == x.isoformat()
+
+
+def test_minus_10_does_not_block_at_base_level_1(miner):
+    r = warm(miner, FakeAC(level=1), level=1, mhz=200)
+    r.go(230, temp=82)                                            # 4 min in 80–85 °C
+    r.go(5, temp=86)                                              # −10
+    assert r.st['clock_set'] == 190 and not r.st.get('cut5_at')
+    r.go(595, temp=84)
+    r.go(5, temp=79)
+    assert r.st['clock_set'] == 195
+
+
+@pytest.mark.parametrize('reason', ['Basisstufe gewählt', 'Automatik ein', 'Neustart', 'nach Wartung',
+                                    'nach Over Hot'])
+def test_every_start_ends_the_block_after_minus_5(miner, reason):
+    """Nutzer 09.11. (at nein): ein Start (hier 10:15) hebt den Block auf."""
+    r, x = _cut5(miner)
+    r.go(895, temp=84)                                            # 10:15
+    if reason == 'Basisstufe gewählt':
+        r.go(5, temp=79, level_at='neu')
+    elif reason == 'Automatik ein':
+        r.go(5, temp=79, enabled=False)
+        r.go(5, temp=79, enabled=True)
+    elif reason == 'Neustart':
+        miner.elapsed = 10
+        r.go(5, temp=79)
+    elif reason == 'nach Wartung':
+        ip = '10.0.0.15'
+        miner_cache.put(ip, 'estats', 'x')                        # A15 antwortet noch
+        r.go(5, temp=79, maintenance_at=r.now.isoformat())
+        miner_cache.clear(ip)                                     # A15 aus
+        r.go(5, temp=79)
+        miner_cache.put(ip, 'estats', 'x')                        # A15 wieder an: Wartung beendet
+        r.go(5, temp=79)
+        miner_cache.clear(ip)
+        r.st.pop('maint_end')                                     # wie die Datenbank-Schleife
+        r.kw['maintenance_at'] = None
+    else:
+        miner.status = 'Over Hot'
+        r.go(5, temp=79)
+        miner.status = 'Work: In Work'
+        r.go(5, temp=79)
+    assert r.events('start')[-1]['trigger'].startswith(reason) and r.st['cut5_at'] is None
+    assert r.st['clock_set'] == 200                               # Starttakt (Lernwert Stufe 1)
+    r.go(10, temp=79)
+    assert r.st['clock_set'] == 205
+
+
 # ---------------------------------------------------------------- Kühlmodus (Nutzer 06.11.)
 
 def test_kuehlmodus_plus_1_then_plus_2_never_back_ends_below_zto_minus_3(miner):
@@ -962,6 +1059,75 @@ def test_learned_value_only_at_a_mean_error_rate_below_5_percent(miner):
     miner.dh = 4.9                                                # unter 5 % (vorher galt 4 %)
     r.go(15 * 60, temp=82)
     assert r.st['learned']['4']['count'] == 2 and r.events('lernwert')
+
+
+def test_learned_value_at_fan_level_1_below_7_percent(miner):
+    """Nutzer 09.11. (aq): nur bei Lüfterstufe 1 gilt die Grenze 7 %, sonst weiter 5 %."""
+    ac = FakeAC(level=1)
+    old = {'mhz': 200, 'temp_avg': 82, 'at': 'x', 'count': 1}
+    miner.dh = 7.0
+    r = started(miner, ac, level=1, learned={'1': dict(old)})
+    r.go(15 * 60 + 30, temp=82)
+    assert r.st['learned']['1'] == old and not r.events('lernwert')
+    end = r.events('lernen_ende')[-1]
+    assert end['details']['ergebnis'] == 'verworfen' and end['details']['grund'] == 'Fehlerrate 7.0 % (Grenze 7 %)'
+    assert any(n[1] == 'Lernwert Stufe 1 verworfen: Fehlerrate 7.0 % (Grenze 7 %).' for n in r.st['log'])
+    miner.dh = 6.9                                                # Stufe 1: unter 7 %
+    r.go(15 * 60, temp=82)
+    assert r.st['learned']['1']['count'] == 2 and r.events('lernwert')
+
+
+def test_learned_value_at_fan_level_2_still_below_5_percent(miner):
+    ac = FakeAC(level=2)
+    old = {'mhz': 250, 'temp_avg': 82, 'at': 'x', 'count': 1}
+    miner.dh = 6.0
+    r = started(miner, ac, level=2, learned={'2': dict(old)})
+    r.go(15 * 60 + 30, temp=82)
+    assert r.st['learned']['2'] == old and not r.events('lernwert')
+    assert r.events('lernen_ende')[-1]['details']['grund'] == 'Fehlerrate 6.0 % (Grenze 5 %)'
+
+
+def test_learned_value_at_fan_level_2_with_base_level_1_still_below_5_percent(miner):
+    """Die 7 % gelten für die Lüfterstufe 1, nicht für die Basisstufe 1: Kühlmodus +1 (Stufe 2) bei Basisstufe 1."""
+    ac = FakeAC(level=1)
+    miner.dh = 6.0
+    r = warm(miner, ac, level=1, mhz=200)
+    r.go(5, temp=88)                                              # Kühlmodus: Basisstufe 1 +1
+    r.go(15 * 60 + 30, temp=84)                                   # bleibt (ZTO−3 nicht unterschritten)
+    assert r.st['cool'] and r.st['fan_target'] == 2 and '2' not in r.st['learned'] and not r.events('lernwert')
+    assert r.events('lernen_ende')[-1]['details']['grund'] == 'Fehlerrate 6.0 % (Grenze 5 %)'
+    assert any(n[1] == 'Lernwert Stufe 2 verworfen: Fehlerrate 6.0 % (Grenze 5 %).' for n in r.st['log'])
+
+
+def test_learned_value_stores_the_mode_of_the_learning_period(miner):
+    """Nutzer 09.11. (ap): ein neuer Lernwert speichert den Modus (hier mode 03 für 370 MHz), auch im Protokoll;
+    alte Lernwerte bleiben ohne."""
+    ac = FakeAC(level=4)
+    r = started(miner, ac, level=4, learned={'4': {'mhz': 370, 'temp_avg': 82, 'at': 'x', 'count': 1}, '3': dict(LW)})
+    r.go(20 * 60, temp=82)
+    assert miner.level == 3
+    lw = r.st['learned']['4']
+    assert lw['count'] == 2 and lw['mode'] == '2/L3'
+    assert r.events('lernwert')[-1]['details']['modus'] == '2/L3'
+    assert 'mode' not in r.st['learned']['3']
+
+
+def test_learned_value_without_a_known_mode_has_no_mode(miner):
+    """Einstellungsseite seit dem Start nie gelesen und kein gemerkter Modus: das Feld fehlt."""
+    ac = FakeAC(level=4)
+    miner.points = fa.points_for(STOCK['2/L4'], 280)
+    miner.web_down = miner.never_read = True
+    n = 179
+    state = {'v': fa.STATE_VERSION, 'seen_at': T0.isoformat(), 'level_seen': 'x', 'zb': list(ZT), 'elapsed': 900,
+             'learned': {'4': dict(LW, mhz=280)}, 'clock_set': 280, 'stock': {},
+             'fan_target': 4, 'fan_set': 4, 'fan_read': 4, 'fan_read_at': T0.isoformat(),
+             'learn_since': (T0 - timedelta(seconds=15 * 60)).isoformat(), 'learn_level': 4,
+             'learn_sum': 82 * n, 'learn_n': n, 'learn_mclk_sum': 280.0 * n, 'learn_mclk_n': n, 'learn_dh_sum': 1.2 * n,
+             'learn_dh_n': n, 'learn_ths_sum': 150.0 * n, 'learn_ths_n': n, 'learn_w_sum': 2000.0 * n, 'learn_w_n': n}
+    r = Run(miner, ac, 4, state=state).go(5, temp=82)
+    lw = r.st['learned']['4']
+    assert r.st['mode_key'] is None and lw['count'] == 2 and 'mode' not in lw
+    assert r.events('lernwert')[-1]['details']['modus'] is None
 
 
 # ---------------------------------------------------------------- Situationen

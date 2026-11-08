@@ -98,6 +98,8 @@ function logicText(lo, hi) {
     'selben Bereich alle 2 min, beim Anstieg in einen ' +
     'höheren Bereich sofort, beim Rückgang in einen niedrigeren 2 min nach der Ankunft dort. Nach jeder Senkung ' +
     '5 min keine Takterhöhung. ' +
+    'Bei Basisstufe 1: nach einer Senkung um −5 MHz 30 min keine Takterhöhung bei ' + (lo - 2) + '–' + (lo - 1) +
+    ' °C (ein Start hebt das auf). ' +
     'Nach Neustart, Wartung oder Over Hot keine Takterhöhung bis ' + (lo - 5) + ' °C, höchstens 10 min ' +
     '(Startpause). Weicht der Takt laut Miner 15 min ununterbrochen um mehr als 15 MHz vom gesetzten ab, wird der ' +
     'gesetzte Takt erneut gesendet. Fehlerrate 30 min ununterbrochen über 10 %: automatischer Neustart der A15 ' +
@@ -108,7 +110,7 @@ function startText(lo, hi) {
     'Sperre, Lüfter auf die Basisstufe; Starttakt = Lernwert der Basisstufe, sonst der der nächstgelegenen ' +
     'Zieltemperatur, sonst Stufe 1 = 170, 2 = 250, 3 = 330, 4 = 380, 5 = 400, 6 = 420, ab 7 = 440 MHz. ' +
     'Lernwert: 15 min stabil in ' + lo + '–' + hi + ' °C bei unveränderter Lüfterstufe, nur bei einer Fehlerrate ' +
-    'unter 5 % (Mittel der 15 min).'
+    'unter 5 %, bei Lüfterstufe 1 unter 7 % (Mittel der 15 min).'
 }
 
 function clockTime(iso) {
@@ -146,11 +148,25 @@ function otherEntries(others) {
       perLevel(values).map(([lv, v]) => ({ lv, v, range: zb[0] + '–' + zb[1] + ' °C', zbKey: key })))
 }
 
+/** The learned values grouped by Stufe (Nutzer 09.11.): levels ascending, in each Stufe first the value of the current
+ * Zieltemperatur, then (grey) those of the other Zieltemperaturen in their order by ZTU, then ZTO. */
+function byLevel(current, other) {
+  const levels = [...new Set([...current, ...other].map(({ lv }) => Number(lv)))].sort((a, b) => a - b)
+  return levels.map((lv) => ({
+    lv,
+    rows: [...current.filter((row) => Number(row.lv) === lv).map((row) => ({ ...row, muted: false })),
+      ...other.filter((row) => Number(row.lv) === lv).map((row) => ({ ...row, muted: true }))],
+  }))
+}
+
+// the miner work mode during the learning period (Nutzer 09.11.); old values have none
+const modeOf = (v) => (v.mode ? MODE_LABEL[v.mode] || v.mode : '—')
+
 /** Learned values per fan level after 15 min in the Zieltemperatur: the clock set by the regulation (since v2.2.9 the
- * one at the end, before the mean) and the mean clock reported by the miner (Nutzer 08.11.; no Obergrenzen any more
- * since v2.2.7, Nutzer 06.11.). The values of the current Zieltemperatur on top, below grey those of the other
- * Zieltemperaturen (Nutzer 08.11., Variante B). Each value can be deleted (Nutzer 08.11.); the data-service deletes
- * it, the live poll (every 5 s) then shows it gone. */
+ * one at the end, before the mean), the mean clock reported by the miner (Nutzer 08.11.; no Obergrenzen any more
+ * since v2.2.7, Nutzer 06.11.) and the work mode (Nutzer 09.11.). Grouped by Stufe, in each the value of the current
+ * Zieltemperatur first, then grey those of the other Zieltemperaturen (Nutzer 09.11.). Each value can be deleted
+ * (Nutzer 08.11.); the data-service deletes it, the live poll (every 5 s) then shows it gone. */
 function LearnedTable({ learned, others, zb, level, lo, hi, onCommand, busy, requested, setRequested }) {
   const [confirm, setConfirm] = useState(null)
   // Zieltemperatur (Nutzer 28.10.): the learned values belong to the one the data-service has taken over (state.zb)
@@ -161,11 +177,14 @@ function LearnedTable({ learned, others, zb, level, lo, hi, onCommand, busy, req
   const other = otherEntries(others)
   const none = (
     <p className="text-muted-foreground">
-      Lernwerte: noch keine (nach 15 min stabil bei {lo}–{hi} °C und einer Fehlerrate unter 5 %).
+      Lernwerte: noch keine (nach 15 min stabil bei {lo}–{hi} °C und einer Fehlerrate unter 5 %, bei Lüfterstufe 1
+      unter 7 %).
     </p>
   )
   if (!current.length && !other.length) return none
-  const OTHER = 'Andere Zieltemperaturen'
+  const groups = byLevel(current, other)
+  // bold: the value of the current Zieltemperatur at the Basisstufe; grey: those of the other Zieltemperaturen
+  const tone = ({ lv, muted }) => (muted ? 'text-muted-foreground' : Number(lv) === level ? 'font-semibold' : '')
   const item = (label, value) => (
     <div>
       <div className="text-xs font-normal text-muted-foreground">{label}</div>
@@ -204,41 +223,52 @@ function LearnedTable({ learned, others, zb, level, lo, hi, onCommand, busy, req
       </Button>
     )
   }
-  // mobile: one entry per level like the Letzte Einträge (Nutzer 28.10.: Tabelle nicht mobil freundlich)
-  const entries = (list, muted) => (
-    <ul className={'divide-y divide-border/40 sm:hidden' + (muted ? ' text-muted-foreground' : '')}>
-      {list.map((row) => {
-        const { lv, v, range: r } = row
-        const action = remove(row, 'h-8 px-3 text-xs')
-        return (
-          <li key={r + lv} className={'py-1.5' + (!muted && Number(lv) === level ? ' font-semibold' : '')}>
-            <div className="flex items-baseline justify-between gap-2">
-              <span>Stufe {lv} · {r}</span>
-              <span className="tabular-nums text-muted-foreground">{when(v.at)}</span>
-            </div>
-            <div className="mt-0.5 grid grid-cols-2 gap-x-3 gap-y-1 tabular-nums">
-              {item('Gesetzter Takt', fmt(v.mhz, 0, ' MHz'))}
-              {item('Takt laut Miner (Ø)', fmt(v.mhz_miner, 0, ' MHz'))}
-              {item('Ø Temperatur', fmt(v.temp_avg, 1, ' °C'))}
-              {item('Ø Hashrate', fmt(v.ths_avg, 1, ' TH/s'))}
-              {item('Effizienz', fmt(v.j_th, 1, ' J/TH'))}
-              {item('Anzahl', v.count ?? '—')}
-            </div>
-            {action && <div className="mt-1">{action}</div>}
-          </li>
-        )
-      })}
-    </ul>
+  // mobile: per Stufe a small heading, then one entry per Zieltemperatur like the Letzte Einträge (Nutzer 28.10.:
+  // Tabelle nicht mobil freundlich; grouped since Nutzer 09.11.)
+  const entries = (
+    <div className="sm:hidden">
+      {groups.map(({ lv, rows: list }) => (
+        <div key={lv} className="pt-1.5">
+          <p className="font-medium">Stufe {lv}</p>
+          <ul className="divide-y divide-border/40">
+            {list.map((row) => {
+              const { v, range: r } = row
+              const action = remove(row, 'h-8 px-3 text-xs')
+              return (
+                <li key={r} className={['py-1.5', tone(row)].filter(Boolean).join(' ')}>
+                  <div className="flex items-baseline justify-between gap-2">
+                    <span>{r}</span>
+                    <span className="tabular-nums text-muted-foreground">{when(v.at)}</span>
+                  </div>
+                  <div className="mt-0.5 grid grid-cols-2 gap-x-3 gap-y-1 tabular-nums">
+                    {item('Gesetzter Takt', fmt(v.mhz, 0, ' MHz'))}
+                    {item('Takt laut Miner (Ø)', fmt(v.mhz_miner, 0, ' MHz'))}
+                    {item('Modus', modeOf(v))}
+                    {item('Ø Temperatur', fmt(v.temp_avg, 1, ' °C'))}
+                    {item('Ø Hashrate', fmt(v.ths_avg, 1, ' TH/s'))}
+                    {item('Effizienz', fmt(v.j_th, 1, ' J/TH'))}
+                    {item('Anzahl', v.count ?? '—')}
+                  </div>
+                  {action && <div className="mt-1">{action}</div>}
+                </li>
+              )
+            })}
+          </ul>
+        </div>
+      ))}
+    </div>
   )
-  const rows = (list, muted) => list.map((row) => {
-    const { lv, v, range: r } = row
+  // desktop: a line between the Stufe groups (top border on the first row of each further group)
+  const rows = groups.flatMap(({ lv, rows: list }, g) => list.map((row, i) => {
+    const { v, range: r } = row
+    const line = g > 0 && i === 0 ? 'border-t border-border/60' : ''
     return (
-      <tr key={r + lv}
-        className={muted ? 'text-muted-foreground' : Number(lv) === level ? 'font-semibold' : ''}>
+      <tr key={r + lv} className={[tone(row), line].filter(Boolean).join(' ')}>
         <td className="pr-3">{lv}</td>
         <td className="whitespace-nowrap pr-3 tabular-nums">{r}</td>
         <td className="pr-3 tabular-nums">{fmt(v.mhz, 0, ' MHz')}</td>
         <td className="pr-3 tabular-nums">{fmt(v.mhz_miner, 0, ' MHz')}</td>
+        <td className="whitespace-nowrap pr-3">{modeOf(v)}</td>
         <td className="pr-3 tabular-nums">{fmt(v.temp_avg, 1, ' °C')}</td>
         <td className="whitespace-nowrap pr-3 tabular-nums">{fmt(v.ths_avg, 1, ' TH/s')}</td>
         <td className="whitespace-nowrap pr-3 tabular-nums">{fmt(v.j_th, 1, ' J/TH')}</td>
@@ -247,15 +277,11 @@ function LearnedTable({ learned, others, zb, level, lo, hi, onCommand, busy, req
         <td className="py-0.5">{remove(row, 'h-6 px-2 text-xs')}</td>
       </tr>
     )
-  })
+  }))
   return (
     <div className="pt-1">
       {current.length ? <p className="font-medium">Lernwerte</p> : none}
-      {current.length > 0 && entries(current, false)}
-      {other.length > 0 && (
-        <p className="pt-1.5 text-muted-foreground sm:hidden">{OTHER}</p>
-      )}
-      {other.length > 0 && entries(other, true)}
+      {entries}
       <div className="hidden overflow-x-auto sm:block">
         <table className="text-xs">
           <thead className="text-muted-foreground">
@@ -264,6 +290,7 @@ function LearnedTable({ learned, others, zb, level, lo, hi, onCommand, busy, req
               <th className="pr-3 font-medium">Zieltemperatur</th>
               <th className="pr-3 font-medium">Gesetzter Takt</th>
               <th className="pr-3 font-medium">Takt laut Miner (Ø)</th>
+              <th className="pr-3 font-medium">Modus</th>
               <th className="pr-3 font-medium">Ø Temperatur</th>
               <th className="pr-3 font-medium">Ø Hashrate</th>
               <th className="pr-3 font-medium">Effizienz</th>
@@ -272,15 +299,7 @@ function LearnedTable({ learned, others, zb, level, lo, hi, onCommand, busy, req
               <th />
             </tr>
           </thead>
-          <tbody>
-            {rows(current, false)}
-            {other.length > 0 && (
-              <tr className="text-muted-foreground">
-                <td colSpan={10} className="pt-1.5">{OTHER}</td>
-              </tr>
-            )}
-            {rows(other, true)}
-          </tbody>
+          <tbody>{rows}</tbody>
         </table>
       </div>
     </div>
@@ -290,9 +309,13 @@ function LearnedTable({ learned, others, zb, level, lo, hi, onCommand, busy, req
 // a lock or pause of the data-service that still runs (ISO "until" in the future)
 const runs = (until) => Boolean(until) && Date.parse(until) > Date.now()
 
+// Basisstufe 1 (Nutzer 09.11.): after a −5 MHz reduction (state.cut5_at) no clock increase at ZTU−2–ZTU−1 for 30 min
+const CUT5_BLOCK_MS = 30 * 60000
+
 /** What runs right now in the regulation (Nutzer 06.11.): command being taken over, Startpause, the clock-increase
- * locks (latest end with the reasons), the excursion over ZTO and the learning period. */
-function runningItems(st, lo) {
+ * locks (latest end with the reasons), the block after −5 at Basisstufe 1 (Nutzer 09.11.), the excursion over ZTO
+ * and the learning period. */
+function runningItems(st, lo, base) {
   const pending = st.pending
     ? (st.pending.kind === 'modus' ? 'Modus ' + String(st.pending.value).padStart(2, '0') : 'Takt ' + st.pending.value + ' MHz') +
       ' wird übernommen' + (st.pending.attempt > 1 ? ' (Versuch ' + st.pending.attempt + ')' : '')
@@ -301,11 +324,14 @@ function runningItems(st, lo) {
     ? 'keine Takterhöhung bis ' + (lo - 5) + ' °C, spätestens ' + clockTime(st.start_hold.until) : null
   const locks = Object.keys(LOCK_REASON).filter((key) => runs(st.locks?.[key]))
   const lockEnd = locks.length ? locks.map((key) => st.locks[key]).reduce((a, b) => (Date.parse(b) > Date.parse(a) ? b : a)) : null
+  const cut5End = st.cut5_at && base === 1 ? Date.parse(st.cut5_at) + CUT5_BLOCK_MS : NaN
   return [
     pending,
     startHold,
     lockEnd ? 'keine Takterhöhung bis ' + clockTime(lockEnd) + ' (' + locks.map((key) => LOCK_REASON[key]).join(', ') + ')'
       : null,
+    cut5End > Date.now() ? 'keine Takterhöhung bei ' + (lo - 2) + '–' + (lo - 1) + ' °C bis ' + clockTime(cut5End) +
+      ' (−5 um ' + clockTime(st.cut5_at) + ')' : null,
     st.hot?.band ? 'über ZTO: Bereich ' + st.hot.band : null,
     st.learn_since ? 'lernt seit ' + clockTime(st.learn_since) : null,
   ].filter(Boolean)
@@ -347,7 +373,7 @@ function AutomationCards({ auto, st, roomTemp, lo, hi }) {
   ].filter(Boolean).join(' · ')
   const phase = phases(lo, hi)[st.phase] || { value: '—', sub: '' }
   const restarting = Boolean(st.restart_req) || st.offline === 'neustart'
-  const statusSub = !regulating ? phase.sub : runningItems(st, lo).join(' · ') || phase.sub
+  const statusSub = !regulating ? phase.sub : runningItems(st, lo, base).join(' · ') || phase.sub
   return (
     <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-5">
       <MetricCard variant="hero" layout="icon-left" icon={Hash} label="Hashrate"

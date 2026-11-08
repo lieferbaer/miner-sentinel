@@ -15,7 +15,8 @@ Taktsperre, Obergrenzen, Ertrags-Prüfung, Temperatur-Test and Takt-Messung are 
     (3 min), 6–10 +15 (2 min), 11–20 +20 (2 min), from 21 +40 (2 min). Not while a lock runs, during the Startpause,
     while a command is pending or queued, at 440 MHz or when more needs the waiting mode switch. The locks after an
     increase, after the Heizmodus and after the Kühlmodus end early at t > ZTU+3; the lock after a reduction (5 min)
-    never does.
+    never does. At Basisstufe 1, for 30 min after a reduction by −5 MHz no increase at ZTU−2..ZTU−1 (a start ends
+    this; Nutzer 09.11.).
   * Clock reduction above ZTO, Bereich 1 = ZTO+1..+3, 2 = +4..+6, 3 = +7..+9, 4 = from +10: Bereich 1 −15/−10/−5 MHz
     by the ZeitImZieltemperatur (time in ZTU..ZTO before t first exceeded ZTO: < 60 s / 60–300 s / > 300 s), 2 and 3
     −20, 4 −50. At the start of an excursion at once (3 min after the last reduction if that was less than 3 min ago),
@@ -31,9 +32,10 @@ Taktsperre, Obergrenzen, Ertrags-Prüfung, Temperatur-Test and Takt-Messung are 
   * Takt laut Miner weicht ab: more than 15 MHz off the set clock for 15 min without a break → set clock sent again.
   * Fehlerrate (DH): over 10 % for 30 min without a break → automatic restart, at most one per 6 h.
   * Learning: 15 min in ZTU..ZTO at an unchanged fan level → learned value of the active level, only at a mean error
-    rate below 5 %; learned values are remembered per Zieltemperatur. Its clock is the set clock at the end of the
-    15 min (Nutzer 08.11.; was the mean), beside it the mean clock reported by the miner. The user can delete a single
-    learned value (Nutzer 08.11.), also with the Automatik off.
+    rate below 5 % (level 1: below 7 %, Nutzer 09.11.); learned values are remembered per Zieltemperatur. Its clock is
+    the set clock at the end of the 15 min (Nutzer 08.11.; was the mean), beside it the mean clock reported by the
+    miner and the work mode (Nutzer 09.11.). The user can delete a single learned value (Nutzer 08.11.), also with
+    the Automatik off.
   * New Zieltemperatur: new limits at once, no start.
   * Every round and every decision goes into the protocol (automation_journal.py).
 Live only (MINERSENTINEL_ENV != Test). The AC Infinity client is the backend's (backend/api/acinfinity.py,
@@ -78,6 +80,10 @@ ZT_LONG_S = 300               # Bereich 1 by the ZeitImZieltemperatur: 0–300 s
 CUT_EVERY_S = 120             # same Bereich: every 2 min; lower Bereich: 2 min after arriving there
 CUT_GAP_S = 180               # excursion start less than 3 min after the last reduction: 3 min after that one
 CUT_LOCK_S = 5 * 60           # after every reduction 5 min no clock increase (never ends early)
+CUT5_MHZ = 5                  # Basisstufe 1: after a reduction by exactly −5 MHz (Bereich 1, over 5 min in ZT)
+CUT5_BLOCK_S = 30 * 60        # ... 30 min no clock increase ...
+CUT5_BLOCK_D = 2              # ... at ZTU−2 and ZTU−1 (from ZTU−3 as before); a start ends it (Nutzer 09.11.)
+CUT5_BLOCK_BASE = 1
 START_CLOCK = {1: 170, 2: 250, 3: 330, 4: 380, 5: 400, 6: 420, 7: 440, 8: 440, 9: 440, 10: 440}   # Nutzer 28.10.
 CLOCK_MIN, CLOCK_MAX = 100, 440
 MODE_TOP = {4: 360, 3: 380, 2: 400, 1: 420, 0: 440}   # oberer Takt je Modus (mode 04 ... mode 00)
@@ -95,6 +101,7 @@ DH_RESTART_S = 30 * 60        # ... for 30 min without a break → automatic res
 AUTO_RESTART_GAP_S = 6 * 3600     # ... at most one per 6 h (only the restarts of this rule count),
 AUTO_RESTART_RETRY_S = 5 * 60     # ... after a failed send the next try after 5 min
 DH_LEARN_PCT = 5              # learned value only at a mean error rate of the 15 min below 5 % (Nutzer 06.11.; was 4 %)
+DH_LEARN_PCT_STUFE1 = 7       # ... at Lüfterstufe 1 below 7 % (Nutzer 09.11.)
 LEARN_S = 15 * 60             # Lernperiode
 LEARN_OUT_S = 60              # Ausflug aus ZTU..ZTO bis 60 s bricht die Lernperiode nicht ab (Nutzer 25.10.)
 FAN_MIN, FAN_MAX = 1, 10
@@ -300,7 +307,8 @@ class Round:
     State of the rules (Nutzer 06.11.): heat (Heizmodus, {'since'}), cool (Kühlmodus, {'since', 'plus'}),
     fan_changed_at (last change of the fan target), locks (until times of the clock-increase locks erhoehung,
     heizmodus, kuehlmodus, senkung), hot (excursion above ZTO: Bereich, next reduction, ZeitImZieltemperatur),
-    cut_at/cut_band (last reduction and its Bereich), zt_since (entry into ZTU..ZTO), start_hold (Startpause),
+    cut_at/cut_band (last reduction and its Bereich), cut5_at (last reduction by −5 MHz, cleared by every start;
+    Nutzer 09.11.), zt_since (entry into ZTU..ZTO), start_hold (Startpause),
     start_reason (a start is due), fw_dev (Takt laut Miner weicht ab seit), dh_since (Fehlerrate über 10 % seit). The shown phase is derived from
     heat/cool at the end of the round."""
 
@@ -446,7 +454,8 @@ class Round:
 
     def start(self, reason):
         """Start: start clock (mode first if needed), Heiz- and Kühlmodus end without a lock, fan = Basisstufe; the
-        excursion above ZTO starts anew. Locks, cut_at and the ZeitImZieltemperatur stay (Nutzer 06.11.)."""
+        excursion above ZTO starts anew. Locks, cut_at and the ZeitImZieltemperatur stay (Nutzer 06.11.); the block
+        after a reduction by −5 MHz (cut5_at) ends (Nutzer 09.11.)."""
         st = self.st
         target, source = self.start_clock()
         target = min(max(target, CLOCK_MIN), CLOCK_MAX)
@@ -455,7 +464,7 @@ class Round:
         self.end_heat('Start (%s)' % reason, lock=False)
         self.end_cool('Start (%s)' % reason, lock=False)
         st.update({'clock_set': target, 'queue': [], 'clock_changed_at': _iso(self.now), 'clock_changed_t': self.t,
-                   'start_reason': None, 'hot': None})
+                   'start_reason': None, 'hot': None, 'cut5_at': None})
         self.set_fan_target(self.base, 'Start: Basisstufe %d' % self.base, start=True)
         self.end_learning(None)
         level = table_level(target)
@@ -800,8 +809,9 @@ class Round:
         Gespeichert (Lernwert der aktiven Stufe): der gesetzte Takt am Ende der 15 min (Nutzer 08.11.; vorher sein
         Mittelwert), Mittelwert der Chiptemperatur und der Hashrate der 15 min, dazu die Effizienz (Ø Leistung /
         Ø Hashrate, J/TH) und der mittlere Takt laut Miner (mhz_miner, nur Runden ohne offenen Takt-/Modusbefehl;
-        Nutzer 08.11.) – nur bei mittlerer Fehlerrate unter 5 % (Nutzer 06.11.; vorher 4 %), sonst verworfen und neu
-        begonnen. No cap limits it any more."""
+        Nutzer 08.11.) und der Modus (mode, Nutzer 09.11.) – nur bei mittlerer Fehlerrate unter 5 % (Nutzer 06.11.;
+        vorher 4 %), bei Lüfterstufe 1 unter 7 % (Nutzer 09.11.), sonst verworfen und neu begonnen. No cap limits it
+        any more."""
         st, t, now = self.st, self.t, self.now
         lo, hi = self.lo, self.hi
         level = st.get('fan_target')
@@ -857,10 +867,11 @@ class Round:
             key = str(level)
             dh_n = st.get('learn_dh_n') or 0
             dh = st['learn_dh_sum'] / dh_n if dh_n else None
-            if dh is None or dh >= DH_LEARN_PCT:
+            limit = DH_LEARN_PCT_STUFE1 if level == 1 else DH_LEARN_PCT   # Lüfterstufe 1: 7 % (Nutzer 09.11.)
+            if dh is None or dh >= limit:
                 # Fehlerrate zu hoch (oder ohne Wert): kein Lernwert, die Periode beginnt neu
-                why = ('Fehlerrate %.1f %% (Grenze %d %%)' % (dh, DH_LEARN_PCT) if dh is not None
-                       else 'Fehlerrate unbekannt (Grenze %d %%)' % DH_LEARN_PCT)
+                why = ('Fehlerrate %.1f %% (Grenze %d %%)' % (dh, limit) if dh is not None
+                       else 'Fehlerrate unbekannt (Grenze %d %%)' % limit)
                 log_id = self.base_event(kind='lernen_ende', trigger='15 min erreicht, Lernwert verworfen: ' + why,
                                          details={'ergebnis': 'verworfen', 'grund': why, 'seit': st['learn_since']})
                 self.note('Lernwert Stufe %s verworfen: %s.' % (key, why))
@@ -868,6 +879,9 @@ class Round:
             else:
                 prev = (st.get('learned') or {}).get(key)
                 entry = {'mhz': mhz, 'temp_avg': avg_t, 'at': _iso(now), 'count': (prev or {}).get('count', 0) + 1}
+                mode = st.get('mode_key')
+                if mode:                                      # Modus der Lernperiode, z. B. '2/L4' (Nutzer 09.11.)
+                    entry['mode'] = mode
                 if st.get('learn_mclk_n'):                    # Ø Takt laut Miner (Nutzer 08.11.)
                     entry['mhz_miner'] = round(st['learn_mclk_sum'] / st['learn_mclk_n'], 1)
                 if st.get('learn_ths_n'):
@@ -878,7 +892,8 @@ class Round:
                 st.setdefault('learned', {})[key] = entry
                 log_id = self.base_event(kind='lernwert', trigger='15 min auf Stufe %s, Ø %.1f °C' % (key, avg_t),
                                          details={'luefterstufe': level, 'takt': mhz,
-                                                  'takt_miner': entry.get('mhz_miner'), 'temp_mittel': avg_t,
+                                                  'takt_miner': entry.get('mhz_miner'), 'modus': entry.get('mode'),
+                                                  'temp_mittel': avg_t,
                                                   'anzahl': entry['count'], 'vorher': prev})
                 self.base_event(kind='lernen_ende', trigger='15 min erreicht', details={'ergebnis': 'gespeichert'})
                 self.note('Lernwert Stufe %s: %d MHz (gesetzter Takt), Ø %.1f °C (%d. Mal).' % (key, mhz, avg_t,
@@ -1210,6 +1225,8 @@ class Round:
         details = {'bereich': band, 'zeit_im_ziel_s': hot['dwell_s']} if band == 1 else {'bereich': band}
         if self.queue_clock(old - minus, why, hot=True, step=-minus, details=details):
             st['cut_at'], st['cut_band'] = _iso(now), band
+            if minus == CUT5_MHZ:
+                st['cut5_at'] = _iso(now)                # Basisstufe 1: block of raise_clock (Nutzer 09.11.)
             until = self.lock('senkung', CUT_LOCK_S)
             self.note('Chiptemperatur %d °C (Bereich %d): Takt %d → %d MHz, keine Takterhöhung bis %s.' % (
                 t, band, old, old - minus, _hm(until)))
@@ -1217,7 +1234,8 @@ class Round:
     def raise_clock(self):
         """Clock increase below ZTU at the first such value, by the distance d = ZTU − t; then 2 or 3 min no increase.
         Not while a lock runs, during the Startpause, while a command is pending or queued, at 440 MHz or when more
-        needs the waiting mode switch."""
+        needs the waiting mode switch. At Basisstufe 1 not at ZTU−2..ZTU−1 for 30 min after a reduction by −5 MHz
+        (cut5_at; silent like the locks, Nutzer 09.11.)."""
         st, t = self.st, self.t
         old = st.get('clock_set')
         if old is None or t >= self.lo or st.get('start_hold') or self.locked() or self.busy():
@@ -1229,6 +1247,9 @@ class Round:
         if st.get('mode_wait') is not None and current is not None and old >= MODE_TOP[current]:
             return                                       # mehr geht erst mit dem wartenden Moduswechsel
         d = self.lo - t
+        if (self.base == CUT5_BLOCK_BASE and d <= CUT5_BLOCK_D and st.get('cut5_at')
+                and _age(st['cut5_at'], self.now) < CUT5_BLOCK_S):
+            return                                       # Basisstufe 1: 30 min after −5 MHz not at ZTU−2..ZTU−1
         plus, lock_s = plus_rule(d)
         new = min(old + plus, CLOCK_MAX)
         until = self.now + timedelta(seconds=lock_s)

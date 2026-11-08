@@ -52,6 +52,13 @@ const toneOf = (label) => {
 const inMin = (min) => new Date(Date.now() + min * 60000).toISOString()
 const hhmm = (iso) => new Date(iso).toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' })
 
+// Lernwerte on the phone (Nutzer 09.11.): per Stufe a heading "Stufe N", then its entries titled by the Zieltemperatur
+const mobileGroups = () => screen.getAllByText(/^Stufe \d+$/)
+  .filter((p) => p.nextElementSibling?.tagName === 'UL')
+  .map((p) => ({ title: p.textContent, list: p.nextElementSibling, entries: [...p.nextElementSibling.children] }))
+const mobileEntry = (level, range) => mobileGroups().find((g) => g.title === 'Stufe ' + level)
+  ?.entries.find((li) => li.querySelector('span').textContent === range)
+
 describe('FansPage fan modes (v2.2.7, Nutzer 06.11.)', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -173,6 +180,39 @@ describe('FansPage status: what runs (Nutzer 06.11.)', () => {
     expect(screen.queryByText(/über ZTO/)).not.toBeInTheDocument()
   })
 
+  // ZTU 80 (Nutzer 09.11.): after −5 at Basisstufe 1 no increase at 78–79 °C for 30 min
+  const cut5 = (cutAt, level) => ({ ...automation({ cut5_at: cutAt, zb: [80, 85] }), target_low: 80, target_high: 85,
+    level })
+  const plus30 = (iso) => new Date(Date.parse(iso) + 30 * 60000).toISOString()
+
+  it('Basisstufe 1: no increase at ZTU−2–ZTU−1 until 30 min after the −5, with its time (Nutzer 09.11.)', async () => {
+    const cutAt = inMin(-10)
+    mockApi(cut5(cutAt, 1))
+    renderPage()
+    expect(await screen.findByText('keine Takterhöhung bei 78–79 °C bis ' + hhmm(plus30(cutAt)) + ' (−5 um ' +
+      hhmm(cutAt) + ')')).toBeInTheDocument()
+  })
+
+  it('the block after −5 after the other locks, before the excursion over ZTO', async () => {
+    const cutAt = inMin(-10)
+    const senkung = inMin(4)
+    mockApi({ ...cut5(cutAt, 1), state: { ...cut5(cutAt, 1).state, locks: { senkung }, hot: { band: 1 } } })
+    renderPage()
+    expect(await screen.findByText('keine Takterhöhung bis ' + hhmm(senkung) + ' (nach Senkung) · keine ' +
+      'Takterhöhung bei 78–79 °C bis ' + hhmm(plus30(cutAt)) + ' (−5 um ' + hhmm(cutAt) + ') · über ZTO: Bereich 1'))
+      .toBeInTheDocument()
+  })
+
+  it('no block after −5 at another Basisstufe, after 30 min or without cut5_at', async () => {
+    for (const [cutAt, level] of [[inMin(-10), 3], [inMin(-10), 2], [inMin(-30.1), 1], [null, 1]]) {
+      mockApi(cut5(cutAt, level))
+      const view = renderPage()
+      expect(await screen.findByText('Takt regelt 80–85 °C')).toBeInTheDocument()
+      expect(screen.queryByText(/keine Takterhöhung bei/)).not.toBeInTheDocument()
+      view.unmount()
+    }
+  })
+
   it('miner silent or Over Hot: nothing of the regulation, only the state', async () => {
     for (const extra of [{ offline: true }, { over_hot: true }]) {
       mockApi(automation({ ...extra, locks: { senkung: inMin(4) }, hot: { band: 1 }, learn_since: inMin(-1) }))
@@ -244,7 +284,8 @@ describe('FansPage rule texts', () => {
     expect(text).toContain('Über 85 °C Takt runter: Bereich 1 (86–88 °C) −10 / −5 MHz bei einer ' +
       'ZeitImZieltemperatur davor (ununterbrochen in 80–85 °C) bis 5 min / über 5 min, Bereich 2 ' +
       '(89–91 °C) −20 MHz, Bereich 3 (92–94 °C) −20 MHz, Bereich 4 (ab 95 °C) −50 MHz; mindestens 100 MHz.')
-    expect(text).toContain('Nach jeder Senkung 5 min keine Takterhöhung.')
+    expect(text).toContain('Nach jeder Senkung 5 min keine Takterhöhung. Bei Basisstufe 1: nach einer Senkung um ' +
+      '−5 MHz 30 min keine Takterhöhung bei 78–79 °C (ein Start hebt das auf). Nach Neustart')
     expect(text).toContain('Nach Neustart, Wartung oder Over Hot keine Takterhöhung bis 75 °C, höchstens 10 min ' +
       '(Startpause).')
     expect(text).toContain('15 min ununterbrochen um mehr als 15 MHz')
@@ -252,13 +293,20 @@ describe('FansPage rule texts', () => {
       'einer je 6 h).')
   })
 
-  it('start and learning: no cap, Fehlerrate unter 5 %', async () => {
+  it('start and learning: no cap, Fehlerrate unter 5 %, bei Lüfterstufe 1 unter 7 % (Nutzer 09.11.)', async () => {
     mockApi(off())
     renderPage()
     const start = (await screen.findByText(/^Start \(Stufenwahl/)).textContent
     expect(start).toContain('Heiz- und Kühlmodus enden ohne Sperre, Lüfter auf die Basisstufe')
     expect(start).toContain('Lernwert: 15 min stabil in 80–85 °C bei unveränderter Lüfterstufe, nur bei einer ' +
-      'Fehlerrate unter 5 % (Mittel der 15 min).')
+      'Fehlerrate unter 5 %, bei Lüfterstufe 1 unter 7 % (Mittel der 15 min).')
+  })
+
+  it('the block after −5 follows the ZTU', async () => {
+    mockApi({ ...off(), target_low: 82, target_high: 86 })
+    renderPage()
+    expect(await ruleText()).toContain('Bei Basisstufe 1: nach einer Senkung um −5 MHz 30 min keine Takterhöhung bei ' +
+      '80–81 °C (ein Start hebt das auf).')
   })
 
   it('none of the removed rules', async () => {
@@ -299,7 +347,8 @@ describe('FansPage removed features', () => {
     const table = (await screen.findByRole('columnheader', { name: 'Zieltemperatur' })).closest('table')
     const rows = within(table).getAllByRole('row').slice(1).map((r) => within(r).getAllByRole('cell').map((c) => c.textContent))
     // a level with only an old Obergrenze gets no row
-    expect(rows).toEqual([['3', '82–85 °C', '320 MHz', '—', '83,2 °C', '—', '—', '2', expect.any(String), 'Löschen']])
+    expect(rows).toEqual([['3', '82–85 °C', '320 MHz', '—', '—', '83,2 °C', '—', '—', '2', expect.any(String),
+      'Löschen']])
     expect(screen.queryByText(/Obergrenze/)).not.toBeInTheDocument()
     expect(screen.queryByText(/325 MHz|395 MHz/)).not.toBeInTheDocument()
   })
@@ -383,21 +432,23 @@ describe('FansPage Lernwerte', () => {
     renderPage()
     const table = (await screen.findByRole('columnheader', { name: 'Zieltemperatur' })).closest('table')
     const heads = within(table).getAllByRole('columnheader').map((c) => c.textContent)
-    expect(heads).toEqual(['Stufe', 'Zieltemperatur', 'Gesetzter Takt', 'Takt laut Miner (Ø)', 'Ø Temperatur',
-      'Ø Hashrate', 'Effizienz', 'Anzahl', 'Zeit', ''])
+    expect(heads).toEqual(['Stufe', 'Zieltemperatur', 'Gesetzter Takt', 'Takt laut Miner (Ø)', 'Modus',
+      'Ø Temperatur', 'Ø Hashrate', 'Effizienz', 'Anzahl', 'Zeit', ''])
     const cells = within(within(table).getAllByRole('row')[1]).getAllByRole('cell').map((c) => c.textContent)
-    expect(cells.slice(0, 8)).toEqual(['2', '82–85 °C', '275 MHz', '—', '82,0 °C', '133,4 TH/s', '16,9 J/TH', '13'])
+    expect(cells.slice(0, 9)).toEqual(['2', '82–85 °C', '275 MHz', '—', '—', '82,0 °C', '133,4 TH/s', '16,9 J/TH',
+      '13'])
   })
 
   it('mobile: one entry per level instead of the wide table', async () => {
     const learned = { 2: { mhz: 260, temp_avg: 81.9, ths_avg: 131.6, j_th: 17.1, at: '2026-10-28T14:37:57Z', count: 21 } }
     mockApi({ ...automation({ zb: [81, 84] }), learned })
     renderPage()
-    const first = (await screen.findByText(/^Stufe 2 · 81–84 °C$/)).closest('li')
-    expect(first.closest('ul')).toHaveClass('sm:hidden')
+    expect(await screen.findByRole('columnheader', { name: 'Zieltemperatur' })).toBeInTheDocument()
+    const first = mobileEntry(2, '81–84 °C')
+    expect(first.closest('ul').parentElement.parentElement).toHaveClass('sm:hidden')
     // label above value, two per line
     const pairs = (li) => [...li.querySelectorAll('.grid > div')].map((d) => [...d.children].map((c) => c.textContent))
-    expect(pairs(first)).toEqual([['Gesetzter Takt', '260 MHz'], ['Takt laut Miner (Ø)', '—'],
+    expect(pairs(first)).toEqual([['Gesetzter Takt', '260 MHz'], ['Takt laut Miner (Ø)', '—'], ['Modus', '—'],
       ['Ø Temperatur', '81,9 °C'], ['Ø Hashrate', '131,6 TH/s'], ['Effizienz', '17,1 J/TH'], ['Anzahl', '21']])
     expect(within(first.closest('ul')).getAllByRole('listitem')).toHaveLength(1)
   })
@@ -422,57 +473,118 @@ describe('FansPage Lernwerte', () => {
     const table = (await screen.findByRole('columnheader', { name: 'Takt laut Miner (Ø)' })).closest('table')
     const rows = within(table).getAllByRole('row').slice(1)
     expect(rows.map((r) => within(r).getAllByRole('cell').slice(2, 4).map((c) => c.textContent))).toEqual([
-      ['275 MHz', '272 MHz'], ['320 MHz', '—'], [], ['400 MHz', '396 MHz']])
-    expect(within(table).getByText('Andere Zieltemperaturen')).toHaveAttribute('colspan', '10')
+      ['275 MHz', '272 MHz'], ['320 MHz', '—'], ['400 MHz', '396 MHz']])
+    expect(screen.queryByText('Andere Zieltemperaturen')).not.toBeInTheDocument()
     // mobile: after Gesetzter Takt in each entry
-    const pairs = (text) => [...screen.getByText(text).closest('li').querySelectorAll('.grid > div')]
+    const pairs = (level, range) => [...mobileEntry(level, range).querySelectorAll('.grid > div')]
       .slice(0, 2).map((d) => [...d.children].map((c) => c.textContent))
-    expect(pairs(/^Stufe 2 · 82–85 °C$/)).toEqual([['Gesetzter Takt', '275 MHz'], ['Takt laut Miner (Ø)', '272 MHz']])
-    expect(pairs(/^Stufe 3 · 82–85 °C$/)).toEqual([['Gesetzter Takt', '320 MHz'], ['Takt laut Miner (Ø)', '—']])
-    expect(pairs(/^Stufe 4 · 81–84 °C$/)).toEqual([['Gesetzter Takt', '400 MHz'], ['Takt laut Miner (Ø)', '396 MHz']])
+    expect(pairs(2, '82–85 °C')).toEqual([['Gesetzter Takt', '275 MHz'], ['Takt laut Miner (Ø)', '272 MHz']])
+    expect(pairs(3, '82–85 °C')).toEqual([['Gesetzter Takt', '320 MHz'], ['Takt laut Miner (Ø)', '—']])
+    expect(pairs(4, '81–84 °C')).toEqual([['Gesetzter Takt', '400 MHz'], ['Takt laut Miner (Ø)', '396 MHz']])
   })
 
-  it('the other Zieltemperaturen grey below the current one, sorted by ZTU then ZTO (Nutzer 08.11., B)', async () => {
-    const learned = { 3: { mhz: 360, temp_avg: 81.6, at: '2026-11-08T18:55:39Z', count: 1 } }
-    const others = {
+  // current Zieltemperatur 81–85 (Basisstufe 3); the other ones in the order of the keys deliberately unsorted
+  const grouped = () => ({
+    learned: { 3: { mhz: 360, temp_avg: 81.6, at: '2026-11-08T18:55:39Z', count: 1 } },
+    learned_zb: {
       '82-86': { 2: { mhz: 275.4, temp_avg: 82.7, at: '2026-11-08T20:49:00Z', count: 5 } },
       '81-84': { 3: { mhz: 360, temp_avg: 82, at: '2026-11-08T16:11:00Z', count: 2 },
         2: { mhz: 260, temp_avg: 81.9, at: '2026-11-08T12:44:00Z', count: 3 } },
       '82-85': { 4: { mhz: 405, temp_avg: 83, at: '2026-10-27T02:08:00Z', count: 1 } },
-    }
-    mockApi({ ...automation({ zb: [81, 85] }), target_low: 81, target_high: 85, learned, learned_zb: others })
+    },
+  })
+
+  it('grouped by Stufe: current Zieltemperatur first, then the others grey by ZTU then ZTO (Nutzer 09.11.)', async () => {
+    mockApi({ ...automation({ zb: [81, 85] }), target_low: 81, target_high: 85, ...grouped() })
     renderPage()
     const table = (await screen.findByRole('columnheader', { name: 'Zieltemperatur' })).closest('table')
     const rows = within(table).getAllByRole('row').slice(1)
     expect(rows.map((r) => within(r).getAllByRole('cell').slice(0, 3).map((c) => c.textContent))).toEqual([
-      ['3', '81–85 °C', '360 MHz'], ['Andere Zieltemperaturen'], ['2', '81–84 °C', '260 MHz'],
-      ['3', '81–84 °C', '360 MHz'], ['4', '82–85 °C', '405 MHz'], ['2', '82–86 °C', '275 MHz']])
-    expect(rows[0]).not.toHaveClass('text-muted-foreground')
-    expect(rows.slice(1).every((r) => r.classList.contains('text-muted-foreground'))).toBe(true)
-    // mobile: the current entries in one list, the others grey in a second one
-    const lists = screen.getAllByRole('list').filter((ul) => ul.classList.contains('sm:hidden'))
-    expect(lists.map((ul) => within(ul).getAllByRole('listitem').length)).toEqual([1, 4])
-    expect(lists[1]).toHaveClass('text-muted-foreground')
+      ['2', '81–84 °C', '260 MHz'], ['2', '82–86 °C', '275 MHz'],
+      ['3', '81–85 °C', '360 MHz'], ['3', '81–84 °C', '360 MHz'],
+      ['4', '82–85 °C', '405 MHz']])
+    // only the current one at the Basisstufe normal and bold, all others grey
+    expect(rows[2]).toHaveClass('font-semibold')
+    expect(rows[2]).not.toHaveClass('text-muted-foreground')
+    expect(rows.filter((r, i) => i !== 2).every((r) => r.classList.contains('text-muted-foreground'))).toBe(true)
+    // a line between the Stufe groups: on the first row of each further group
+    expect(rows.map((r) => r.classList.contains('border-t'))).toEqual([false, false, true, false, true])
+    expect(screen.queryByText('Andere Zieltemperaturen')).not.toBeInTheDocument()
   })
 
-  it('no learned value in the current Zieltemperatur: the note, below the other Zieltemperaturen', async () => {
-    const others = { '81-84': { 2: { mhz: 260, temp_avg: 81.9, at: '2026-11-08T12:44:00Z', count: 3 } } }
-    mockApi({ ...automation({}), learned_zb: others })
+  it('a current value of another level than the Basisstufe is normal, not bold', async () => {
+    const { learned_zb } = grouped()
+    mockApi({ ...automation({ zb: [81, 85] }), target_low: 81, target_high: 85, learned_zb,
+      learned: { 2: { mhz: 280, temp_avg: 82, at: '2026-11-09T08:00:00Z', count: 1 } } })
     renderPage()
-    expect(await screen.findByText('Lernwerte: noch keine (nach 15 min stabil bei 82–85 °C und einer Fehlerrate unter 5 %).'))
-      .toBeInTheDocument()
-    const table = screen.getByRole('columnheader', { name: 'Zieltemperatur' }).closest('table')
+    const table = (await screen.findByRole('columnheader', { name: 'Zieltemperatur' })).closest('table')
     const rows = within(table).getAllByRole('row').slice(1)
-    expect(rows.map((r) => within(r).getAllByRole('cell').slice(0, 3).map((c) => c.textContent))).toEqual([
-      ['Andere Zieltemperaturen'], ['2', '81–84 °C', '260 MHz']])
+    expect(rows.map((r) => within(r).getAllByRole('cell')[1].textContent)).toEqual(['81–85 °C', '81–84 °C',
+      '82–86 °C', '81–84 °C', '82–85 °C'])
+    expect(rows[0]).not.toHaveClass('text-muted-foreground')
+    expect(rows[0]).not.toHaveClass('font-semibold')
+    expect(rows.slice(1).every((r) => r.classList.contains('text-muted-foreground'))).toBe(true)
   })
 
-  it('no learned values yet: 15 min stable in the Zieltemperatur with an error rate below 5 %', async () => {
-    mockApi(automation({}))
+  it('mobile: per Stufe a heading, then its entries titled by the Zieltemperatur, the others grey', async () => {
+    mockApi({ ...automation({ zb: [81, 85] }), target_low: 81, target_high: 85, ...grouped() })
     renderPage()
-    expect(await screen.findByText('Lernwerte: noch keine (nach 15 min stabil bei 82–85 °C und einer Fehlerrate unter 5 %).'))
-      .toBeInTheDocument()
+    expect(await screen.findByRole('columnheader', { name: 'Zieltemperatur' })).toBeInTheDocument()
+    const groups = mobileGroups()
+    expect(groups.map((g) => [g.title, g.entries.map((li) => li.querySelector('span').textContent)])).toEqual([
+      ['Stufe 2', ['81–84 °C', '82–86 °C']], ['Stufe 3', ['81–85 °C', '81–84 °C']], ['Stufe 4', ['82–85 °C']]])
+    const grey = (li) => li.classList.contains('text-muted-foreground')
+    expect(groups.map((g) => g.entries.map(grey))).toEqual([[true, true], [false, true], [true]])
+    expect(groups[1].entries[0]).toHaveClass('font-semibold')
+    expect(groups.every((g) => g.list.closest('.sm\\:hidden'))).toBe(true)
+    expect(screen.queryByText(/^Stufe \d+ · /)).not.toBeInTheDocument()
   })
+
+  it('Modus after Takt laut Miner (Ø): label of the work mode, the key if unknown, — for old values (Nutzer 09.11.)',
+    async () => {
+      const learned = {
+        1: { mhz: 170, mode: '2/L4', temp_avg: 80.5, at: '2026-11-09T09:00:00Z', count: 1 },
+        2: { mhz: 260, mode: '1/-', temp_avg: 81, at: '2026-11-09T08:00:00Z', count: 1 },
+        3: { mhz: 320, mode: '9/X', temp_avg: 83.2, at: '2026-11-09T07:00:00Z', count: 1 },
+        4: { mhz: 380, temp_avg: 83, at: '2026-10-28T09:00:00Z', count: 2 },
+      }
+      mockApi({ ...automation({ zb: [82, 85] }), learned })
+      renderPage()
+      const table = (await screen.findByRole('columnheader', { name: 'Modus' })).closest('table')
+      const heads = within(table).getAllByRole('columnheader').map((c) => c.textContent)
+      expect(heads.indexOf('Modus')).toBe(heads.indexOf('Takt laut Miner (Ø)') + 1)
+      const rows = within(table).getAllByRole('row').slice(1)
+      expect(rows.map((r) => within(r).getAllByRole('cell')[4].textContent)).toEqual(['mode 04', 'High Performance',
+        '9/X', '—'])
+      // mobile: in each entry after Takt laut Miner (Ø)
+      const third = (level) => [...mobileEntry(level, '82–85 °C').querySelectorAll('.grid > div')][2]
+      expect([1, 2, 3, 4].map((lv) => [...third(lv).children].map((c) => c.textContent))).toEqual([
+        ['Modus', 'mode 04'], ['Modus', 'High Performance'], ['Modus', '9/X'], ['Modus', '—']])
+    })
+
+  it('no learned value in the current Zieltemperatur: the note, then only the grey values in their groups',
+    async () => {
+      const others = { '81-84': { 2: { mhz: 260, temp_avg: 81.9, at: '2026-11-08T12:44:00Z', count: 3 } } }
+      mockApi({ ...automation({}), learned_zb: others })
+      renderPage()
+      expect(await screen.findByText('Lernwerte: noch keine (nach 15 min stabil bei 82–85 °C und einer Fehlerrate ' +
+        'unter 5 %, bei Lüfterstufe 1 unter 7 %).')).toBeInTheDocument()
+      const table = screen.getByRole('columnheader', { name: 'Zieltemperatur' }).closest('table')
+      const rows = within(table).getAllByRole('row').slice(1)
+      expect(rows.map((r) => within(r).getAllByRole('cell').slice(0, 3).map((c) => c.textContent))).toEqual([
+        ['2', '81–84 °C', '260 MHz']])
+      expect(rows[0]).toHaveClass('text-muted-foreground')
+      expect(mobileGroups().map((g) => g.title)).toEqual(['Stufe 2'])
+      expect(mobileEntry(2, '81–84 °C')).toHaveClass('text-muted-foreground')
+    })
+
+  it('no learned values yet: 15 min stable in the Zieltemperatur, error rate below 5 %, at Lüfterstufe 1 below 7 %',
+    async () => {
+      mockApi(automation({}))
+      renderPage()
+      expect(await screen.findByText('Lernwerte: noch keine (nach 15 min stabil bei 82–85 °C und einer Fehlerrate ' +
+        'unter 5 %, bei Lüfterstufe 1 unter 7 %).')).toBeInTheDocument()
+    })
 
   // the page with the shared live poll: A15 fan speed 1520 rpm (another device 4500), room 21,5 °C at the controller
   function renderWithLive(auto) {
@@ -585,8 +697,8 @@ describe('FansPage Lernwert löschen (Nutzer 08.11.)', () => {
       expect(within(table).getByRole('button', { name: 'Löschen' })).toBeDisabled()
       live = { ...auto, learned: {} }
       await act(() => vi.advanceTimersByTimeAsync(5000))
-      expect(screen.getByText('Lernwerte: noch keine (nach 15 min stabil bei 82–85 °C und einer Fehlerrate unter 5 %).'))
-        .toBeInTheDocument()
+      expect(screen.getByText('Lernwerte: noch keine (nach 15 min stabil bei 82–85 °C und einer Fehlerrate unter 5 %, ' +
+        'bei Lüfterstufe 1 unter 7 %).')).toBeInTheDocument()
       expect(screen.queryByRole('button', { name: 'Löschen' })).not.toBeInTheDocument()
     } finally {
       vi.useRealTimers()
@@ -599,9 +711,8 @@ describe('FansPage Lernwert löschen (Nutzer 08.11.)', () => {
     const table = await desktop()
     expect(within(rowOf(table, '—')).queryByRole('button')).not.toBeInTheDocument()
     expect(within(rowOf(table, '81–84 °C')).getByRole('button', { name: 'Löschen' })).toBeInTheDocument()
-    expect(within(screen.getByText(/^Stufe 3 · —$/).closest('li')).queryByRole('button')).not.toBeInTheDocument()
-    expect(within(screen.getByText(/^Stufe 2 · 81–84 °C$/).closest('li')).getByRole('button', { name: 'Löschen' }))
-      .toBeInTheDocument()
+    expect(within(mobileEntry(3, '—')).queryByRole('button')).not.toBeInTheDocument()
+    expect(within(mobileEntry(2, '81–84 °C')).getByRole('button', { name: 'Löschen' })).toBeInTheDocument()
   })
 
   it('Automatik off: the table below the Einschalten button, Löschen of another Zieltemperatur on the phone', async () => {
@@ -614,7 +725,7 @@ describe('FansPage Lernwert löschen (Nutzer 08.11.)', () => {
     const table = await desktop()
     expect(enable.compareDocumentPosition(table) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
     expect(within(table).getAllByRole('button', { name: 'Löschen' })).toHaveLength(2)
-    const entry = screen.getByText(/^Stufe 2 · 81–84 °C$/).closest('li')
+    const entry = mobileEntry(2, '81–84 °C')
     await user.click(within(entry).getByRole('button', { name: 'Löschen' }))
     await user.click(within(entry).getByRole('button', { name: 'Ja' }))
     expect(api.post).toHaveBeenCalledWith('/api/fans/automation/',

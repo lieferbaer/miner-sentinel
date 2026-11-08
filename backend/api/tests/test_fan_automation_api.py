@@ -234,7 +234,8 @@ def test_payload_state_of_the_new_regulation(client, a15, backup):
         'learn_since': None, 'over_hot': None, 'offline': None, 'ac_error': None, 'last_error': None,
         'seen_at': '2026-10-24T20:00:05+00:00', 'start_hold': None, 'restart_req': None,
         'heat': None, 'cool': {'since': '2026-10-24T19:59:30+00:00', 'plus': 1}, 'locks': locks, 'hot': hot,
-        'cut_at': '2026-10-24T20:00:00+00:00', 'zb': [82, 85], 'queue': [], 'temps': [[1, 2]],
+        'cut_at': '2026-10-24T20:00:00+00:00', 'cut5_at': '2026-10-24T19:50:00+00:00', 'zb': [82, 85], 'queue': [],
+        'temps': [[1, 2]],
         # keys of the removed rules (an old state until the data-service dropped them)
         'window_until': '2026-10-24T20:00:30+00:00', 'window_active': True, 'cal': False, 'exc_active': False,
         'calm': None, 'stoss': None, 'caps': {'3': 325}, 'test': {'started': '2026-10-24T18:00:00+00:00'},
@@ -252,7 +253,7 @@ def test_payload_state_of_the_new_regulation(client, a15, backup):
     assert st['clock_changed_at'] and st['base'] == 3 and st['fan_changed_at'] == '2026-10-24T19:59:30+00:00'
     assert st['heat'] is None and st['cool'] == {'since': '2026-10-24T19:59:30+00:00', 'plus': 1}
     assert st['locks'] == locks and st['hot'] == hot and st['cut_at'] == '2026-10-24T20:00:00+00:00'
-    assert st['zb'] == [82, 85] and st['start_hold'] is None
+    assert st['zb'] == [82, 85] and st['start_hold'] is None and st['cut5_at'] == '2026-10-24T19:50:00+00:00'
     assert st['pending'] == {'kind': 'takt', 'value': 250, 'sent_at': '2026-10-24T20:00:00+00:00', 'attempt': 2}
     assert set(st) == set(STATE_KEYS) | {'base', 'pending'}
     for key in ('queue', 'temps', 'window_until', 'window_active', 'cal', 'exc_active', 'calm', 'stoss', 'caps',
@@ -274,7 +275,7 @@ def test_state_keys_as_in_the_contract():
         'phase', 't', 'tendency', 'boards', 'clock_set', 'clock_changed_at', 'clock_now', 'mode_key', 'stock_mhz',
         'fan_target', 'fan_set', 'fan_read', 'fan_read_at', 'fan_set_at', 'fan_changed_at', 'learn_since',
         'over_hot', 'offline', 'ac_error', 'last_error', 'seen_at', 'start_hold', 'restart_req', 'heat', 'cool',
-        'locks', 'hot', 'cut_at', 'zb')
+        'locks', 'hot', 'cut_at', 'cut5_at', 'zb')
 
 
 @pytest.mark.parametrize('action', ['caps_clear', 'temp_test_start', 'temp_test_abort'])
