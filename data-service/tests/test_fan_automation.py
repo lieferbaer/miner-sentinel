@@ -234,20 +234,20 @@ def test_start_without_learned_value_new_initial_values(miner, level, mhz, mode)
 
 # ---------------------------------------------------------------- Modus
 
-def test_mode_up_at_361_and_down_only_below_335(miner):
+def test_mode_up_at_361_and_down_only_below_350(miner):
     r = warm(miner, mhz=358)
     assert miner.level == 4
     r.go(15, temp=79)                                             # +5 → 363 → mode 03 zuerst
     assert miner.level == 3 and miner.clock() == 363 and miner.mode_sets == [3]
     assert [k for k in r.j.kinds() if k in ('modus', 'takt')][-2:] == ['modus', 'takt']
-    assert fa.MODE_DOWN_MARGIN == 25                              # Nutzer 08.11. (vorher 20)
-    # abwärts nur kleiner als Obergrenze des tieferen Modus − 25 (Nutzer 08.11.)
-    assert fa.required_level(335, 3) == 3 and fa.required_level(334, 3) == 4     # mode 03 → 04 unter 335
-    assert fa.required_level(340, 3) == 3 and fa.required_level(339, 3) == 3     # bis v2.2.8 schon unter 340
-    assert fa.required_level(355, 2) == 2 and fa.required_level(354, 2) == 3     # mode 02 → 03 unter 355
-    assert fa.required_level(375, 1) == 1 and fa.required_level(374, 1) == 2     # mode 01 → 02 unter 375
-    assert fa.required_level(395, 0) == 0 and fa.required_level(394, 0) == 1     # mode 00 → 01 unter 395
-    assert fa.required_level(330, 0) == 4 and fa.required_level(354, 0) == 3     # mehrere Modi auf einmal
+    assert fa.MODE_DOWN_MARGIN == 10                              # Nutzer 09.11. (vorher 25)
+    # abwärts nur kleiner als Obergrenze des tieferen Modus − 10 (Nutzer 09.11.)
+    assert fa.required_level(350, 3) == 3 and fa.required_level(349, 3) == 4     # mode 03 → 04 unter 350
+    assert fa.required_level(370, 2) == 2 and fa.required_level(369, 2) == 3     # mode 02 → 03 unter 370
+    assert fa.required_level(390, 1) == 1 and fa.required_level(389, 1) == 2     # mode 01 → 02 unter 390
+    assert fa.required_level(410, 0) == 0 and fa.required_level(409, 0) == 1     # mode 00 → 01 unter 410
+    assert fa.required_level(354, 2) == 3 and fa.required_level(335, 3) == 4     # bis v2.2.13 (25 MHz) noch nicht
+    assert fa.required_level(349, 0) == 4 and fa.required_level(369, 0) == 3     # mehrere Modi auf einmal
     # aufwärts unverändert ab Obergrenze + 1
     assert fa.required_level(361, 4) == 3 and fa.required_level(360, 4) == 4
     assert fa.required_level(381, 3) == 2 and fa.required_level(401, 2) == 1 and fa.required_level(421, 1) == 0
@@ -626,13 +626,13 @@ def test_clock_below_100_is_an_error_and_not_sent(miner):
     assert len(errors) == 1                                       # nicht jede Runde, erst wieder nach 2 min
 
 
-@pytest.mark.parametrize('start, mode', [(385, 3), (384, 4)])
+@pytest.mark.parametrize('start, mode', [(400, 3), (399, 4)])
 def test_reduction_with_mode_change_clock_first_then_mode_then_clock(miner, start, mode):
     r = warm(miner, mhz=start)
     assert miner.level == 2 and miner.clock() == start
     miner.clock_sets.clear()
-    r.go(15, temp=95)                                             # Bereich 4: −50 → 335 bleibt mode 03, 334 → mode 04
-    assert miner.mode_sets[-1] == mode and miner.level == mode    # (04 erst unter 335, Nutzer 08.11.)
+    r.go(15, temp=95)                                             # Bereich 4: −50 → 350 bleibt mode 03, 349 → mode 04
+    assert miner.mode_sets[-1] == mode and miner.level == mode    # (04 erst unter 350, Nutzer 09.11.)
     assert miner.clock_sets[0] == pytest.approx(start - 50, abs=1) and miner.clock() == start - 50
     assert len(miner.clock_sets) == 2                             # Takt, Modus, Takt erneut
 

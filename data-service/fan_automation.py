@@ -29,7 +29,7 @@ Taktsperre, Obergrenzen, Ertrags-Prüfung, Temperatur-Test and Takt-Messung are 
     6 = 420, from 7 = 440 MHz). Heiz- and Kühlmodus end without a lock, fan = Basisstufe.
   * Startpause after a start with cold chips (Neustart, Wartung, Over Hot): no clock increase until ZTU−5, at most
     10 min. „Nicht erreichbar“ around a restart is a restart entry, not an error.
-  * Clock 100–440 MHz, the mode follows the clock (25 MHz margin downwards, Nutzer 08.11.; was 20).
+  * Clock 100–440 MHz, the mode follows the clock (10 MHz margin downwards, Nutzer 09.11.; was 25).
   * Takt laut Miner weicht ab: more than 15 MHz off the set clock for 15 min without a break → set clock sent again.
   * Fehlerrate (DH): over 10 % for 30 min without a break → automatic restart, at most one per 6 h.
   * Learning: 15 min in ZTU..ZTO at an unchanged fan level → learned value of the active level, only at a mean error
@@ -90,8 +90,8 @@ CUT5_BLOCK_BASE = 1
 START_CLOCK = {1: 170, 2: 250, 3: 330, 4: 380, 5: 400, 6: 420, 7: 440, 8: 440, 9: 440, 10: 440}   # Nutzer 28.10.
 CLOCK_MIN, CLOCK_MAX = 100, 440
 MODE_TOP = {4: 360, 3: 380, 2: 400, 1: 420, 0: 440}   # oberer Takt je Modus (mode 04 ... mode 00)
-MODE_DOWN_MARGIN = 25         # Spielraum nach unten: Wechsel in den tieferen Modus erst unter dessen Obergrenze − 25 MHz
-                              # (Nutzer 08.11.; vorher 20), „nur kleiner“: 335 bleibt mode 03, 334 → mode 04
+MODE_DOWN_MARGIN = 10         # Spielraum nach unten: Wechsel in den tieferen Modus erst unter dessen Obergrenze − 10 MHz
+                              # (Nutzer 09.11.; vorher 25), „nur kleiner“: 350 bleibt mode 03, 349 → mode 04
 TENDENCY_S = 30               # Tendenz (only shown, no rule uses it): gegen den Wert von vor höchstens 30 s
 START_HOLD_S = 10 * 60        # Startpause: nach einem Start mit kalten Chips keine Takterhöhung bis ZTU−5, höchstens 10 min
 START_HOLD_BELOW = 5          # ... ZTU−5 (Nutzer 06.11.; vorher bis ZTU)
@@ -190,8 +190,8 @@ def table_level(mhz):
 
 
 def required_level(mhz, current):
-    """Modus für einen Takt: aufwärts ab Obergrenze + 1, abwärts erst unter Obergrenze des tieferen Modus − 25 MHz
-    (mode 00→01 unter 395, 01→02 unter 375, 02→03 unter 355, 03→04 unter 335; Nutzer 08.11.)."""
+    """Modus für einen Takt: aufwärts ab Obergrenze + 1, abwärts erst unter Obergrenze des tieferen Modus − 10 MHz
+    (mode 00→01 unter 410, 01→02 unter 390, 02→03 unter 370, 03→04 unter 350; Nutzer 09.11.)."""
     if current is None:
         return table_level(mhz)
     level = current
