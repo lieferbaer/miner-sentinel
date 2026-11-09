@@ -240,10 +240,18 @@ describe('FansPage hottest chip', () => {
     for (const [tmax, tone] of [[85, 'default'], [86, 'warning'], [88, 'warning'], [89, 'danger'], [97, 'danger']]) {
       mockApi({ ...automation({ t: tmax }), now: { tmax, boards: [tmax] } })
       const view = renderPage()
-      expect(await screen.findByText('Regelwert ' + tmax + ' °C · Zieltemperatur 82–85 °C')).toBeInTheDocument()
+      expect(await screen.findByText('Zieltemperatur 82–85 °C')).toBeInTheDocument()
       expect(toneOf('Heißester Chip')).toBe(tone)
       view.unmount()
     }
+  })
+
+  it('subtitle: other boards without the words, Zieltemperatur, Tendenz last; no Regelwert (Nutzer 09.11.)', async () => {
+    mockApi({ ...automation({ t: 84, tendency: 1 }), now: { tmax: 85, boards: [85, 81, 83] } })
+    renderPage()
+    expect(await screen.findByText('83 / 81 · Zieltemperatur 82–85 °C · Tendenz steigend (+1 °C)')).toBeInTheDocument()
+    expect(screen.queryByText(/weitere Boards/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/Regelwert/)).not.toBeInTheDocument()
   })
 
   it('Takt laut Miner: the set clock of the automation', async () => {

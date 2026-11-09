@@ -268,8 +268,8 @@ Alte Protokolleinträge `messung_start`/`messung_ende` und Phase `messung` bleib
   **An/Aus** neben dem Gerätenamen, **Port 1–4 als Buttons** (Auswahl in `localStorage`), **Stufe 0–10 als Buttons: ein Klick setzt**
   (Rücklesen nach `READ_BACK_S = 5` s); markiert ist die vom Controller gemeldete Stufe. Bei aktiver Automatik wählen die Buttons
   die Automatik-Stufe; An/Aus und Port gesperrt.
-- Automatik-Bereich: **5 Karten** (Hashrate mit Fehlerrate wie Übersicht – erste Karte seit v2.0.0; Heißester Chip mit Regelwert
-  und Tendenz; Takt laut Miner mit gesetzt · Modus · Standard; Lüfter läuft auf (aktive Stufe vs. Basisstufe, Kühlmodus +n / Heizmodus −n, Raum (v2.1.5) · Fan speed der A15 in rpm (Nutzer 06.11.; in der Wartung und solange die A15
+- Automatik-Bereich: **5 Karten** (Hashrate mit Fehlerrate wie Übersicht – erste Karte seit v2.0.0; Heißester Chip mit den Temperaturen der weiteren Boards, Zieltemperatur
+  und zuletzt Tendenz (seit v2.2.13 ohne die Wörter „weitere Boards“ und ohne „Regelwert“, Nutzer 09.11.); Takt laut Miner mit gesetzt · Modus · Standard; Lüfter läuft auf (aktive Stufe vs. Basisstufe, Kühlmodus +n / Heizmodus −n, Raum (v2.1.5) · Fan speed der A15 in rpm (Nutzer 06.11.; in der Wartung und solange die A15
   nicht antwortet „unbekannt“ statt des letzten Werts));
   Status mit Modus (Heiz-, Basis-, Kühlmodus), laufendem Befehl, Startpause, Takterhöhungssperren mit Uhrzeit und Grund, Bereich über ZTO,
   Lernperiode; v2.2.7). Kleine Zeile wiederholt den großen Wert nicht. Auf dem Handy

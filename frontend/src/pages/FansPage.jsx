@@ -353,10 +353,10 @@ function AutomationCards({ auto, st, roomTemp, lo, hi }) {
   // Wartung (Miner aus) or the A15 does not answer: the latest value is old, so "unbekannt" (Nutzer 06.11.)
   const fanRpmText = st.phase === 'wartung' || st.offline ? 'unbekannt' : fanRpm != null ? fmt(fanRpm, 0, ' rpm') : null
   const tmax = auto.now?.tmax
-  const boards = (auto.now?.boards || []).filter((b) => b != null)
-  const others = boards.length > 1 ? [...boards].sort((a, b) => b - a).slice(1) : []
   // colours like the clock reduction (Nutzer 06.11.): warning from ZTO+1 (Bereich 1), danger from ZTO+4 (Bereich 2)
   const tempTone = tmax == null ? 'default' : tmax >= hi + 4 ? 'danger' : tmax >= hi + 1 ? 'warning' : 'default'
+  const boards = (auto.now?.boards || []).filter((b) => b != null)
+  const others = boards.length > 1 ? [...boards].sort((a, b) => b - a).slice(1) : []
   const tendency = tendencyText(st.tendency)
   // the level MinerSentinel set last; the controller confirms it only after > 5 s (read back after 10 s)
   const base = auto.level
@@ -384,9 +384,9 @@ function AutomationCards({ auto, st, roomTemp, lo, hi }) {
         subtitle={formatNumber(mining.hashrate_ghs || 0, 2) + ' GH/s' + errorText} />
       <MetricCard variant="hero" layout="icon-left" icon={Thermometer} label="Heißester Chip" tone={tempTone}
         value={fmt(tmax, 0, ' °C')}
-        subtitle={[others.length ? 'weitere Boards ' + others.join(' / ') : null,
-          st.t != null ? 'Regelwert ' + fmt(st.t, 0, ' °C') : null, tendency ? 'Tendenz ' + tendency : null,
-          'Zieltemperatur ' + lo + '–' + hi + ' °C'].filter(Boolean).join(' · ')} />
+        // Nutzer 09.11.: the other boards without the words "weitere Boards", no Regelwert any more, the Tendenz last
+        subtitle={[others.length ? others.join(' / ') : null, 'Zieltemperatur ' + lo + '–' + hi + ' °C',
+          tendency ? 'Tendenz ' + tendency : null].filter(Boolean).join(' · ')} />
       <MetricCard variant="hero" layout="icon-left" icon={Gauge} label="Takt laut Miner"
         value={fmt(st.clock_now, 0, ' MHz')}
         subtitle={'gesetzt ' + fmt(st.clock_set, 0, ' MHz') + (st.mode_key ? ' · ' + (MODE_LABEL[st.mode_key] || st.mode_key) : '') +
