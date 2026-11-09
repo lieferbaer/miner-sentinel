@@ -88,7 +88,10 @@ function logicText(lo, hi) {
     'Unter ' + lo + ' °C sofort Takt +5 MHz bei ' + (lo - 3) + '–' + (lo - 1) + ' °C, +15 bei ' + (lo - 5) + '–' +
     (lo - 4) + ' °C, +20 bei ' + (lo - 10) + '–' + (lo - 6) + ' °C, +25 bei ' + (lo - 20) + '–' + (lo - 11) +
     ' °C, +40 bei ' + (lo - 21) + ' °C oder kälter (höchstens 440 MHz); danach keine Takterhöhung für 3 min ' +
-    '(+5) bzw. 2 min (+15, +20, +25, +40). Diese Sperren und die nach Heiz- oder Kühlmodus enden früher ab ' +
+    '(+5) bzw. 2 min (+15, +20, +25, +40). ' +
+    // the +5 with a mode switch doubles its lock, its early ends stay (Nutzer 09.11.)
+    'Braucht die +5 bei ' + (lo - 3) + '–' + (lo - 1) + ' °C einen Moduswechsel, verdoppelt sich die Sperre: 6 statt ' +
+    '3 min. Diese Sperren und die nach Heiz- oder Kühlmodus enden früher ab ' +
     (lo + 4) + ' °C. ' +
     // the lock after an increase also ends 3 degrees below the temperature at that increase (Nutzer 09.11.)
     'Die Sperre nach einer Erhöhung endet außerdem, sobald die Chiptemperatur mindestens 3 °C unter der bei der Erhöhung ' +
@@ -101,6 +104,8 @@ function logicText(lo, hi) {
     'selben Bereich alle 2 min, beim Anstieg in einen ' +
     'höheren Bereich sofort, beim Rückgang in einen niedrigeren 2 min nach der Ankunft dort. Nach jeder Senkung ' +
     '5 min keine Takterhöhung. ' +
+    // a reduction in Bereich 1 with a mode switch doubles its lock (Nutzer 09.11.)
+    'Braucht eine Senkung in Bereich 1 einen Moduswechsel, verdoppelt sich die Sperre: 10 statt 5 min. ' +
     'Bei Basisstufe 1: nach einer Senkung um −5 MHz 30 min keine Takterhöhung bei ' + (lo - 2) + '–' + (lo - 1) +
     ' °C (ein Start hebt das auf). ' +
     'Nach Neustart, Wartung oder Over Hot keine Takterhöhung bis ' + (lo - 5) + ' °C, höchstens 10 min ' +
@@ -110,7 +115,13 @@ function logicText(lo, hi) {
 }
 function startText(lo, hi) {
   return 'Start (Stufenwahl, Einschalten, Neustart, nach Wartung oder Over Hot): Heiz- und Kühlmodus enden ohne ' +
-    'Sperre, Lüfter auf die Basisstufe; Starttakt = Lernwert der Basisstufe, sonst der der nächstgelegenen ' +
+    'Sperre, Lüfter auf die Basisstufe; ' +
+    // a change of the Basisstufe: the fan waits for the clock or ZTU/ZTO, 3 min no clock change at ZTU−3–ZTO+3
+    // (Nutzer 09.11.)
+    'bei einer Änderung der Basisstufe Lüfter erst runter, sobald der Takt übernommen ist oder unter ' + lo +
+    ' °C, erst hoch, sobald der Takt übernommen ist oder über ' + hi + ' °C (Heiz- und Kühlmodus ruhen so lange), ' +
+    'und ab der Wahl 3 min keine Taktänderung bei ' + (lo - 3) + '–' + (hi + 3) + ' °C (endet früher, sobald die ' +
+    'Chiptemperatur diesen Bereich verlässt); Starttakt = Lernwert der Basisstufe, sonst der der nächstgelegenen ' +
     'Zieltemperatur, sonst Stufe 1 = 170, 2 = 250, 3 = 330, 4 = 380, 5 = 400, 6 = 420, ab 7 = 440 MHz. ' +
     'Lernwert: 15 min stabil in ' + lo + '–' + hi + ' °C bei unveränderter Lüfterstufe, nur bei einer Fehlerrate ' +
     'unter 5 %, bei Lüfterstufe 1 unter 7 % (Mittel der 15 min).'
@@ -315,10 +326,11 @@ const runs = (until) => Boolean(until) && Date.parse(until) > Date.now()
 // Basisstufe 1 (Nutzer 09.11.): after a −5 MHz reduction (state.cut5_at) no clock increase at ZTU−2–ZTU−1 for 30 min
 const CUT5_BLOCK_MS = 30 * 60000
 
-/** What runs right now in the regulation (Nutzer 06.11.): command being taken over, Startpause, the clock-increase
- * locks (latest end with the reasons), the block after −5 at Basisstufe 1 (Nutzer 09.11.), the excursion over ZTO
- * and the learning period. */
-function runningItems(st, lo, base) {
+/** What runs right now in the regulation (Nutzer 06.11.): command being taken over, the fan waiting after a change of
+ * the Basisstufe (Nutzer 09.11.), Startpause, the lock of clock changes after a change of the Basisstufe (Nutzer
+ * 09.11.), the clock-increase locks (latest end with the reasons), the block after −5 at Basisstufe 1 (Nutzer 09.11.),
+ * the excursion over ZTO and the learning period. */
+function runningItems(st, lo, hi, base) {
   const pending = st.pending
     ? (st.pending.kind === 'modus' ? 'Modus ' + String(st.pending.value).padStart(2, '0') : 'Takt ' + st.pending.value + ' MHz') +
       ' wird übernommen' + (st.pending.attempt > 1 ? ' (Versuch ' + st.pending.attempt + ')' : '')
@@ -328,9 +340,21 @@ function runningItems(st, lo, base) {
   const locks = Object.keys(LOCK_REASON).filter((key) => runs(st.locks?.[key]))
   const lockEnd = locks.length ? locks.map((key) => st.locks[key]).reduce((a, b) => (Date.parse(b) > Date.parse(a) ? b : a)) : null
   const cut5End = st.cut5_at && base === 1 ? Date.parse(st.cut5_at) + CUT5_BLOCK_MS : NaN
+  // after a change of the Basisstufe (Nutzer 09.11.): the fan goes down once the clock is taken over or below ZTU,
+  // up once the clock is taken over or above ZTO; 3 min no clock change at ZTU−3–ZTO+3 (state.base_wait/base_lock)
+  const wait = st.base_wait
+    ? 'Lüfter wartet: Stufe ' + st.base_wait.to + ', sobald der Takt übernommen ist oder ' +
+      (st.base_wait.dir === 'hoch' ? 'über ' + hi : 'unter ' + lo) + ' °C'
+    : null
+  const baseLock = runs(st.base_lock?.until)
+    ? 'keine Taktänderung bei ' + (lo - 3) + '–' + (hi + 3) + ' °C bis ' + clockTime(st.base_lock.until) +
+      ' (Basisstufe gewählt)'
+    : null
   return [
     pending,
+    wait,
     startHold,
+    baseLock,
     lockEnd ? 'keine Takterhöhung bis ' + clockTime(lockEnd) + ' (' + locks.map((key) => LOCK_REASON[key]).join(', ') + ')'
       : null,
     cut5End > Date.now() ? 'keine Takterhöhung bei ' + (lo - 2) + '–' + (lo - 1) + ' °C bis ' + clockTime(cut5End) +
@@ -376,7 +400,7 @@ function AutomationCards({ auto, st, roomTemp, lo, hi }) {
   ].filter(Boolean).join(' · ')
   const phase = phases(lo, hi)[st.phase] || { value: '—', sub: '' }
   const restarting = Boolean(st.restart_req) || st.offline === 'neustart'
-  const statusSub = !regulating ? phase.sub : runningItems(st, lo, base).join(' · ') || phase.sub
+  const statusSub = !regulating ? phase.sub : runningItems(st, lo, hi, base).join(' · ') || phase.sub
   return (
     <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-5">
       <MetricCard variant="hero" layout="icon-left" icon={Hash} label="Hashrate"

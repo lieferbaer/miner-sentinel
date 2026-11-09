@@ -20,11 +20,12 @@ logger = logging.getLogger(__name__)
 
 READ_BACK_S = 5       # user choice (was 10); measured: the controller reports a new speed only after > 5 s
 # fan_automation.state as written by the data-service (data-service/fan_automation.py) that the page reads
-# (v2.2.7, Nutzer 06.11.: Heizmodus/Basismodus/Kühlmodus, locks of the clock increase, excursions above ZTO)
+# (v2.2.7, Nutzer 06.11.: Heizmodus/Basismodus/Kühlmodus, locks of the clock increase, excursions above ZTO;
+# Nutzer 09.11.: base_wait = Lüfter wartet and base_lock = Taktsperre after a change of the Basisstufe)
 STATE_KEYS = ('phase', 't', 'tendency', 'boards', 'clock_set', 'clock_changed_at', 'clock_now', 'mode_key',
               'stock_mhz', 'fan_target', 'fan_set', 'fan_read', 'fan_read_at', 'fan_set_at', 'fan_changed_at',
               'learn_since', 'over_hot', 'offline', 'ac_error', 'last_error', 'seen_at', 'start_hold', 'restart_req',
-              'heat', 'cool', 'locks', 'hot', 'cut_at', 'cut5_at', 'zb')
+              'heat', 'cool', 'locks', 'hot', 'cut_at', 'cut5_at', 'zb', 'base_wait', 'base_lock')
 PENDING_KEYS = ('kind', 'value', 'sent_at', 'attempt')
 STATE_FRESH_S = 15    # the data-service writes the state every 5 s (only while it reads the miner)
 TMAX_FRESH_S = 30     # the collector writes the chip temperatures every 10 s

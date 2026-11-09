@@ -235,7 +235,9 @@ def test_payload_state_of_the_new_regulation(client, a15, backup):
         'seen_at': '2026-10-24T20:00:05+00:00', 'start_hold': None, 'restart_req': None,
         'heat': None, 'cool': {'since': '2026-10-24T19:59:30+00:00', 'plus': 1}, 'locks': locks, 'hot': hot,
         'cut_at': '2026-10-24T20:00:00+00:00', 'cut5_at': '2026-10-24T19:50:00+00:00', 'zb': [82, 85], 'queue': [],
-        'temps': [[1, 2]],
+        'base_wait': {'from': 3, 'to': 2, 'dir': 'runter', 'since': '2026-10-24T20:00:00+00:00'},
+        'base_lock': {'since': '2026-10-24T20:00:00+00:00', 'until': '2026-10-24T20:03:00+00:00'},
+        'base_seen': 3, 'base_change': None, 'temps': [[1, 2]],
         # keys of the removed rules (an old state until the data-service dropped them)
         'window_until': '2026-10-24T20:00:30+00:00', 'window_active': True, 'cal': False, 'exc_active': False,
         'calm': None, 'stoss': None, 'caps': {'3': 325}, 'test': {'started': '2026-10-24T18:00:00+00:00'},
@@ -255,9 +257,12 @@ def test_payload_state_of_the_new_regulation(client, a15, backup):
     assert st['locks'] == locks and st['hot'] == hot and st['cut_at'] == '2026-10-24T20:00:00+00:00'
     assert st['zb'] == [82, 85] and st['start_hold'] is None and st['cut5_at'] == '2026-10-24T19:50:00+00:00'
     assert st['pending'] == {'kind': 'takt', 'value': 250, 'sent_at': '2026-10-24T20:00:00+00:00', 'attempt': 2}
+    # Lüfter wartet and Taktsperre after a change of the Basisstufe (Nutzer 09.11.)
+    assert st['base_wait'] == {'from': 3, 'to': 2, 'dir': 'runter', 'since': '2026-10-24T20:00:00+00:00'}
+    assert st['base_lock'] == {'since': '2026-10-24T20:00:00+00:00', 'until': '2026-10-24T20:03:00+00:00'}
     assert set(st) == set(STATE_KEYS) | {'base', 'pending'}
     for key in ('queue', 'temps', 'window_until', 'window_active', 'cal', 'exc_active', 'calm', 'stoss', 'caps',
-                'test'):
+                'test', 'base_seen', 'base_change'):
         assert key not in st
     assert 'temp_test_at' not in data
     assert data['learned'] == {'3': {'mhz': 240, 'temp_avg': 82.1, 'at': '2026-10-24T19:00:00+00:00', 'count': 2}}
@@ -275,7 +280,7 @@ def test_state_keys_as_in_the_contract():
         'phase', 't', 'tendency', 'boards', 'clock_set', 'clock_changed_at', 'clock_now', 'mode_key', 'stock_mhz',
         'fan_target', 'fan_set', 'fan_read', 'fan_read_at', 'fan_set_at', 'fan_changed_at', 'learn_since',
         'over_hot', 'offline', 'ac_error', 'last_error', 'seen_at', 'start_hold', 'restart_req', 'heat', 'cool',
-        'locks', 'hot', 'cut_at', 'cut5_at', 'zb')
+        'locks', 'hot', 'cut_at', 'cut5_at', 'zb', 'base_wait', 'base_lock')
 
 
 @pytest.mark.parametrize('action', ['caps_clear', 'temp_test_start', 'temp_test_abort'])
