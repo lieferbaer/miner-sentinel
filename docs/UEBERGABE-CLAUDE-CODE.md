@@ -263,6 +263,7 @@ Alte Protokolleinträge `messung_start`/`messung_ende` und Phase `messung` bleib
 - **Anmeldung Live/Test:** Umgebung über `MINERSENTINEL_ENV` (Standard „Live“). **Test** meldet sich nur über „Test aktivieren“ an,
   höchstens 5 min, nie automatisch neu. **Live** meldet sich nach einer Übernahme durch eine andere Anmeldung (10003) erst nach
   **5 min Pause** wieder an (`relogin_after`), oder sofort über „Live jetzt übernehmen“.
+- **Reihenfolge der Seite (v2.2.12, Nutzer 09.11.):** oben Zieltemperatur, Temperatur-Automatik, Port/Stufe-Buttons und Ergebnisse; unten AC-Infinity-Konto, Controller-Name mit An/Aus und Messwerten, Port-Tabelle und Sicherung (Meldungen der Sicherung stehen dort). Umsetzung: Flex-Spalte mit `order-1…4` (der Controller rendert zwei Karten).
 - Seite: Zugangsdaten-Formular (Nutzer trägt selbst ein), Sicherung/Zurückschreiben/**Löschen** (Test-Buttons erst nach Sicherung; „Löschen“ nur bei mehr als einer Sicherung des Controllers, Backend `POST /api/fans/backup/delete/` {file}: nur Dateien aus der Sicherungsliste, die letzte je Controller → 409, Sperre `backup.lock` gegen zwei gleichzeitige Löschungen; v2.2.9, Nutzer 08.11.),
   **An/Aus** neben dem Gerätenamen, **Port 1–4 als Buttons** (Auswahl in `localStorage`), **Stufe 0–10 als Buttons: ein Klick setzt**
   (Rücklesen nach `READ_BACK_S = 5` s); markiert ist die vom Controller gemeldete Stufe. Bei aktiver Automatik wählen die Buttons

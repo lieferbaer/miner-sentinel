@@ -422,6 +422,43 @@ describe('FansPage Letzte Einträge', () => {
   })
 })
 
+describe('FansPage Reihenfolge (Nutzer 09.11.)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('Automatik und Stufen oben; Konto, Controller mit An/Aus, Ports und Sicherung unten', async () => {
+    const backups = [{ file: 'backup-20261108-120000-ac1.json', dev_id: 'ac1', created_at: '2026-11-08T12:00:00Z',
+      ports: [0, 1] }]
+    mockApi(automation({}), { backups })
+    renderPage()
+    const order = (el) => {
+      for (let n = el; n; n = n.parentElement) {
+        const c = [...(n.classList || [])].find((x) => /^order-\d$/.test(x))
+        if (c) return c
+      }
+      return null
+    }
+    expect(order(await screen.findByText('Zieltemperatur'))).toBe('order-1')
+    expect(order(screen.getByText(/^Temperatur-Automatik an/))).toBe('order-2')
+    expect(order(screen.getByText('Stufe'))).toBe('order-2')
+    expect(order(await screen.findByText(/^AC-Infinity-Konto/))).toBe('order-3')
+    expect(order(screen.getByText('Sicherung (Einstellungen Port 0–4)'))).toBe('order-4')
+    expect(order(screen.getByRole('button', { name: 'An' }))).toBe('order-4')
+    expect(order(screen.getByRole('columnheader', { name: 'Port' }))).toBe('order-4')
+  })
+
+  it('die Meldung einer Sicherung steht unten bei der Sicherung', async () => {
+    mockApi(automation({}))
+    api.post.mockResolvedValue({ data: { file: 'backup-x.json', ports: { 0: { ok: true }, 1: { ok: true } } } })
+    renderPage()
+    await userEvent.click(await screen.findByRole('button', { name: 'Sicherung erstellen' }))
+    const text = await screen.findByText(/^Sicherung backup-x\.json gespeichert/)
+    expect(text.closest('.order-4')).not.toBeNull()
+    expect(text.closest('.order-2')).toBeNull()
+  })
+})
+
 describe('FansPage Lernwerte', () => {
   beforeEach(() => {
     vi.clearAllMocks()

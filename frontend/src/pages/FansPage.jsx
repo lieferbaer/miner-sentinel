@@ -700,10 +700,10 @@ function Controller({ dev, backups, automation, onReload }) {
     try {
       const { data } = await api.post('/api/fans/backup/', { dev_id: dev.dev_id })
       const ok = Object.entries(data.ports).filter(([, v]) => v.ok).map(([p]) => p)
-      setMsg({ tone: 'ok', text: `Sicherung ${data.file} gespeichert (Ports mit Einstellungen: ${ok.join(', ') || 'keine'}).` })
+      setMsg({ tone: 'ok', where: 'backup', text: `Sicherung ${data.file} gespeichert (Ports mit Einstellungen: ${ok.join(', ') || 'keine'}).` })
       onReload()
     } catch (err) {
-      setMsg({ tone: 'error', text: errText(err, 'Sicherung fehlgeschlagen.') })
+      setMsg({ tone: 'error', where: 'backup', text: errText(err, 'Sicherung fehlgeschlagen.') })
     } finally {
       setBusy(null)
     }
@@ -717,11 +717,12 @@ function Controller({ dev, backups, automation, onReload }) {
       const { data } = await api.post('/api/fans/restore/', { file })
       setMsg({
         tone: 'ok',
+        where: 'backup',
         text: 'Zurückgeschrieben: ' + data.results.map((r) => `Port ${r.port}: Code ${r.code}${r.msg ? ' ' + r.msg : ''}`).join(' · '),
       })
       onReload()
     } catch (err) {
-      setMsg({ tone: 'error', text: errText(err, 'Zurückschreiben fehlgeschlagen.') })
+      setMsg({ tone: 'error', where: 'backup', text: errText(err, 'Zurückschreiben fehlgeschlagen.') })
     } finally {
       setBusy(null)
     }
@@ -734,9 +735,9 @@ function Controller({ dev, backups, automation, onReload }) {
     setConfirmBackup(null)
     try {
       await api.post('/api/fans/backup/delete/', { file })
-      setMsg({ tone: 'ok', text: 'Sicherung gelöscht.' })
+      setMsg({ tone: 'ok', where: 'backup', text: 'Sicherung gelöscht.' })
     } catch (err) {
-      setMsg({ tone: 'error', text: errText(err, 'Löschen fehlgeschlagen.') })
+      setMsg({ tone: 'error', where: 'backup', text: errText(err, 'Löschen fehlgeschlagen.') })
     } finally {
       setBusy(null)
     }
@@ -762,181 +763,193 @@ function Controller({ dev, backups, automation, onReload }) {
   const locked = !!busy || own.length === 0
   const enableLevel = current >= 1 && current <= 10 ? current : 5
 
+  // Lüfterseite (Nutzer 09.11.): on top the automation and the level buttons; the AC Infinity account, name with
+  // An/Aus, ports and Sicherung at the bottom of the page (CSS order in the page's flex column)
   return (
-    <Card>
-      <CardHeader className="pb-2">
-        <CardTitle className="flex flex-wrap items-center gap-2 text-base font-semibold">
-          <Fan className="h-4 w-4 text-muted-foreground" />
-          {dev.name || 'Controller'}
-          <span className="ml-auto flex gap-2">
-            {['on', 'off'].map((key) => (
-              <Button key={key} size="sm" variant="outline" className="h-8 px-4" disabled={locked || autoOn}
-                onClick={() => test(key)}>
-                {busy === key && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
-                {ACTIONS[key]}
-              </Button>
-            ))}
-          </span>
-        </CardTitle>
-        <CardDescription className="text-xs">
-          {dev.online ? 'online' : 'offline'} · Temperatur {fmt(dev.temperature_c, 1, ' °C')} · Luftfeuchte{' '}
-          {fmt(dev.humidity_pct, 1, ' %')} · VPD {fmt(dev.vpd_kpa, 2, ' kPa')}
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-4 pt-0">
-        <div className="overflow-x-auto">
-          <table className="w-full text-xs">
-            <thead>
-              <tr className="border-b border-border/60 text-left text-muted-foreground">
-                <th className="py-1.5 pr-3 font-medium">Port</th>
-                <th className="py-1.5 pr-3 font-medium">Name</th>
-                <th className="py-1.5 pr-3 font-medium">Stufe (speak)</th>
-                <th className="py-1.5 pr-3 font-medium">curMode</th>
-                <th className="py-1.5 pr-3 font-medium">online</th>
-              </tr>
-            </thead>
-            <tbody>
-              {dev.ports.map((p) => (
-                <tr key={p.port} className="border-b border-border/30">
-                  <td className="py-1.5 pr-3">{p.port}</td>
-                  <td className="py-1.5 pr-3">{p.name || '—'}</td>
-                  <td className="py-1.5 pr-3 font-semibold tabular-nums">{p.speak ?? '—'}</td>
-                  <td className="py-1.5 pr-3">{p.cur_mode ?? '—'}</td>
-                  <td className="py-1.5 pr-3">{p.online === undefined || p.online === null ? '—' : String(p.online)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+    <>
+      <Card className="order-2">
+        <CardContent className="space-y-4 pt-6">
+          <AutomationPanel auto={auto} here={autoHere} port={port} level={enableLevel} locked={locked}
+            busy={busy === 'auto'} onCommand={autoCommand} roomTemp={dev.temperature_c} />
 
-        <div className="space-y-2 rounded-md border border-border/80 p-3">
-          <p className="text-sm font-medium">Sicherung (Einstellungen Port 0–4)</p>
-          <Button size="sm" disabled={!!busy} onClick={backup}>
-            {busy === 'backup' && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
-            Sicherung erstellen
-          </Button>
-          {own.length === 0 ? (
-            <p className="text-xs text-muted-foreground">Noch keine Sicherung. Die Test-Buttons sind erst danach freigegeben.</p>
-          ) : (
-            <ul className="space-y-1 text-xs">
-              {own.map((b) => (
-                <li key={b.file} className="flex flex-wrap items-center gap-2">
-                  <span>
-                    {when(b.created_at)} · Ports {b.ports.join(', ') || '—'}
-                  </span>
-                  {confirmBackup?.file === b.file ? (
-                    <>
-                      <span>
-                        {confirmBackup.kind === 'delete' ? 'Sicherung wirklich löschen?' : 'Wirklich zurückschreiben?'}
-                      </span>
-                      <Button size="sm" variant="destructive" disabled={!!busy}
-                        onClick={() => (confirmBackup.kind === 'delete' ? removeBackup(b.file) : restore(b.file))}>
-                        Ja
-                      </Button>
-                      <Button size="sm" variant="secondary" disabled={!!busy} onClick={() => setConfirmBackup(null)}>
-                        Nein
-                      </Button>
-                    </>
+          <div className="space-y-2 rounded-md border border-border/80 p-3">
+            <div className="flex flex-wrap items-center gap-1.5 text-xs">
+              <span className="w-10">Port</span>
+              {[1, 2, 3, 4].map((p) => (
+                <Button key={p} size="sm" className="h-8 w-9 px-0 tabular-nums"
+                  variant={port === p ? 'default' : 'outline'} aria-pressed={port === p}
+                  disabled={!!busy || autoOn} onClick={() => setPort(p)}>
+                  {p}
+                </Button>
+              ))}
+            </div>
+            <div className="flex flex-wrap items-center gap-1.5 text-xs">
+              <span className="w-10">Stufe</span>
+              {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((s) => {
+                // automation on: the button chooses the level (the data-service applies it safely)
+                const selected = autoHere ? auto.level === s : current === s
+                return (
+                  <Button key={s} size="sm" className="h-8 w-9 px-0 tabular-nums"
+                    variant={selected ? 'default' : 'outline'} aria-pressed={selected}
+                    disabled={locked || (autoOn && (!autoHere || s === 0))}
+                    onClick={() => (autoHere ? autoCommand({ action: 'level', level: s }) : test('set', s))}>
+                    {pending === s ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : s}
+                  </Button>
+                )
+              })}
+            </div>
+            {own.length === 0 && (
+              <p className="text-xs text-muted-foreground">Erst eine Sicherung erstellen, dann sind die Buttons frei.</p>
+            )}
+            {busy && busy !== 'backup' && busy !== 'restore' && busy !== 'backup_delete' && (
+              <p className="text-xs text-muted-foreground">Befehl gesendet, warte 5 s und lese die Stufe neu …</p>
+            )}
+            <p className="text-xs text-muted-foreground">
+              Zwischen zwei Schreibbefehlen liegen mindestens 1,5 s. Während der Tests kann die Handy-App abgemeldet werden.
+            </p>
+          </div>
+
+          {msg && msg.where !== 'backup' && (
+            <p className={'text-xs ' + (msg.tone === 'ok' ? 'text-emerald-600' : 'text-destructive')}>{msg.text}</p>
+          )}
+
+          {results.length > 0 && (
+            <div className="space-y-2">
+              <p className="text-sm font-medium">Ergebnisse</p>
+              {results.map((r, i) => (
+                <div key={i} className="space-y-1 rounded-md border border-border/60 p-2 text-xs">
+                  <p className="font-medium">
+                    {when(r.at)} · {ACTIONS[r.action] || r.action}
+                    {r.speed !== undefined && r.action === 'set' ? ` · Stufe ${r.speed}` : ''}
+                  </p>
+                  {r.error ? (
+                    <p className="text-destructive">{r.error}</p>
                   ) : (
                     <>
-                      <Button size="sm" variant="secondary" disabled={!!busy}
-                        onClick={() => setConfirmBackup({ file: b.file, kind: 'restore' })}>
-                        Zurückschreiben
-                      </Button>
-                      {own.length > 1 && (
-                        <Button size="sm" variant="secondary" disabled={!!busy}
-                          onClick={() => setConfirmBackup({ file: b.file, kind: 'delete' })}>
-                          Löschen
-                        </Button>
-                      )}
+                      <p>
+                        Übernommen:{' '}
+                        <span className={'font-semibold ' + (r.accepted ? 'text-emerald-600' : 'text-destructive')}>
+                          {r.accepted ? 'ja' : 'nein'}
+                        </span>{' '}
+                        · Stufe vorher {r.before ?? '—'} → nachher {r.after ?? '—'} (nach {r.waited_s} s, Port {r.fan_port})
+                      </p>
+                      <p className="text-muted-foreground">
+                        API: Code {String(r.code)}
+                        {r.msg ? ' · ' + r.msg : ''} · HTTP {r.http} · geschrieben auf Port {r.write_port}
+                      </p>
+                      <p className="text-muted-foreground">
+                        Geändert:{' '}
+                        {Object.entries(r.changes || {})
+                          .map(([k, v]) => `${k} ${v.before ?? '—'} → ${v.sent}`)
+                          .join(' · ')}
+                      </p>
                     </>
                   )}
-                </li>
+                </div>
               ))}
-            </ul>
+            </div>
           )}
-        </div>
-
-        <AutomationPanel auto={auto} here={autoHere} port={port} level={enableLevel} locked={locked}
-          busy={busy === 'auto'} onCommand={autoCommand} roomTemp={dev.temperature_c} />
-
-        <div className="space-y-2 rounded-md border border-border/80 p-3">
-          <div className="flex flex-wrap items-center gap-1.5 text-xs">
-            <span className="w-10">Port</span>
-            {[1, 2, 3, 4].map((p) => (
-              <Button key={p} size="sm" className="h-8 w-9 px-0 tabular-nums"
-                variant={port === p ? 'default' : 'outline'} aria-pressed={port === p}
-                disabled={!!busy || autoOn} onClick={() => setPort(p)}>
-                {p}
-              </Button>
-            ))}
-          </div>
-          <div className="flex flex-wrap items-center gap-1.5 text-xs">
-            <span className="w-10">Stufe</span>
-            {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((s) => {
-              // automation on: the button chooses the level (the data-service applies it safely)
-              const selected = autoHere ? auto.level === s : current === s
-              return (
-                <Button key={s} size="sm" className="h-8 w-9 px-0 tabular-nums"
-                  variant={selected ? 'default' : 'outline'} aria-pressed={selected}
-                  disabled={locked || (autoOn && (!autoHere || s === 0))}
-                  onClick={() => (autoHere ? autoCommand({ action: 'level', level: s }) : test('set', s))}>
-                  {pending === s ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : s}
+        </CardContent>
+      </Card>
+      <Card className="order-4">
+        <CardHeader className="pb-2">
+          <CardTitle className="flex flex-wrap items-center gap-2 text-base font-semibold">
+            <Fan className="h-4 w-4 text-muted-foreground" />
+            {dev.name || 'Controller'}
+            <span className="ml-auto flex gap-2">
+              {['on', 'off'].map((key) => (
+                <Button key={key} size="sm" variant="outline" className="h-8 px-4" disabled={locked || autoOn}
+                  onClick={() => test(key)}>
+                  {busy === key && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
+                  {ACTIONS[key]}
                 </Button>
-              )
-            })}
+              ))}
+            </span>
+          </CardTitle>
+          <CardDescription className="text-xs">
+            {dev.online ? 'online' : 'offline'} · Temperatur {fmt(dev.temperature_c, 1, ' °C')} · Luftfeuchte{' '}
+            {fmt(dev.humidity_pct, 1, ' %')} · VPD {fmt(dev.vpd_kpa, 2, ' kPa')}
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4 pt-0">
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="border-b border-border/60 text-left text-muted-foreground">
+                  <th className="py-1.5 pr-3 font-medium">Port</th>
+                  <th className="py-1.5 pr-3 font-medium">Name</th>
+                  <th className="py-1.5 pr-3 font-medium">Stufe (speak)</th>
+                  <th className="py-1.5 pr-3 font-medium">curMode</th>
+                  <th className="py-1.5 pr-3 font-medium">online</th>
+                </tr>
+              </thead>
+              <tbody>
+                {dev.ports.map((p) => (
+                  <tr key={p.port} className="border-b border-border/30">
+                    <td className="py-1.5 pr-3">{p.port}</td>
+                    <td className="py-1.5 pr-3">{p.name || '—'}</td>
+                    <td className="py-1.5 pr-3 font-semibold tabular-nums">{p.speak ?? '—'}</td>
+                    <td className="py-1.5 pr-3">{p.cur_mode ?? '—'}</td>
+                    <td className="py-1.5 pr-3">{p.online === undefined || p.online === null ? '—' : String(p.online)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
-          {own.length === 0 && (
-            <p className="text-xs text-muted-foreground">Erst eine Sicherung erstellen, dann sind die Buttons frei.</p>
-          )}
-          {busy && busy !== 'backup' && busy !== 'restore' && busy !== 'backup_delete' && (
-            <p className="text-xs text-muted-foreground">Befehl gesendet, warte 5 s und lese die Stufe neu …</p>
-          )}
-          <p className="text-xs text-muted-foreground">
-            Zwischen zwei Schreibbefehlen liegen mindestens 1,5 s. Während der Tests kann die Handy-App abgemeldet werden.
-          </p>
-        </div>
 
-        {msg && <p className={'text-xs ' + (msg.tone === 'ok' ? 'text-emerald-600' : 'text-destructive')}>{msg.text}</p>}
-
-        {results.length > 0 && (
-          <div className="space-y-2">
-            <p className="text-sm font-medium">Ergebnisse</p>
-            {results.map((r, i) => (
-              <div key={i} className="space-y-1 rounded-md border border-border/60 p-2 text-xs">
-                <p className="font-medium">
-                  {when(r.at)} · {ACTIONS[r.action] || r.action}
-                  {r.speed !== undefined && r.action === 'set' ? ` · Stufe ${r.speed}` : ''}
-                </p>
-                {r.error ? (
-                  <p className="text-destructive">{r.error}</p>
-                ) : (
-                  <>
-                    <p>
-                      Übernommen:{' '}
-                      <span className={'font-semibold ' + (r.accepted ? 'text-emerald-600' : 'text-destructive')}>
-                        {r.accepted ? 'ja' : 'nein'}
-                      </span>{' '}
-                      · Stufe vorher {r.before ?? '—'} → nachher {r.after ?? '—'} (nach {r.waited_s} s, Port {r.fan_port})
-                    </p>
-                    <p className="text-muted-foreground">
-                      API: Code {String(r.code)}
-                      {r.msg ? ' · ' + r.msg : ''} · HTTP {r.http} · geschrieben auf Port {r.write_port}
-                    </p>
-                    <p className="text-muted-foreground">
-                      Geändert:{' '}
-                      {Object.entries(r.changes || {})
-                        .map(([k, v]) => `${k} ${v.before ?? '—'} → ${v.sent}`)
-                        .join(' · ')}
-                    </p>
-                  </>
-                )}
-              </div>
-            ))}
+          <div className="space-y-2 rounded-md border border-border/80 p-3">
+            <p className="text-sm font-medium">Sicherung (Einstellungen Port 0–4)</p>
+            <Button size="sm" disabled={!!busy} onClick={backup}>
+              {busy === 'backup' && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
+              Sicherung erstellen
+            </Button>
+            {own.length === 0 ? (
+              <p className="text-xs text-muted-foreground">Noch keine Sicherung. Die Test-Buttons sind erst danach freigegeben.</p>
+            ) : (
+              <ul className="space-y-1 text-xs">
+                {own.map((b) => (
+                  <li key={b.file} className="flex flex-wrap items-center gap-2">
+                    <span>
+                      {when(b.created_at)} · Ports {b.ports.join(', ') || '—'}
+                    </span>
+                    {confirmBackup?.file === b.file ? (
+                      <>
+                        <span>
+                          {confirmBackup.kind === 'delete' ? 'Sicherung wirklich löschen?' : 'Wirklich zurückschreiben?'}
+                        </span>
+                        <Button size="sm" variant="destructive" disabled={!!busy}
+                          onClick={() => (confirmBackup.kind === 'delete' ? removeBackup(b.file) : restore(b.file))}>
+                          Ja
+                        </Button>
+                        <Button size="sm" variant="secondary" disabled={!!busy} onClick={() => setConfirmBackup(null)}>
+                          Nein
+                        </Button>
+                      </>
+                    ) : (
+                      <>
+                        <Button size="sm" variant="secondary" disabled={!!busy}
+                          onClick={() => setConfirmBackup({ file: b.file, kind: 'restore' })}>
+                          Zurückschreiben
+                        </Button>
+                        {own.length > 1 && (
+                          <Button size="sm" variant="secondary" disabled={!!busy}
+                            onClick={() => setConfirmBackup({ file: b.file, kind: 'delete' })}>
+                            Löschen
+                          </Button>
+                        )}
+                      </>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
-        )}
-      </CardContent>
-    </Card>
+          {msg && msg.where === 'backup' && (
+            <p className={'text-xs ' + (msg.tone === 'ok' ? 'text-emerald-600' : 'text-destructive')}>{msg.text}</p>
+          )}
+        </CardContent>
+      </Card>
+    </>
   )
 }
 
@@ -1143,23 +1156,33 @@ export default function FansPage() {
   }, [load])
 
   return (
-    <div className="space-y-4">
-      <div className="flex items-center gap-2">
+    <div className="flex flex-col gap-4">
+      <div className="order-1 flex items-center gap-2">
         <Button size="sm" variant="secondary" disabled={loading} onClick={load}>
           {loading ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="mr-1.5 h-3.5 w-3.5" />}
           Neu laden
         </Button>
         {error && <span className="text-xs text-destructive">{error}</span>}
       </div>
-      {data?.automation && <TargetRangeCard automation={data.automation} onReload={load} />}
-      {data?.configured && data.session?.test && <TestSession session={data.session} onChanged={load} />}
-      {data && <Credentials configured={!!data.configured} onSaved={load} />}
-      {data?.configured && data.devices.length === 0 && !(data.session?.test && !data.session.active) && (
-        <p className="text-sm text-muted-foreground">Keine Controller im Konto gefunden.</p>
+      {data?.automation && (
+        <div className="order-1">
+          <TargetRangeCard automation={data.automation} onReload={load} />
+        </div>
       )}
-      {data?.session && !data.session.test && data.session.paused_until && (
-        <LiveTakeover until={data.session.paused_until} onDone={load} />
+      {data?.configured && data.session?.test && (
+        <div className="order-1">
+          <TestSession session={data.session} onChanged={load} />
+        </div>
       )}
+      <div className="order-3 flex flex-col gap-4 empty:hidden">
+        {data && <Credentials configured={!!data.configured} onSaved={load} />}
+        {data?.configured && data.devices.length === 0 && !(data.session?.test && !data.session.active) && (
+          <p className="text-sm text-muted-foreground">Keine Controller im Konto gefunden.</p>
+        )}
+        {data?.session && !data.session.test && data.session.paused_until && (
+          <LiveTakeover until={data.session.paused_until} onDone={load} />
+        )}
+      </div>
       {data?.devices.map((dev) => (
         <Controller key={dev.dev_id} dev={dev} backups={data.backups || []} automation={data.automation}
           onReload={load} />
