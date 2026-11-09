@@ -85,11 +85,14 @@ function logicText(lo, hi) {
     'ist, so jede Minute weiter (mindestens Stufe 1); bei ' + (lo - 10) + '–' + (lo - 5) + ' °C bleibt die Stufe; ' +
     'endet ab ' + (lo - 4) + ' °C, zurück auf die Basisstufe. Nach dem Ende von Heiz- oder Kühlmodus 3 min keine ' +
     'Takterhöhung. ' +
-    'Unter ' + lo + ' °C sofort Takt +5 MHz bei ' + (lo - 3) + '–' + (lo - 1) + ' °C, +10 bei ' + (lo - 5) + '–' +
-    (lo - 4) + ' °C, +15 bei ' + (lo - 10) + '–' + (lo - 6) + ' °C, +20 bei ' + (lo - 20) + '–' + (lo - 11) +
+    'Unter ' + lo + ' °C sofort Takt +5 MHz bei ' + (lo - 3) + '–' + (lo - 1) + ' °C, +15 bei ' + (lo - 5) + '–' +
+    (lo - 4) + ' °C, +20 bei ' + (lo - 10) + '–' + (lo - 6) + ' °C, +25 bei ' + (lo - 20) + '–' + (lo - 11) +
     ' °C, +40 bei ' + (lo - 21) + ' °C oder kälter (höchstens 440 MHz); danach keine Takterhöhung für 3 min ' +
-    '(+5, +10) bzw. 2 min (+15, +20, +40). Diese Sperren und die nach Heiz- oder Kühlmodus enden früher ab ' +
-    (lo + 4) + ' °C. Keine Takterhöhung, solange ein Befehl noch nicht übernommen ist. ' +
+    '(+5) bzw. 2 min (+15, +20, +25, +40). Diese Sperren und die nach Heiz- oder Kühlmodus enden früher ab ' +
+    (lo + 4) + ' °C. ' +
+    // the lock after an increase also ends 3 degrees below the temperature at that increase (Nutzer 09.11.)
+    'Die Sperre nach einer Erhöhung endet außerdem, sobald die Chiptemperatur mindestens 3 °C unter der bei der Erhöhung ' +
+    'liegt. Keine Takterhöhung, solange ein Befehl noch nicht übernommen ist. ' +
     'Über ' + hi + ' °C Takt runter: Bereich 1 (' + (hi + 1) + '–' + (hi + 3) + ' °C) −10 / −5 MHz bei ' +
     'einer ZeitImZieltemperatur davor (ununterbrochen in ' + range + ') bis 5 min / über 5 min, ' +
     'Bereich 2 (' + (hi + 4) + '–' + (hi + 6) + ' °C) −20 MHz, Bereich 3 (' + (hi + 7) + '–' + (hi + 9) +

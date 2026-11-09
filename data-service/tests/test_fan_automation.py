@@ -268,15 +268,15 @@ def test_clock_at_most_440(miner):
 # ---------------------------------------------------------------- Takterhöhung unter ZTU (Nutzer 06.11.)
 
 def test_plus_rule_table():
-    """Tabelle der Freigabe mit ZTU 80: 77–79 °C +5 (3 min), 75–76 +10 (3 min), 70–74 +15 (2 min), 60–69 +20 (2 min),
-    bis 59 +40 (2 min)."""
+    """Tabelle der Freigabe mit ZTU 80 (Nutzer 09.11.): 77–79 °C +5 (3 min), 75–76 +15 (2 min), 70–74 +20 (2 min),
+    60–69 +25 (2 min), bis 59 +40 (2 min)."""
     got = {t: fa.plus_rule(80 - t) for t in (80, 79, 77, 76, 75, 74, 70, 69, 60, 59, 30)}
-    assert got == {80: None, 79: (5, 180), 77: (5, 180), 76: (10, 180), 75: (10, 180), 74: (15, 120), 70: (15, 120),
-                   69: (20, 120), 60: (20, 120), 59: (40, 120), 30: (40, 120)}
+    assert got == {80: None, 79: (5, 180), 77: (5, 180), 76: (15, 120), 75: (15, 120), 74: (20, 120), 70: (20, 120),
+                   69: (25, 120), 60: (25, 120), 59: (40, 120), 30: (40, 120)}
 
 
-@pytest.mark.parametrize('temp, plus', [(80, 0), (79, 5), (77, 5), (76, 10), (75, 10), (74, 15), (70, 15), (69, 20),
-                                        (60, 20), (59, 40)])
+@pytest.mark.parametrize('temp, plus', [(80, 0), (79, 5), (77, 5), (76, 15), (75, 15), (74, 20), (70, 20), (69, 25),
+                                        (60, 25), (59, 40)])
 def test_increase_at_once_at_the_first_value_below_ztu(miner, temp, plus):
     """Kein 60-s-Warten unter ZTU, keine Tendenzprüfung, kein Beobachtungsfenster: der erste Wert genügt."""
     r = warm(miner, mhz=200)
@@ -299,7 +299,7 @@ def test_increase_text_and_lock_3_min(miner):
     assert r.st['clock_set'] == 310 and miner.clock() == 310
 
 
-@pytest.mark.parametrize('temp, plus, lock_s', [(76, 10, 180), (72, 15, 120), (65, 20, 120), (50, 40, 120)])
+@pytest.mark.parametrize('temp, plus, lock_s', [(76, 15, 120), (72, 20, 120), (65, 25, 120), (50, 40, 120)])
 def test_lock_length_by_the_row_of_the_step(miner, temp, plus, lock_s):
     r = warm(miner, mhz=200)
     r.go(5, temp=temp)
@@ -313,12 +313,12 @@ def test_lock_length_by_the_row_of_the_step(miner, temp, plus, lock_s):
 def test_increase_also_while_rising(miner):
     """Die Tendenz wird nur noch angezeigt: auch bei steigender Chiptemperatur gilt die Takterhöhung."""
     r = warm(miner)
-    r.go(5, temp=70)                                              # +15, Sperre 2 min
-    assert r.st['clock_set'] == 315
+    r.go(5, temp=70)                                              # +20, Sperre 2 min
+    assert r.st['clock_set'] == 320
     r.go(115, temp=lambda r: 70 + int((r.now - T0).total_seconds() // 40))   # steigt langsam
-    assert r.st['clock_set'] == 315 and r.st['tendency'] > 0
+    assert r.st['clock_set'] == 320 and r.st['tendency'] > 0
     r.go(5, temp=73)
-    assert r.st['clock_set'] == 330 and r.st['tendency'] > 0
+    assert r.st['clock_set'] == 340 and r.st['tendency'] > 0
 
 
 def test_locks_after_an_increase_heizmodus_kuehlmodus_end_early_above_ztu_plus_3(miner):
@@ -334,6 +334,101 @@ def test_locks_after_an_increase_heizmodus_kuehlmodus_end_early_above_ztu_plus_3
     assert r.st['clock_set'] == 310                               # gleich wieder +5
 
 
+def test_lock_after_an_increase_ends_3_degrees_below_the_temperature_at_the_increase(miner):
+    """Beispiel Nutzer 09.11. (av ja, aw ja), ZTU 80, Basisstufe 3: 10:00 79 °C +5, Sperre bis 10:03 (Bezug 79);
+    10:01 77 °C Sperre läuft; 10:01:30 76 °C Sperre endet, in derselben Runde +15 mit neuer Sperre 2 min (Bezug 76);
+    weiter auf 73 °C: Sperre endet, +20."""
+    r = warm(miner, FakeAC(level=3), level=3)
+    x = r.now
+    r.go(5, temp=79)                                              # 10:00: +5, Sperre bis 10:03
+    assert r.st['clock_set'] == 305 and r.st['raise_t'] == 79
+    assert r.st['locks']['erhoehung'] == (x + timedelta(minutes=3)).isoformat()
+    r.go(55, temp=79)
+    r.go(5, temp=77)                                              # 10:01: 77 °C, Sperre läuft
+    assert r.st['clock_set'] == 305 and r.st['locks']['erhoehung'] == (x + timedelta(minutes=3)).isoformat()
+    r.go(25, temp=77)
+    r.go(5, temp=76)                                              # 10:01:30: 76 °C = 79 − 3, Sperre endet → +15
+    y = r.last
+    until = y + timedelta(minutes=2)
+    assert r.st['clock_set'] == 320 and miner.clock() == 320 and r.st['raise_t'] == 76
+    assert r.st['locks']['erhoehung'] == until.isoformat()
+    assert r.events('takt')[-1]['trigger'] == 'Chiptemperatur 76 °C (ZTU −4): +15 MHz, keine Takterhöhung bis %s' % hm(until)
+    r.go(5, temp=75)
+    r.go(5, temp=74)                                              # 74 °C: noch nicht 3 Grad unter 76
+    assert r.st['clock_set'] == 320 and r.st['locks']['erhoehung'] == until.isoformat()
+    r.go(5, temp=73)                                              # 73 °C = 76 − 3: Sperre endet → +20
+    assert r.st['clock_set'] == 340 and r.st['raise_t'] == 73
+    assert r.st['locks']['erhoehung'] == (r.last + timedelta(minutes=2)).isoformat()
+
+
+def test_lock_after_an_increase_ends_more_than_3_degrees_below(miner):
+    r = warm(miner)
+    r.go(5, temp=79)                                              # +5, Sperre 3 min (Bezug 79)
+    r.go(30, temp=79)
+    assert r.st['clock_set'] == 305
+    r.go(5, temp=75)                                              # 4 Grad darunter: Sperre endet → +15
+    assert r.st['clock_set'] == 320 and r.st['raise_t'] == 75
+    assert r.st['locks']['erhoehung'] == (r.last + timedelta(minutes=2)).isoformat()
+
+
+@pytest.mark.parametrize('key', ['heizmodus', 'kuehlmodus', 'senkung'])
+def test_3_degree_drop_does_not_end_the_other_locks(miner, key):
+    """Nur die Sperre nach einer Erhöhung endet 3 Grad unter der Temperatur bei der Erhöhung (Nutzer 09.11., aw)."""
+    r = warm(miner)
+    r.go(5, temp=79)                                              # +5, Bezug 79
+    until = (r.now + timedelta(minutes=2)).isoformat()
+    r.st['locks'] = dict(r.st['locks'], erhoehung=None, **{key: until})   # statt der Sperre nach der Erhöhung
+    r.go(5, temp=76)
+    r.go(5, temp=73)
+    assert r.st['locks'][key] == until and r.st['clock_set'] == 305 and r.st['raise_t'] == 79
+
+
+def test_lock_after_a_reduction_not_ended_by_a_3_degree_drop(miner):
+    r = warm(miner)
+    r.go(5, temp=79)                                              # +5, Bezug 79
+    r.go(5, temp=86)                                              # über ZTU+3: Sperre nach der Erhöhung endet; −10
+    x, clock = r.last, r.st['clock_set']
+    assert clock == 295 and r.st['locks']['senkung'] == (x + timedelta(minutes=5)).isoformat()
+    r.go(60, temp=76)                                             # 3 Grad unter 79: die Sperre nach der Senkung bleibt
+    assert r.st['locks']['senkung'] == (x + timedelta(minutes=5)).isoformat() and r.st['clock_set'] == clock
+    r.go((x + timedelta(minutes=5) - r.now).total_seconds(), temp=76)
+    assert r.st['clock_set'] == clock
+    r.go(5, temp=76)                                              # 5 min nach der Senkung: +15
+    assert r.st['clock_set'] == clock + 15
+
+
+def test_old_state_without_temperature_at_the_increase_keeps_the_lock(miner):
+    r = warm(miner)
+    x = r.now
+    r.go(5, temp=79)                                              # +5, Sperre bis 3 min danach
+    r.st.pop('raise_t')                                           # Zustand von vor dem Update
+    r.go(5, temp=76)
+    r.go(5, temp=70)
+    assert r.st['clock_set'] == 305 and r.st['locks']['erhoehung'] == (x + timedelta(minutes=3)).isoformat()
+    r.go((x + timedelta(minutes=3) - r.now).total_seconds(), temp=76)
+    assert r.st['clock_set'] == 305
+    r.go(5, temp=76)                                              # 3 min nach der Erhöhung: +15
+    assert r.st['clock_set'] == 320
+
+
+@pytest.mark.parametrize('reason', ['Basisstufe gewählt', 'Automatik ein'])
+def test_temperature_at_the_increase_survives_a_start(miner, reason):
+    r = warm(miner)
+    x = r.now
+    r.go(5, temp=79)                                              # +5, Sperre 3 min, Bezug 79
+    if reason == 'Basisstufe gewählt':
+        r.go(5, temp=79, level_at='neu')
+    else:
+        r.go(5, temp=79, enabled=False)
+        r.go(5, temp=79, enabled=True)
+    assert r.events('start')[-1]['trigger'].startswith(reason) and r.st['clock_set'] == 300
+    r.go(10, temp=78)
+    assert r.st['raise_t'] == 79 and r.st['locks']['erhoehung'] == (x + timedelta(minutes=3)).isoformat()
+    assert r.st['clock_set'] == 300
+    r.go(5, temp=76)                                              # 3 Grad unter 79: Sperre endet → +15
+    assert r.st['clock_set'] == 315
+
+
 def test_no_increase_while_a_command_is_pending(miner):
     """Erst nach der Übernahme des vorigen Befehls."""
     miner.ignore_clock = True
@@ -342,8 +437,8 @@ def test_no_increase_while_a_command_is_pending(miner):
     r.go(60, temp=75)
     assert r.st['clock_set'] == 300 and r.st['pending']['value'] == 300 and r.st['pending']['attempt'] >= 2
     miner.ignore_clock = False
-    r.go(20, temp=75)                                             # erneut gesendet, übernommen: gleich +10
-    assert r.st['clock_set'] == 310 and miner.clock() == 310
+    r.go(20, temp=75)                                             # erneut gesendet, übernommen: gleich +15
+    assert r.st['clock_set'] == 315 and miner.clock() == 315
 
 
 def test_superseded_command_is_not_measured(miner):
@@ -762,8 +857,8 @@ def test_heizmodus_steps_after_more_than_1_min_down_to_1_and_ends_above_ztu_minu
     clock = r.st['clock_set']
     r.go(175, temp=76)                                            # 3 min keine Takterhöhung nach dem Heizmodus
     assert r.st['clock_set'] == clock
-    r.go(5, temp=76)
-    assert r.st['clock_set'] == clock + 10
+    r.go(5, temp=76)                                              # danach +15
+    assert r.st['clock_set'] == clock + 15
 
 
 def test_heizmodus_lock_ends_early_above_ztu_plus_3(miner):
@@ -1379,10 +1474,10 @@ def test_start_hold_after_restart_until_ztu_minus_5(miner):
     r.go(60, temp=26)
     r.go(6 * 60, temp=74)
     assert r.st['clock_set'] == 300                               # langsam warm: keine Takterhöhung
-    r.go(5, temp=75)                                              # ZTU−5 erreicht: Pause vorbei, gleich +10
+    r.go(5, temp=75)                                              # ZTU−5 erreicht: Pause vorbei, gleich +15
     assert not r.st.get('start_hold')
     assert r.events('startpause_ende')[-1]['trigger'] == 'Startpause beendet: 75 °C erreicht (nach 7 min)'
-    assert r.st['clock_set'] == 310
+    assert r.st['clock_set'] == 315
 
 
 def test_start_hold_ends_after_10_min_at_the_latest(miner):
@@ -1391,8 +1486,8 @@ def test_start_hold_ends_after_10_min_at_the_latest(miner):
     miner.elapsed = 10
     r.go(10 * 60 - 5, temp=70)
     assert r.st['clock_set'] == 300
-    r.go(10, temp=70)
-    assert r.st['clock_set'] == 315 and not r.st.get('start_hold')
+    r.go(10, temp=70)                                             # ZTU −10: +20
+    assert r.st['clock_set'] == 320 and not r.st.get('start_hold')
     assert r.events('startpause_ende')[-1]['trigger'] == 'Startpause beendet: 10 min vorbei (Chiptemperatur 70 °C)'
 
 
@@ -1424,8 +1519,8 @@ def test_no_start_hold_when_base_level_is_chosen(miner):
     r = warm(miner)
     r.go(30, temp=82)
     r.kw['level_at'] = 'neu'
-    r.go(10, temp=72)
-    assert not r.events('startpause') and r.st['clock_set'] == 315
+    r.go(10, temp=72)                                             # ZTU −8: gleich +20
+    assert not r.events('startpause') and r.st['clock_set'] == 320
 
 
 def test_start_hold_also_when_another_start_reason_follows_in_the_same_round(miner):
@@ -1448,8 +1543,8 @@ def test_start_hold_follows_the_zieltemperatur(miner):
     assert r.events('startpause')[-1]['trigger'].startswith('Startpause: keine Takterhöhung bis 77 °C, spätestens ')
     r.go(120, temp=76)
     assert r.st.get('start_hold') and r.st['clock_set'] == 300
-    r.go(5, temp=77)
-    assert not r.st.get('start_hold') and r.st['clock_set'] == 310
+    r.go(5, temp=77)                                              # ZTU−5 (82 − 5): +15
+    assert not r.st.get('start_hold') and r.st['clock_set'] == 315
     assert r.events('startpause_ende')[-1]['trigger'] == 'Startpause beendet: 77 °C erreicht (nach 2 min)'
 
 
@@ -1658,7 +1753,7 @@ def test_waiting_mode_switch_caps_the_clock_at_the_current_mode(miner):
     assert len(r.events('modus_wartet')) == 1
     miner.web_down = False
     r.go(10, temp=65)
-    assert r.st['clock_set'] <= 380                               # danach wieder in Schritten, kein Sprung auf 440
+    assert r.st['clock_set'] <= 385                               # danach wieder in Schritten (+25), kein Sprung auf 440
 
 
 # ---------------------------------------------------------------- Fehlerrate: automatischer Neustart (Nutzer 06.11.)

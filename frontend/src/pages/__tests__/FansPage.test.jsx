@@ -278,9 +278,11 @@ describe('FansPage rule texts', () => {
     mockApi(off())
     renderPage()
     const text = await ruleText()
-    expect(text).toContain('Unter 80 °C sofort Takt +5 MHz bei 77–79 °C, +10 bei 75–76 °C, +15 bei 70–74 °C, ' +
-      '+20 bei 60–69 °C, +40 bei 59 °C oder kälter (höchstens 440 MHz); danach keine Takterhöhung für 3 min ' +
-      '(+5, +10) bzw. 2 min (+15, +20, +40). Diese Sperren und die nach Heiz- oder Kühlmodus enden früher ab 84 °C.')
+    expect(text).toContain('Unter 80 °C sofort Takt +5 MHz bei 77–79 °C, +15 bei 75–76 °C, +20 bei 70–74 °C, ' +
+      '+25 bei 60–69 °C, +40 bei 59 °C oder kälter (höchstens 440 MHz); danach keine Takterhöhung für 3 min ' +
+      '(+5) bzw. 2 min (+15, +20, +25, +40). Diese Sperren und die nach Heiz- oder Kühlmodus enden früher ab 84 °C. ' +
+      'Die Sperre nach einer Erhöhung endet außerdem, sobald die Chiptemperatur mindestens 3 °C unter der bei der Erhöhung ' +
+      'liegt. Keine Takterhöhung, solange ein Befehl noch nicht übernommen ist.')
     expect(text).toContain('Über 85 °C Takt runter: Bereich 1 (86–88 °C) −10 / −5 MHz bei einer ' +
       'ZeitImZieltemperatur davor (ununterbrochen in 80–85 °C) bis 5 min / über 5 min, Bereich 2 ' +
       '(89–91 °C) −20 MHz, Bereich 3 (92–94 °C) −20 MHz, Bereich 4 (ab 95 °C) −50 MHz; mindestens 100 MHz.')
