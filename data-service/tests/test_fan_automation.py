@@ -166,6 +166,10 @@ def hm(dt):
     return dt.astimezone(fa.LOCAL_TZ).strftime('%H:%M')
 
 
+def hms(dt):
+    return dt.astimezone(fa.LOCAL_TZ).strftime('%H:%M:%S')
+
+
 # ---------------------------------------------------------------- Start
 
 def test_start_without_learned_value_uses_initial_value(miner):
@@ -215,9 +219,12 @@ def test_click_on_level_starts_again(miner):
     ac = FakeAC(level=5)
     r = started(miner, ac, level=5)
     r.level = 3
-    r.go(10, level_at='neu')                       # runterstufen: Lüfter wartet auf die Übernahme (Nutzer 09.11.)
-    assert miner.clock() == 330 and r.st['fan_target'] == 5 and ac.level == 5
-    r.go(5)                                        # Takt übernommen
+    x = r.now
+    r.go(15, level_at='neu')                       # runterstufen: Lüfter wartet bis unter ZTU, höchstens 1,5 min
+    assert miner.clock() == 330 and r.st['fan_target'] == 5 and ac.level == 5   # Takt übernommen: wartet weiter
+    r.go((x + timedelta(seconds=90) - r.now).total_seconds())
+    assert r.st['fan_target'] == 5
+    r.go(5)                                        # 1,5 min nach dem Start (Nutzer 09.11.)
     assert r.st['fan_target'] == 3 and ac.level == 3
 
 
@@ -723,7 +730,7 @@ def test_plus_15_with_mode_switch_keeps_2_min(miner):
 def test_band_1_reduction_with_mode_switch_locks_10_min(miner):
     """Beispiel Nutzer 09.11. (ZTO 85, Basisstufe 3): 385 MHz mode 02, 2 min in der Zieltemperatur, 86 °C → −10 = 375
     (bleibt mode 02) → 5 min; 10:00 375 → −10 = 365 (< 370) → mode 03 → keine Takterhöhung bis 10:10. Die nächste
-    Senkung in Bereich 1 trotzdem nach 2 min (bf A), ohne Moduswechsel mit ihrer eigenen Sperre von 5 min."""
+    Senkung in Bereich 1 trotzdem nach 2 min (bf A), ohne Moduswechsel: die längere Sperre bis 10:10 bleibt (bj B)."""
     r = warm(miner, FakeAC(level=3), level=3, mhz=385)
     assert miner.level == 2
     r.go(110, temp=82)
@@ -750,15 +757,61 @@ def test_band_1_reduction_with_mode_switch_locks_10_min(miner):
     assert r.st['clock_set'] == 365
     y = r.now
     r.go(5, temp=86)                                              # 10:02: nächste Senkung (365 → 355, mode 03)
-    until = y + timedelta(minutes=5)                              # ohne Moduswechsel: 5 min (bis 10:07)
-    assert r.st['clock_set'] == 355 and r.st['locks']['senkung'] == until.isoformat()
+    assert y == x + timedelta(minutes=2)                          # ohne Moduswechsel: 5 min wären 10:07 –
+    assert r.st['clock_set'] == 355 and r.st['locks']['senkung'] == until.isoformat()   # die Sperre bleibt 10:10
     assert 'sperre_doppelt' not in r.events('takt')[-1]['details']
     assert _log(r, 'Chiptemperatur 86 °C (Bereich 1)')[-1] == \
         'Chiptemperatur 86 °C (Bereich 1): Takt 365 → 355 MHz, keine Takterhöhung bis %s.' % hm(until)
-    r.go((until - r.now).total_seconds(), temp=79)                # unter ZTU: bis 10:07 keine Takterhöhung
+    r.go((until - r.now).total_seconds(), temp=79)                # unter ZTU: bis 10:10 keine Takterhöhung
     assert r.st['clock_set'] == 355
-    r.go(5, temp=79)                                              # 10:07
+    r.go(5, temp=79)                                              # 10:10
     assert r.st['clock_set'] == 360
+
+
+def test_a_later_reduction_never_shortens_the_longer_lock(miner):
+    """bj B (Nutzer 09.11.): 10:00 Bereich 1 mit Moduswechsel → keine Takterhöhung bis 10:10; 10:02 Bereich 1 ohne
+    Moduswechsel → bleibt 10:10 (nicht 10:07), der Eintrag nennt 10:10 ohne „doppelt“; 10:04 Bereich 2 (5 min wären
+    10:09) → bleibt 10:10; ab 10:10 wieder normal."""
+    r = warm(miner, FakeAC(level=3), level=3, mhz=385)
+    r.go(110, temp=82)
+    r.go(5, temp=86)                                              # −10 → 375 (bleibt mode 02)
+    r.go(115, temp=86)
+    x = r.now                                                     # 10:00
+    until = x + timedelta(minutes=10)
+    r.go(5, temp=86)                                              # −10 → 365 → mode 03: bis 10:10
+    assert r.st['clock_set'] == 365 and r.st['locks']['senkung'] == until.isoformat()
+    r.go(115, temp=86)
+    assert r.now == x + timedelta(minutes=2)
+    r.go(5, temp=86)                                              # 10:02: −10 → 355 ohne Moduswechsel
+    assert r.st['clock_set'] == 355 and miner.mode_sets[-1] == 3 and r.st['locks']['senkung'] == until.isoformat()
+    assert 'sperre_doppelt' not in r.events('takt')[-1]['details']
+    assert _log(r, 'Chiptemperatur 86 °C (Bereich 1)')[-1] == \
+        'Chiptemperatur 86 °C (Bereich 1): Takt 365 → 355 MHz, keine Takterhöhung bis %s.' % hm(until)
+    r.go(115, temp=86)
+    assert r.now == x + timedelta(minutes=4)
+    r.go(5, temp=89)                                              # 10:04: Bereich 2 sofort, −20 → 335
+    assert r.st['clock_set'] == 335 and r.st['locks']['senkung'] == until.isoformat()
+    assert _log(r, 'Chiptemperatur 89 °C (Bereich 2)')[-1] == \
+        'Chiptemperatur 89 °C (Bereich 2): Takt 355 → 335 MHz, keine Takterhöhung bis %s.' % hm(until)
+    r.go((until - r.now).total_seconds(), temp=79)                # unter ZTU: bis 10:10 keine Takterhöhung
+    assert r.st['clock_set'] == 335 and r.st['locks']['senkung'] == until.isoformat()
+    r.go(5, temp=79)                                              # 10:10: Sperre vorbei, wieder normal: +5
+    assert r.st['locks']['senkung'] is None and r.st['clock_set'] == 340
+    r.go(300, temp=82)
+    r.go(5, temp=86)                                              # die nächste Senkung: wieder ihre eigenen 5 min
+    assert r.st['clock_set'] == 330
+    assert r.st['locks']['senkung'] == (r.last + timedelta(minutes=5)).isoformat()
+
+
+def test_lock_set_again_ends_later_extends_as_before(miner):
+    """bj B: eine neue Sperre, die später endet, verlängert wie bisher."""
+    r = warm(miner, FakeAC(level=3), level=3)
+    rnd = fa.Round(row(r.st, level=3), r.now, r.ac, r.j)
+    first = rnd.lock('senkung', 600)
+    assert rnd.lock('senkung', 300) == first                      # kürzer: die längere bleibt
+    assert rnd.st['locks']['senkung'] == first.isoformat()
+    later = rnd.lock('senkung', 900)
+    assert later == r.now + timedelta(seconds=900) and rnd.st['locks']['senkung'] == later.isoformat()
 
 
 def test_band_1_reduction_with_waiting_mode_switch_locks_10_min(miner):
@@ -1123,13 +1176,15 @@ def _notes(r, start):
     return [text for _, text in r.st['log'] if text.startswith(start)]
 
 
-def test_base_level_down_fan_waits_until_the_clock_is_taken_over(miner):
-    """3 → 2 bei 82 °C: Lüfter bleibt 3, bis der Starttakt 250 MHz übernommen ist, dann 2; 3 min Taktsperre."""
+def test_base_level_down_fan_waits_1_5_min_the_takeover_does_not_end_it(miner):
+    """3 → 2 bei 82 °C: Lüfter bleibt 3 – auch nachdem der Starttakt 250 MHz übernommen ist (bk ja) –, 1,5 min nach
+    dem Start 2 (bl ja); 3 min Taktsperre."""
     ac = FakeAC(level=3)
     r = warm(miner, ac, level=3)
     miner.ignore_clock = True                                     # Miner übernimmt den Starttakt erst später
     x = _click(r, 2)
     until = x + timedelta(minutes=3)
+    assert hms(x + timedelta(seconds=90)) == '14:01:40'           # Start 14:00:10 (Ortszeit) + 1,5 min
     assert r.st['base_wait'] == {'from': 3, 'to': 2, 'dir': 'runter', 'since': x.isoformat()}
     assert r.st['base_lock'] == {'since': x.isoformat(), 'until': until.isoformat()}
     assert r.st['clock_set'] == 250 and r.st['fan_target'] == 3 and ac.level == 3
@@ -1138,20 +1193,66 @@ def test_base_level_down_fan_waits_until_the_clock_is_taken_over(miner):
     assert start['details']['luefter_wartet'] == {'von': 3, 'auf': 2, 'richtung': 'runter'}
     assert start['details']['taktsperre_bis'] == until.isoformat()
     assert _notes(r, 'Basisstufe gewählt (Stufe 2)') == [
-        'Basisstufe gewählt (Stufe 2): Starttakt 250 MHz (Initialwert Stufe 2), Lüfter bleibt Stufe 3 bis der Takt '
-        'übernommen ist oder unter 80 °C; keine Taktänderung bei 77–88 °C bis %s.' % hm(until)]
+        'Basisstufe gewählt (Stufe 2): Starttakt 250 MHz (Initialwert Stufe 2), Lüfter bleibt Stufe 3 bis 14:01:40 '
+        'oder unter 80 °C; keine Taktänderung bei 77–88 °C bis %s.' % hm(until)]
     r.go(30, temp=82)                                             # erneut gesendet, nicht übernommen
     miner.ignore_clock = False
-    r.go(10, temp=82)                                             # erneut gesendet und übernommen
-    assert r.st['fan_target'] == 3 and ac.level == 3 and r.st['base_wait'] and miner.clock() == 250
+    r.go(15, temp=82)                                             # erneut gesendet und übernommen
+    assert miner.clock() == 250 and not (r.st['pending'] or r.st['queue'] or r.st['settle'])
+    assert r.st['fan_target'] == 3 and ac.level == 3 and r.st['base_wait']   # die Übernahme beendet es nicht
+    r.go((x + timedelta(seconds=90) - r.now).total_seconds(), temp=82)
+    assert r.st['fan_target'] == 3 and ac.level == 3 and r.st['base_wait']
     n = len(r.events('luefter'))
-    r.go(5, temp=82)                                              # Übernahme gemeldet: Lüfter 2
+    r.go(5, temp=82)                                              # 1,5 min nach dem Start: Lüfter 2
+    assert r.last == x + timedelta(seconds=90)
     assert r.st['fan_target'] == 2 and ac.level == 2 and r.st['base_wait'] is None
     fan = r.events('luefter')
-    assert len(fan) == n + 1 and fan[-1]['trigger'] == 'Basisstufe 2: Takt 250 MHz übernommen'
+    assert len(fan) == n + 1 and fan[-1]['trigger'] == 'Basisstufe 2: 1,5 min vorbei'
     assert fan[-1]['fan_old'] == 3 and fan[-1]['fan_new'] == 2
-    assert _notes(r, 'Basisstufe 2: Takt') == ['Basisstufe 2: Takt 250 MHz übernommen: Lüfter Stufe 3 → 2.']
+    assert _notes(r, 'Basisstufe 2: 1,5') == ['Basisstufe 2: 1,5 min vorbei: Lüfter Stufe 3 → 2.']
     assert r.st['base_lock']['until'] == until.isoformat()        # die Taktsperre läuft weiter
+
+
+def test_fan_wait_89_s_still_waiting_90_s_ends(miner):
+    """bl ja: die 1,5 min zählen ab dem Start (base_wait.since): nach 89 s wartet der Lüfter noch, nach 90 s Stufe 2."""
+    ac = FakeAC(level=3)
+    r = warm(miner, ac, level=3)
+    x = _click(r, 2)
+    r.go(80, temp=82)
+    r.now = x + timedelta(seconds=89)
+    r.go(5, temp=82)                                              # 89 s
+    assert r.st['base_wait'] and r.st['fan_target'] == 3 and ac.level == 3
+    r.now = x + timedelta(seconds=90)
+    r.go(5, temp=82)                                              # 90 s
+    assert r.st['base_wait'] is None and r.st['fan_target'] == 2 and ac.level == 2
+    assert r.events('luefter')[-1]['trigger'] == 'Basisstufe 2: 1,5 min vorbei'
+
+
+def test_fan_wait_90_s_also_without_a_valid_temperature(miner):
+    """Die 1,5 min werden in jeder Runde mit Messwert geprüft, auch ohne gültige Temperatur."""
+    ac = FakeAC(level=3)
+    r = warm(miner, ac, level=3)
+    x = _click(r, 2)
+    r.go(85, temp=-273)
+    assert r.st['base_wait'] and ac.level == 3
+    r.go(5, temp=-273)                                            # 90 s
+    assert r.last == x + timedelta(seconds=90) and r.st['base_wait'] is None and ac.level == 2
+
+
+@pytest.mark.parametrize('level, temp, why', [(2, 79, 'Basisstufe 2: Chiptemperatur 79 °C unter 80 °C'),
+                                              (4, 86, 'Basisstufe 4: Chiptemperatur 86 °C über 85 °C')])
+def test_temperature_ends_the_fan_wait_before_the_1_5_min(miner, level, temp, why):
+    """Beispiel-Variante: Start 10:00:05 bei 82 °C, Takt übernommen; 10:00:50 79 °C (runter) bzw. 86 °C (hoch) → Lüfter
+    sofort auf die neue Basisstufe."""
+    ac = FakeAC(level=3)
+    r = warm(miner, ac, level=3)
+    x = _click(r, level)
+    r.go(40, temp=82)
+    assert not (r.st['pending'] or r.st['queue'] or r.st['settle']) and r.st['base_wait'] and ac.level == 3
+    r.go(5, temp=temp)                                            # 45 s nach dem Start
+    assert r.last == x + timedelta(seconds=45)
+    assert r.st['base_wait'] is None and r.st['fan_target'] == level and ac.level == level
+    assert r.events('luefter')[-1]['trigger'] == why
 
 
 def test_base_level_down_below_ztu_fan_at_once_also_during_the_wait(miner):
@@ -1177,21 +1278,27 @@ def test_base_level_down_below_ztu_fan_at_once_also_during_the_wait(miner):
     assert r.events('luefter')[-1]['trigger'] == 'Basisstufe 2: Chiptemperatur 79 °C unter 80 °C'
 
 
-def test_base_level_up_fan_waits_for_mode_and_clock(miner):
-    """3 → 4: erst mode 03, dann 380 MHz; Lüfter bleibt 3 bis zur Übernahme, dann 4."""
+def test_base_level_up_fan_waits_1_5_min_also_after_mode_and_clock(miner):
+    """3 → 4: erst mode 03, dann 380 MHz; Lüfter bleibt 3 auch nach der Übernahme, 1,5 min nach dem Start 4."""
     ac = FakeAC(level=3)
     r = warm(miner, ac, level=3)
     x = _click(r, 4)                                              # Modus 03 gesendet
     assert r.st['base_wait'] == {'from': 3, 'to': 4, 'dir': 'hoch', 'since': x.isoformat()}
     assert miner.mode_sets == [3] and ac.level == 3
     assert _notes(r, 'Basisstufe gewählt (Stufe 4)')[0].endswith(
-        'Lüfter bleibt Stufe 3 bis der Takt übernommen ist oder über 85 °C; keine Taktänderung bei 77–88 °C '
-        'bis %s.' % hm(x + timedelta(minutes=3)))
+        'Lüfter bleibt Stufe 3 bis %s oder über 85 °C; keine Taktänderung bei 77–88 °C bis %s.' % (
+            hms(x + timedelta(seconds=90)), hm(x + timedelta(minutes=3))))
     r.go(5, temp=82)                                              # Modus übernommen, Takt 380 gesendet
     assert miner.clock() == 380 and r.st['fan_target'] == 3 and ac.level == 3
-    r.go(5, temp=82)                                              # Takt übernommen
+    r.go(5, temp=82)                                              # Takt übernommen: der Lüfter wartet weiter
+    assert not (r.st['pending'] or r.st['queue'] or r.st['settle'])
+    assert r.st['fan_target'] == 3 and ac.level == 3 and r.st['base_wait']
+    r.go(75, temp=82)
+    assert r.st['fan_target'] == 3 and r.st['base_wait']
+    r.go(5, temp=82)                                              # 1,5 min nach dem Start
+    assert r.last == x + timedelta(seconds=90)
     assert r.st['fan_target'] == 4 and ac.level == 4 and r.st['base_wait'] is None
-    assert r.events('luefter')[-1]['trigger'] == 'Basisstufe 4: Takt 380 MHz übernommen'
+    assert r.events('luefter')[-1]['trigger'] == 'Basisstufe 4: 1,5 min vorbei'
 
 
 def test_base_level_up_above_zto_fan_at_once(miner):
@@ -1205,13 +1312,14 @@ def test_base_level_up_above_zto_fan_at_once(miner):
 
 def test_kuehlmodus_ends_at_the_click_fan_stays_fan_modes_rest_while_it_waits(miner):
     """Kühlmodus (Lüfter 4 bei Basisstufe 3), Klick 2: Ende ohne Sperre, Lüfter bleibt 4, kein Kühlmodus während
-    des Wartens (auch über ZTO+2); nach der Übernahme Lüfter 2, in derselben Runde Kühlmodus 2 +1 = 3."""
+    des Wartens (auch über ZTO+2, auch nach der Übernahme); nach 1,5 min Lüfter 2, in derselben Runde Kühlmodus
+    2 +1 = 3."""
     ac = FakeAC(level=3)
     r = warm(miner, ac, level=3)
     r.go(5, temp=88)                                              # Kühlmodus +1: Lüfter 4
     assert r.st['cool'] and ac.level == 4
     miner.ignore_clock = True
-    _click(r, 2, temp=88)
+    x = _click(r, 2, temp=88)
     end = r.events('kuehlmodus_ende')[-1]
     assert end['trigger'] == 'Kühlmodus beendet: Start (Basisstufe gewählt (Stufe 2)), Lüfter bleibt Stufe 4'
     assert end['fan_old'] == 4 and end['fan_new'] == 4 and not r.st['locks']['kuehlmodus']
@@ -1221,10 +1329,15 @@ def test_kuehlmodus_ends_at_the_click_fan_stays_fan_modes_rest_while_it_waits(mi
     r.go(30, temp=88)                                             # über ZTO+2: der Kühlmodus ruht
     assert r.st['cool'] is None and ac.writes == writes and len(r.events('kuehlmodus')) == cools
     miner.ignore_clock = False
-    r.go(15, temp=88)                                             # erneut gesendet, übernommen
+    r.go(15, temp=88)                                             # erneut gesendet, übernommen: wartet weiter
+    assert miner.clock() == 250 and not (r.st['pending'] or r.st['queue'] or r.st['settle'])
+    assert r.st['base_wait'] and r.st['cool'] is None and ac.writes == writes
+    r.go((x + timedelta(seconds=90) - r.now).total_seconds(), temp=88)
+    assert r.st['base_wait'] and r.st['cool'] is None and ac.writes == writes
+    r.go(5, temp=88)                                              # 1,5 min nach dem Start
     assert r.st['base_wait'] is None and r.st['cool'] == {'since': r.last.isoformat(), 'plus': 1}
     assert r.st['fan_target'] == 3 and ac.level == 3 and ac.writes == writes + [3]
-    assert _notes(r, 'Basisstufe 2: Takt') == ['Basisstufe 2: Takt 250 MHz übernommen: Lüfter Stufe 4 → 2.']
+    assert _notes(r, 'Basisstufe 2: 1,5') == ['Basisstufe 2: 1,5 min vorbei: Lüfter Stufe 4 → 2.']
     ev = r.events('kuehlmodus')[-1]
     assert ev['trigger'] == 'Kühlmodus: Chiptemperatur 88 °C über 87 °C, Lüfter Stufe 3 (Basisstufe 2 +1)'
     assert ev['fan_old'] == 2 and ev['fan_new'] == 3
@@ -1236,7 +1349,7 @@ def test_heizmodus_ends_at_the_click_fan_stays_fan_modes_rest_while_it_waits(min
     r.go(65, temp=65)                                             # Heizmodus: Lüfter 2
     assert r.st['heat'] and ac.level == 2
     miner.ignore_clock = True
-    _click(r, 4, temp=65)                                         # 3 → 4: Modus 03 zuerst
+    x = _click(r, 4, temp=65)                                     # 3 → 4: Modus 03 zuerst
     end = r.events('heizmodus_ende')[-1]
     assert end['trigger'] == 'Heizmodus beendet: Start (Basisstufe gewählt (Stufe 4)), Lüfter bleibt Stufe 2'
     assert end['fan_old'] == 2 and end['fan_new'] == 2 and not r.st['locks']['heizmodus']
@@ -1245,9 +1358,14 @@ def test_heizmodus_ends_at_the_click_fan_stays_fan_modes_rest_while_it_waits(min
     r.go(60, temp=65)                                             # Takt 380 nicht übernommen: Heizmodus ruht
     assert r.st['heat'] is None and ac.writes == writes and len(r.events('heizmodus')) == heats
     miner.ignore_clock = False
-    r.go(10, temp=65)
+    r.go(10, temp=65)                                             # übernommen: der Lüfter wartet weiter
+    assert any(e['clock_new'] == 380 and e['takeover_state'] == 'gemessen' for e in r.events('takt'))
+    assert r.st['base_wait'] and r.st['heat'] is None and ac.writes == writes
+    r.go((x + timedelta(seconds=90) - r.now).total_seconds(), temp=65)
+    assert r.st['base_wait'] and r.st['heat'] is None and ac.writes == writes
+    r.go(5, temp=65)                                              # 1,5 min nach dem Start
     assert r.st['base_wait'] is None and r.st['fan_target'] == 4 and ac.level == 4
-    assert r.events('luefter')[-1]['trigger'] == 'Basisstufe 4: Takt 380 MHz übernommen'
+    assert r.events('luefter')[-1]['trigger'] == 'Basisstufe 4: 1,5 min vorbei'
     r.go(60, temp=65)                                             # danach wieder normal: Heizmodus nach mehr als 1 min
     assert not r.st['heat'] and ac.level == 4
     r.go(5, temp=65)
@@ -1273,7 +1391,7 @@ def test_same_level_again_fan_at_once_no_new_lock_running_lock_stays(miner):
     ac = FakeAC(level=3)
     r = warm(miner, ac, level=3)
     x = _click(r, 2)
-    r.go(5, temp=82)                                              # Takt übernommen: Lüfter 2
+    r.go(90, temp=82)                                             # 1,5 min nach dem Start: Lüfter 2
     lock = r.st['base_lock']
     assert ac.level == 2 and lock['until'] == (x + timedelta(minutes=3)).isoformat()
     r.go(5, temp=88)                                              # Kühlmodus: Lüfter 3
@@ -1297,6 +1415,79 @@ def test_restart_during_the_wait_fan_at_once_lock_stays(miner):
     r.go(5, temp=82)
     assert r.events('start')[-1]['trigger'] == 'Neustart des Miners'
     assert r.st['base_wait'] is None and r.st['fan_target'] == 2 and ac.level == 2 and r.st['base_lock'] == lock
+
+
+def test_delayed_start_fan_modes_rest_until_the_start_then_1_5_min(miner):
+    """bi ja: Klick 3 → 2 bei 82 °C, der Miner meldet keine Taktpunkte – der Start wartet; Lüfter bleibt 3, bei 88 °C
+    kein Kühlmodus. Mit den Punkten läuft der Start, die 1,5 min zählen ab dann."""
+    ac = FakeAC(level=3)
+    r = warm(miner, ac, level=3)
+    starts, writes = len(r.events('start')), list(ac.writes)
+    pts, miner.points, miner.ignore_clock = miner.points, [], True
+    _click(r, 2)                                                  # keine Taktpunkte: der Start wartet
+    assert len(r.events('start')) == starts and r.st['start_reason'] == 'Basisstufe gewählt (Stufe 2)'
+    assert r.st['base_change'] == {'from': 3, 'to': 2} and r.st.get('base_wait') is None
+    assert r.st['fan_target'] == 3 and ac.writes == writes        # kein Basismodus: Lüfter bleibt 3
+    r.go(30, temp=88)                                             # über ZTO+2: kein Kühlmodus
+    assert not r.st.get('cool') and not r.events('kuehlmodus') and r.st['fan_target'] == 3 and ac.writes == writes
+    miner.points, miner.ignore_clock = pts, False
+    y = r.now
+    r.go(5, temp=82)                                              # Punkte wieder da: Start, Lüfter wartet ab jetzt
+    assert len(r.events('start')) == starts + 1 and r.events('start')[-1]['trigger'] == 'Basisstufe gewählt (Stufe 2)'
+    assert r.st['base_wait'] == {'from': 3, 'to': 2, 'dir': 'runter', 'since': y.isoformat()}
+    assert r.st['base_lock']['since'] == y.isoformat() and r.st['fan_target'] == 3
+    assert _notes(r, 'Basisstufe gewählt (Stufe 2)')[-1].endswith(
+        'Lüfter bleibt Stufe 3 bis %s oder unter 80 °C; keine Taktänderung bei 77–88 °C bis %s.' % (
+            hms(y + timedelta(seconds=90)), hm(y + timedelta(minutes=3))))
+    r.go(85, temp=82)
+    assert r.st['base_wait'] and ac.writes == writes
+    r.go(5, temp=82)                                              # 1,5 min nach dem Start
+    assert r.last == y + timedelta(seconds=90)
+    assert r.st['base_wait'] is None and r.st['fan_target'] == 2 and ac.level == 2
+
+
+def test_running_wait_does_not_end_while_the_next_start_waits(miner):
+    """bi ja: Lüfter wartet nach 3 → 2; Klick 1 ohne Taktpunkte – der Start wartet: auch nach den 1,5 min des
+    ersten Starts bleibt der Lüfter 3. Mit den Punkten läuft der Start und ersetzt das Warten."""
+    ac = FakeAC(level=3)
+    r = warm(miner, ac, level=3)
+    x = _click(r, 2)
+    assert r.st['base_wait'] == {'from': 3, 'to': 2, 'dir': 'runter', 'since': x.isoformat()} and ac.level == 3
+    r.go(15, temp=82)
+    writes = list(ac.writes)
+    pts, miner.points = miner.points, []
+    _click(r, 1, at='neu2')                                       # keine Taktpunkte: der Start wartet
+    assert r.st['start_reason'] == 'Basisstufe gewählt (Stufe 1)' and r.st['base_change'] == {'from': 2, 'to': 1}
+    r.go((x + timedelta(seconds=95) - r.now).total_seconds(), temp=82)
+    assert r.last == x + timedelta(seconds=90)                    # 1,5 min nach dem ersten Start
+    assert r.st['fan_target'] == 3 and ac.writes == writes and r.st['base_wait']['to'] == 2
+    assert not _notes(r, 'Basisstufe 2: 1,5')
+    miner.points = pts
+    y = r.now
+    r.go(5, temp=82)                                              # Punkte wieder da: Start, Lüfter wartet ab jetzt
+    assert r.events('start')[-1]['trigger'] == 'Basisstufe gewählt (Stufe 1)'
+    assert r.st['base_wait'] == {'from': 2, 'to': 1, 'dir': 'runter', 'since': y.isoformat()}
+    assert r.st['fan_target'] == 3 and ac.writes == writes
+
+
+def test_delayed_start_replaced_by_another_start_reason_as_before(miner):
+    """Ersetzt ein anderer Startgrund (hier Neustart des Miners) den wartenden Start der Basisstufe, gilt er wie
+    bisher: die Lüftermodi gelten wieder, Lüfter auf die Basisstufe, kein Warten, keine Taktsperre."""
+    ac = FakeAC(level=3)
+    r = warm(miner, ac, level=3)
+    pts, miner.points, miner.ignore_clock = miner.points, [], True
+    _click(r, 2)
+    assert r.st['fan_target'] == 3 and ac.level == 3
+    miner.elapsed = 10                                            # Neustart des Miners, noch ohne Taktpunkte
+    r.go(5, temp=82)
+    assert r.st['start_reason'] == 'Neustart des Miners' and r.st['fan_target'] == 2 and ac.level == 2
+    miner.points, miner.ignore_clock = pts, False
+    r.go(5, temp=82)                                              # der Start läuft
+    start = r.events('start')[-1]
+    assert start['trigger'] == 'Neustart des Miners' and 'luefter_wartet' not in start['details']
+    assert 'taktsperre_bis' not in start['details'] and 'base_change' not in r.st
+    assert r.st.get('base_wait') is None and r.st.get('base_lock') is None
+    assert r.st['fan_target'] == 2 and ac.level == 2
 
 
 def test_old_state_without_base_seen_as_before(miner):

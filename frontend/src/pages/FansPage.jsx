@@ -116,10 +116,11 @@ function logicText(lo, hi) {
 function startText(lo, hi) {
   return 'Start (Stufenwahl, Einschalten, Neustart, nach Wartung oder Over Hot): Heiz- und Kühlmodus enden ohne ' +
     'Sperre, Lüfter auf die Basisstufe; ' +
-    // a change of the Basisstufe: the fan waits for the clock or ZTU/ZTO, 3 min no clock change at ZTU−3–ZTO+3
-    // (Nutzer 09.11.)
-    'bei einer Änderung der Basisstufe Lüfter erst runter, sobald der Takt übernommen ist oder unter ' + lo +
-    ' °C, erst hoch, sobald der Takt übernommen ist oder über ' + hi + ' °C (Heiz- und Kühlmodus ruhen so lange), ' +
+    // a change of the Basisstufe: the fan waits for ZTU/ZTO or 1.5 min from the start, 3 min no clock change at
+    // ZTU−3–ZTO+3 (Nutzer 09.11.)
+    'bei einer Änderung der Basisstufe Lüfter erst runter, sobald die Chiptemperatur unter ' + lo + ' °C ist oder ' +
+    'nach 1,5 min, erst hoch, sobald sie über ' + hi + ' °C ist oder nach 1,5 min (Heiz- und Kühlmodus ruhen so ' +
+    'lange), ' +
     'und ab der Wahl 3 min keine Taktänderung bei ' + (lo - 3) + '–' + (hi + 3) + ' °C (endet früher, sobald die ' +
     'Chiptemperatur diesen Bereich verlässt); Starttakt = Lernwert der Basisstufe, sonst der der nächstgelegenen ' +
     'Zieltemperatur, sonst Stufe 1 = 170, 2 = 250, 3 = 330, 4 = 380, 5 = 400, 6 = 420, ab 7 = 440 MHz. ' +
@@ -326,6 +327,9 @@ const runs = (until) => Boolean(until) && Date.parse(until) > Date.now()
 // Basisstufe 1 (Nutzer 09.11.): after a −5 MHz reduction (state.cut5_at) no clock increase at ZTU−2–ZTU−1 for 30 min
 const CUT5_BLOCK_MS = 30 * 60000
 
+// after a change of the Basisstufe the fan waits at most 1.5 min from the start (state.base_wait.since, Nutzer 09.11.)
+const BASE_WAIT_MS = 90 * 1000
+
 /** What runs right now in the regulation (Nutzer 06.11.): command being taken over, the fan waiting after a change of
  * the Basisstufe (Nutzer 09.11.), Startpause, the lock of clock changes after a change of the Basisstufe (Nutzer
  * 09.11.), the clock-increase locks (latest end with the reasons), the block after −5 at Basisstufe 1 (Nutzer 09.11.),
@@ -340,10 +344,11 @@ function runningItems(st, lo, hi, base) {
   const locks = Object.keys(LOCK_REASON).filter((key) => runs(st.locks?.[key]))
   const lockEnd = locks.length ? locks.map((key) => st.locks[key]).reduce((a, b) => (Date.parse(b) > Date.parse(a) ? b : a)) : null
   const cut5End = st.cut5_at && base === 1 ? Date.parse(st.cut5_at) + CUT5_BLOCK_MS : NaN
-  // after a change of the Basisstufe (Nutzer 09.11.): the fan goes down once the clock is taken over or below ZTU,
-  // up once the clock is taken over or above ZTO; 3 min no clock change at ZTU−3–ZTO+3 (state.base_wait/base_lock)
+  // after a change of the Basisstufe (Nutzer 09.11.): the fan goes down below ZTU, up above ZTO, at the latest 1.5 min
+  // after the start (HH:MM:SS); 3 min no clock change at ZTU−3–ZTO+3 (state.base_wait/base_lock)
   const wait = st.base_wait
-    ? 'Lüfter wartet: Stufe ' + st.base_wait.to + ', sobald der Takt übernommen ist oder ' +
+    ? 'Lüfter wartet: Stufe ' + st.base_wait.to + ' bis ' + new Date(Date.parse(st.base_wait.since) + BASE_WAIT_MS)
+      .toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit', second: '2-digit' }) + ' oder ' +
       (st.base_wait.dir === 'hoch' ? 'über ' + hi : 'unter ' + lo) + ' °C'
     : null
   const baseLock = runs(st.base_lock?.until)

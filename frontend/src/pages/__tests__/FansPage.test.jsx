@@ -217,14 +217,34 @@ describe('FansPage status: what runs (Nutzer 06.11.)', () => {
   const based = (state, low = 80, high = 85) => ({ ...automation({ zb: [low, high], ...state }), target_low: low,
     target_high: high })
 
-  it('Basisstufe runter / hoch: the fan waits for the clock or ZTU / ZTO (Nutzer 09.11.)', async () => {
+  // the latest end of the fan wait: 1.5 min after the start (base_wait.since) as HH:MM:SS (Nutzer 09.11.)
+  const waitEnd = (since) => new Date(Date.parse(since) + 90000)
+    .toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+
+  it('Basisstufe runter / hoch: the fan waits for ZTU / ZTO or 1.5 min from the start (Nutzer 09.11.)', async () => {
+    const since = inMin(-1)
     for (const [wait, text] of [
-      [{ from: 3, to: 2, dir: 'runter', since: inMin(-1) },
-        'Lüfter wartet: Stufe 2, sobald der Takt übernommen ist oder unter 80 °C'],
-      [{ from: 3, to: 4, dir: 'hoch', since: inMin(-1) },
-        'Lüfter wartet: Stufe 4, sobald der Takt übernommen ist oder über 85 °C'],
+      [{ from: 3, to: 2, dir: 'runter', since },
+        'Lüfter wartet: Stufe 2 bis ' + waitEnd(since) + ' oder unter 80 °C'],
+      [{ from: 3, to: 4, dir: 'hoch', since },
+        'Lüfter wartet: Stufe 4 bis ' + waitEnd(since) + ' oder über 85 °C'],
     ]) {
       mockApi(based({ base_wait: wait }))
+      const view = renderPage()
+      expect(await screen.findByText(text)).toBeInTheDocument()
+      expect(screen.queryByText(/sobald der Takt übernommen/)).not.toBeInTheDocument()
+      view.unmount()
+    }
+  })
+
+  it('the fan wait: start 10:00:05 → bis 10:01:35, with the current ZTU / ZTO (Nutzer 09.11.)', async () => {
+    const since = new Date(2026, 10, 9, 10, 0, 5).toISOString()
+    for (const [wait, low, high, text] of [
+      [{ from: 3, to: 2, dir: 'runter', since }, 80, 85, 'Lüfter wartet: Stufe 2 bis 10:01:35 oder unter 80 °C'],
+      [{ from: 3, to: 4, dir: 'hoch', since }, 80, 85, 'Lüfter wartet: Stufe 4 bis 10:01:35 oder über 85 °C'],
+      [{ from: 4, to: 1, dir: 'runter', since }, 82, 86, 'Lüfter wartet: Stufe 1 bis 10:01:35 oder unter 82 °C'],
+    ]) {
+      mockApi(based({ base_wait: wait }, low, high))
       const view = renderPage()
       expect(await screen.findByText(text)).toBeInTheDocument()
       view.unmount()
@@ -245,12 +265,13 @@ describe('FansPage status: what runs (Nutzer 06.11.)', () => {
   it('the fan wait after the command, the lock after a change of the Basisstufe before the other locks', async () => {
     const until = inMin(2)
     const erhoehung = inMin(1)
+    const since = inMin(-1)
     mockApi(based({ pending: { kind: 'takt', value: 250, attempt: 1 },
-      base_wait: { from: 3, to: 2, dir: 'runter', since: inMin(-1) },
-      base_lock: { since: inMin(-1), until }, locks: { erhoehung } }))
+      base_wait: { from: 3, to: 2, dir: 'runter', since },
+      base_lock: { since, until }, locks: { erhoehung } }))
     renderPage()
-    expect(await screen.findByText('Takt 250 MHz wird übernommen · Lüfter wartet: Stufe 2, sobald der Takt ' +
-      'übernommen ist oder unter 80 °C · keine Taktänderung bei 77–88 °C bis ' + hhmm(until) + ' (Basisstufe ' +
+    expect(await screen.findByText('Takt 250 MHz wird übernommen · Lüfter wartet: Stufe 2 bis ' + waitEnd(since) +
+      ' oder unter 80 °C · keine Taktänderung bei 77–88 °C bis ' + hhmm(until) + ' (Basisstufe ' +
       'gewählt) · keine Takterhöhung bis ' + hhmm(erhoehung) + ' (nach Erhöhung)')).toBeInTheDocument()
   })
 
@@ -366,17 +387,18 @@ describe('FansPage rule texts', () => {
       'Fehlerrate unter 5 %, bei Lüfterstufe 1 unter 7 % (Mittel der 15 min).')
   })
 
-  it('start after a change of the Basisstufe: fan waits for the clock or ZTU / ZTO, 3 min no clock change ' +
+  it('start after a change of the Basisstufe: fan waits for ZTU / ZTO or 1.5 min, 3 min no clock change ' +
     '(Nutzer 09.11.)', async () => {
     for (const [low, high, nums] of [[80, 85, ['80', '85', '77–88']], [82, 86, ['82', '86', '79–89']]]) {
       mockApi({ ...off(), target_low: low, target_high: high })
       const view = renderPage()
       const start = (await screen.findByText(/^Start \(Stufenwahl/)).textContent
       expect(start).toContain('Heiz- und Kühlmodus enden ohne Sperre, Lüfter auf die Basisstufe; bei einer Änderung ' +
-        'der Basisstufe Lüfter erst runter, sobald der Takt übernommen ist oder unter ' + nums[0] + ' °C, erst hoch, ' +
-        'sobald der Takt übernommen ist oder über ' + nums[1] + ' °C (Heiz- und Kühlmodus ruhen so lange), und ab ' +
-        'der Wahl 3 min keine Taktänderung bei ' + nums[2] + ' °C (endet früher, sobald die Chiptemperatur diesen ' +
-        'Bereich verlässt); Starttakt = Lernwert der Basisstufe')
+        'der Basisstufe Lüfter erst runter, sobald die Chiptemperatur unter ' + nums[0] + ' °C ist oder nach 1,5 min, ' +
+        'erst hoch, sobald sie über ' + nums[1] + ' °C ist oder nach 1,5 min (Heiz- und Kühlmodus ruhen so lange), ' +
+        'und ab der Wahl 3 min keine Taktänderung bei ' + nums[2] + ' °C (endet früher, sobald die Chiptemperatur ' +
+        'diesen Bereich verlässt); Starttakt = Lernwert der Basisstufe')
+      expect(start).not.toContain('sobald der Takt übernommen')
       view.unmount()
     }
   })

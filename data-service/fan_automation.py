@@ -19,7 +19,8 @@ Taktsperre, Obergrenzen, Ertrags-Prüfung, Temperatur-Test and Takt-Messung are 
     ends as soon as t is 3 Grad below the temperature at that increase (Nutzer 09.11.); the lock after a reduction
     (5 min) never ends early. Needs the +5 (d 1–3) or a reduction in Bereich 1 a mode switch (also one that waits for
     the settings page), its lock doubles: 6 instead of 3 min (the early ends stay), 10 instead of 5 min (the next
-    reduction still after 2 min) (Nutzer 09.11.). At Basisstufe 1, for 30 min
+    reduction still after 2 min) (Nutzer 09.11.). A lock set again never shortens a running one of the same kind: the
+    longer lock stays (Nutzer 09.11., bj B). At Basisstufe 1, for 30 min
     after a reduction by −5 MHz no increase at ZTU−2..ZTU−1 (a start ends this; Nutzer 09.11.).
   * Clock reduction above ZTO, Bereich 1 = ZTO+1..+3, 2 = +4..+6, 3 = +7..+9, 4 = from +10: Bereich 1 −15/−10/−5 MHz
     by the ZeitImZieltemperatur (time in ZTU..ZTO before t first exceeded ZTO: < 60 s / 60–300 s / > 300 s), 2 and 3
@@ -32,8 +33,9 @@ Taktsperre, Obergrenzen, Ertrags-Prüfung, Temperatur-Test and Takt-Messung are 
     (equally far: the cooler one), else the initial value (level 1 = 170, 2 = 250, 3 = 330, 4 = 380, 5 = 400,
     6 = 420, from 7 = 440 MHz). Heiz- and Kühlmodus end without a lock, fan = Basisstufe.
     Change of the Basisstufe (a click on another level than before; Nutzer 09.11.): the fan waits – down only once
-    the set clock is taken over or t < ZTU, up only once it is taken over or t > ZTO; meanwhile the Heiz- and
-    Kühlmodus rest (a running one ends at the start without moving the fan). And the Taktsperre: for 3 min no clock
+    t < ZTU or 1.5 min after the start, up only once t > ZTO or 1.5 min after the start (the takeover of the set clock
+    does not end it); meanwhile – and already while such a start still waits, e.g. for the clock points – the Heiz-
+    and Kühlmodus rest (a running one ends at the start without moving the fan). And the Taktsperre: for 3 min no clock
     increase and no reduction at ZTU−3..ZTO+3; it ends for good as soon as t leaves this range. Every other start and
     a click on the same level again: fan = Basisstufe at once, no new lock (a running one stays).
   * Startpause after a start with cold chips (Neustart, Wartung, Over Hot): no clock increase until ZTU−5, at most
@@ -102,8 +104,9 @@ CUT5_MHZ = 5                  # Basisstufe 1: after a reduction by exactly −5 
 CUT5_BLOCK_S = 30 * 60        # ... 30 min no clock increase ...
 CUT5_BLOCK_D = 2              # ... at ZTU−2 and ZTU−1 (from ZTU−3 as before); a start ends it (Nutzer 09.11.)
 CUT5_BLOCK_BASE = 1
-# --- change of the Basisstufe (Nutzer 09.11.: az A, ba A, bb nein, bc nein, bd A)
+# --- change of the Basisstufe (Nutzer 09.11.: az A, ba A, bb nein, bc nein, bd A, bk ja, bl ja, bi ja)
 BASE_REASON = 'Basisstufe gewählt (Stufe %d)'   # start reason of a click on a Basisstufe
+BASE_WAIT_S = 90              # Lüfter wartet: at most 1.5 min from the start (base_wait.since), then the new level
 BASE_LOCK_S = 3 * 60          # Taktsperre from the start: 3 min no clock increase and no reduction ...
 BASE_LOCK_D = 3               # ... at ZTU−3..ZTO+3; a valid t outside ends it for good
 START_CLOCK = {1: 170, 2: 250, 3: 330, 4: 380, 5: 400, 6: 420, 7: 440, 8: 440, 9: 440, 10: 440}   # Nutzer 28.10.
@@ -168,6 +171,11 @@ def _age(value, now):
 def _hm(dt):
     """Local time HH:MM for protocol texts."""
     return dt.astimezone(LOCAL_TZ).strftime('%H:%M')
+
+
+def _hms(dt):
+    """Local time HH:MM:SS for protocol texts (end of the fan wait, Nutzer 09.11.)."""
+    return dt.astimezone(LOCAL_TZ).strftime('%H:%M:%S')
 
 
 def _rel(n):
@@ -335,8 +343,9 @@ class Round:
     start_reason (a start is due), fw_dev (Takt laut Miner weicht ab seit), dh_since (Fehlerrate über 10 % seit),
     base_seen (Basisstufe of the last round with a reading), base_change ({'from', 'to'}: a click on a Basisstufe for
     the start), base_wait (Lüfter wartet after a change of the Basisstufe: {'from', 'to', 'dir': 'runter'|'hoch',
-    'since'}, null otherwise), base_lock (Taktsperre after a change of the Basisstufe: {'since', 'until'}, null when
-    not running; Nutzer 09.11.). The shown phase is derived from heat/cool at the end of the round."""
+    'since': the start, the 1.5 min count from it}, null otherwise), base_lock (Taktsperre after a change of the
+    Basisstufe: {'since', 'until'}, null when not running; Nutzer 09.11.). The shown phase is derived from heat/cool
+    at the end of the round."""
 
     def __init__(self, row, now, ac, journal):
         self.row, self.now, self.ac, self.j = row, now, ac, journal
@@ -484,25 +493,24 @@ class Round:
         excursion above ZTO starts anew. Locks, cut_at and the ZeitImZieltemperatur stay (Nutzer 06.11.); the block
         after a reduction by −5 MHz (cut5_at) ends (Nutzer 09.11.). Every start ends a running fan wait.
         Change of the Basisstufe (reason Basisstufe gewählt and another level than in the round before; Nutzer
-        09.11.): the fan waits (base_wait) – down until the set clock is taken over or t < ZTU, up until it is taken
-        over or t > ZTO (already true now: no wait); a running Heiz-/Kühlmodus ends without moving the fan; nothing to
-        wait for when the fan target already is the new Basisstufe. And the Taktsperre (base_lock) for 3 min (also
-        replacing a running one). Every other start and a click on the same level again: fan = Basisstufe at once, no
-        new lock and a running one stays (bc nein)."""
+        09.11.): the fan waits (base_wait) – down until t < ZTU, up until t > ZTO, at most 1.5 min from this start
+        (already true now: no wait; the takeover of the set clock does not end it, bk ja, bl ja); a running
+        Heiz-/Kühlmodus ends without moving the fan; nothing to wait for when the fan target already is the new
+        Basisstufe. And the Taktsperre (base_lock) for 3 min (also replacing a running one). Every other start and
+        a click on the same level again: fan = Basisstufe at once, no new lock and a running one stays (bc nein)."""
         st = self.st
         target, source = self.start_clock()
         target = min(max(target, CLOCK_MIN), CLOCK_MAX)
         old_fan, old_clock = st.get('fan_target'), st.get('clock_set')
         change = st.pop('base_change', None) or {}       # popped by every start; acts only at a Basisstufe start
-        changed = (reason == BASE_REASON % self.base and change.get('to') == self.base
-                   and change.get('from') is not None and change['from'] != self.base)
+        changed = self.base_changed(reason, change)
         wait, fan_why, lock_until = None, None, None
         if changed:
             lock_until = self.now + timedelta(seconds=BASE_LOCK_S)
             if old_fan != self.base:
                 wait = {'from': change['from'], 'to': self.base,
                         'dir': 'runter' if self.base < change['from'] else 'hoch', 'since': _iso(self.now)}
-                fan_why = self.base_wait_why(wait, False)
+                fan_why = self.base_wait_why(wait)
                 if fan_why:
                     wait = None                          # t already below ZTU (down) / above ZTO (up): fan at once
         self.drop_pending('Start (%s)' % reason)
@@ -525,8 +533,9 @@ class Round:
         fan_text = 'Lüfter Stufe %d' % st['fan_target']
         if wait:
             details['luefter_wartet'] = {'von': wait['from'], 'auf': wait['to'], 'richtung': wait['dir']}
-            fan_text = 'Lüfter bleibt Stufe %d bis der Takt übernommen ist oder %s' % (
-                st['fan_target'], 'unter %d °C' % self.lo if wait['dir'] == 'runter' else 'über %d °C' % self.hi)
+            fan_text = 'Lüfter bleibt Stufe %d bis %s oder %s' % (
+                st['fan_target'], _hms(self.now + timedelta(seconds=BASE_WAIT_S)),
+                'unter %d °C' % self.lo if wait['dir'] == 'runter' else 'über %d °C' % self.hi)
         if lock_until:
             details['taktsperre_bis'] = _iso(lock_until)
             fan_text += '; keine Taktänderung bei %d–%d °C bis %s' % (self.lo - BASE_LOCK_D, self.hi + BASE_LOCK_D,
@@ -546,28 +555,37 @@ class Round:
             self.note(text + '.')
 
     # --- Lüfter wartet after a change of the Basisstufe (Nutzer 09.11.)
-    def base_wait_why(self, wait, taken):
-        """Why the waiting fan may go to the new Basisstufe now, else None: the set clock is taken over (taken), or
-        with a valid temperature t < ZTU (down) / t > ZTO (up)."""
+    def base_changed(self, reason, change):
+        """A start for a change of the Basisstufe: reason Basisstufe gewählt and another level than in the round before
+        (change = base_change {'from', 'to'}; without 'from', as in older states, no change; Nutzer 09.11.)."""
+        change = change or {}
+        return (reason == BASE_REASON % self.base and change.get('to') == self.base
+                and change.get('from') is not None and change['from'] != self.base)
+
+    def base_wait_why(self, wait):
+        """Why the waiting fan may go to the new Basisstufe now, else None: with a valid temperature t < ZTU (down) /
+        t > ZTO (up), or 1.5 min since the start (wait['since']). The takeover of the set clock does not end the wait
+        any more (Nutzer 09.11., bk ja, bl ja)."""
         t, to = self.t, wait['to']
-        if taken:
-            return 'Basisstufe %d: Takt %d MHz übernommen' % (to, int(round(self.st.get('clock_set') or 0)))
         if t is not None and wait['dir'] == 'runter' and t < self.lo:
             return 'Basisstufe %d: Chiptemperatur %d °C unter %d °C' % (to, t, self.lo)
         if t is not None and wait['dir'] == 'hoch' and t > self.hi:
             return 'Basisstufe %d: Chiptemperatur %d °C über %d °C' % (to, t, self.hi)
+        if _age(wait.get('since'), self.now) >= BASE_WAIT_S:
+            return 'Basisstufe %d: 1,5 min vorbei' % to
         return None
 
     def fan_wait(self):
-        """Every round with a reading, not during Over Hot, before the fan modes: the fan wait ends once the set clock
-        is taken over – the start's command sequence done (not busy: no pending, no queue, no settle; a later command
-        that replaced the start clock counts with its takeover) – or by the temperature (base_wait_why). Then fan
-        target = new Basisstufe, and from this round on the fan modes apply again (bd A)."""
+        """Every round with a reading (also without a valid temperature), not during Over Hot, before the fan modes:
+        the fan wait ends by the temperature or 1.5 min after the start (base_wait_why; Nutzer 09.11., bk ja). Then
+        fan target = new Basisstufe, and from this round on the fan modes apply again (bd A). While a start for a
+        change of the Basisstufe still waits, the fan stays as it is: that start replaces the wait (Nutzer 09.11.,
+        bi ja)."""
         st = self.st
         wait = st.get('base_wait')
-        if not wait:
+        if not wait or self.base_changed(st.get('start_reason'), st.get('base_change')):
             return
-        why = self.base_wait_why(wait, not self.busy())
+        why = self.base_wait_why(wait)
         if not why:
             return
         old = st.get('fan_target')
@@ -1130,8 +1148,12 @@ class Round:
         return bool(self.st.get('pending') or self.st.get('queue') or self.st.get('settle'))
 
     def lock(self, key, seconds):
-        """Clock-increase lock `key` until now + seconds; returns that time."""
+        """Clock-increase lock `key` until now + seconds; it never shortens a running lock of this key – one that ends
+        later stays (the longer lock stays, Nutzer 09.11., bj B). Returns the end of the lock."""
         until = self.now + timedelta(seconds=seconds)
+        running = (self.st.get('locks') or {}).get(key)
+        if running and _age(running, self.now) < 0:
+            until = max(until, datetime.fromisoformat(running))
         self.st['locks'] = dict(self.st.get('locks') or {}, **{key: _iso(until)})
         return until
 
@@ -1334,7 +1356,8 @@ class Round:
     def cut(self, hot):
         """One reduction (Bereich 1 by the ZeitImZieltemperatur, 2/3 −20, 4 −50 MHz); it replaces a running command.
         Afterwards 5 min no clock increase – 10 min when a reduction in Bereich 1 needs a mode switch (clock_mode, also
-        one that waits for the settings page; Nutzer 09.11., bh ja); the next one in this Bereich after 2 min (bf A)."""
+        one that waits for the settings page; Nutzer 09.11., bh ja); the next one in this Bereich after 2 min (bf A). A
+        running longer lock senkung stays, the note shows its real end (lock, Nutzer 09.11., bj B)."""
         st, t, now = self.st, self.t, self.now
         band = hot['band']
         # Bereich 1 from the fixed ZeitImZieltemperatur, so a running excursion follows a rule change (Nutzer 08.11., ae)
@@ -1402,13 +1425,15 @@ class Round:
 
     def rules(self):
         """With a valid temperature, in this order: Startpause end, fan mode (its end may set a lock; not while the fan
-        waits after a change of the Basisstufe – the fan modes rest, Nutzer 09.11., bd A), locks (expired, early end
+        waits after a change of the Basisstufe and not while a start for such a change still waits, e.g. for the clock
+        points – the fan modes rest, the fan stays as it is, Nutzer 09.11., bd A, bi ja), locks (expired, early end
         above ZTU+3, erhoehung also 3 Grad below the temperature at the increase, the Taktsperre after a change of the
         Basisstufe outside ZTU−3..ZTO+3), clock reduction above ZTO, clock increase below ZTU (so they can follow an
         early end in the same round; the lock after a reduction in Bereich 1 and after the +5 doubled with a mode
         switch, Nutzer 09.11.)."""
+        st = self.st
         self.start_hold_end()
-        if not self.st.get('base_wait'):
+        if not st.get('base_wait') and not self.base_changed(st.get('start_reason'), st.get('base_change')):
             self.fan_modes()
         self.update_locks()
         self.lower_clock()
@@ -1522,13 +1547,16 @@ class Round:
              ZeitImZieltemperatur; expired locks.
           5. Start, if due (needs reported clocks, not during Over Hot).
           6. Not during Over Hot: takeover of the command, end of the fan wait after a change of the Basisstufe
-             (Nutzer 09.11.), waiting mode switch, Takt laut Miner weicht ab.
+             (t below ZTU / above ZTO or 1.5 min after the start, Nutzer 09.11.; not while a start for a change of
+             the Basisstufe still waits, bi ja), waiting mode switch, Takt laut
+             Miner weicht ab.
           7. Fehlerrate (automatic restart).
           8. With a valid temperature (rules): Startpause end → fan mode (Kühlmodus, Heizmodus, Basismodus; may set a
-             lock; not while the fan waits) → locks (end early above ZTU+3; erhoehung also at t <= raise_t − 3,
-             Nutzer 09.11.; the Taktsperre after a change of the Basisstufe outside ZTU−3..ZTO+3) → clock
-             reduction above ZTO → clock increase below ZTU (both not during that Taktsperre; with a mode switch the
-             lock after a reduction in Bereich 1 and after the +5 doubled, Nutzer 09.11.).
+             lock; not while the fan waits or a start for a change of the Basisstufe still waits) → locks (end
+             early above ZTU+3; erhoehung also at t <= raise_t − 3, Nutzer 09.11.; the Taktsperre after a change
+             of the Basisstufe outside ZTU−3..ZTO+3) → clock reduction above ZTO → clock increase below ZTU (both
+             not during that Taktsperre; with a mode switch the lock after a reduction in Bereich 1 and after the +5
+             doubled, Nutzer 09.11.).
           9. Fan command, then miner commands (not during Over Hot), learning (valid temperature), read the fan.
          10. Phase (heizmodus | basismodus | kuehlmodus) and the protocol of the round (automation_cycle)."""
         self.learned_delete()
