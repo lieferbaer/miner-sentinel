@@ -44,7 +44,12 @@ Taktsperre, Obergrenzen, Ertrags-Prüfung, Temperatur-Test and Takt-Messung are 
     a click on the same level again: fan = Basisstufe at once, no new lock (a running one stays).
   * Startpause after a start with cold chips (Neustart, Wartung, Over Hot): no clock increase until ZTU−5, at most
     10 min. „Nicht erreichbar“ around a restart is a restart entry, not an error.
-  * Clock 100–440 MHz, the mode follows the clock (20 MHz margin downwards, Nutzer 10.11.; was 10, before 25).
+  * Clock 100–440 MHz, the mode follows the clock: upwards from the upper limit + 1, downwards with a 10 MHz margin
+    (Nutzer 10.11., v2.2.18; was 20, before 10, before 25) – 25 MHz for the first step out of the current mode when
+    the automation switched into it from a lower mode (its mode command taken over) less than 60 min ago and no
+    change of the Basisstufe (a click on another level) was less than 60 min ago (Nutzer 10.11., bt, bu A, bv ja).
+    Mode changes without our command (user, firmware) and switches downwards do not count; leaving the mode ends
+    it. The start uses the table without margin.
   * Takt laut Miner weicht ab: more than 15 MHz off the set clock for 15 min without a break → set clock sent again.
   * Fehlerrate (DH): over 10 % for 30 min without a break → automatic restart, at most one per 6 h.
   * Learning: 15 min in ZTU..ZTO at an unchanged fan level → learned value of the active level, only at a mean error
@@ -120,8 +125,12 @@ BASE_LOCK_D = 3               # ... at ZTU−3..ZTO+3; a valid t outside ends it
 START_CLOCK = {1: 170, 2: 250, 3: 330, 4: 380, 5: 400, 6: 420, 7: 440, 8: 440, 9: 440, 10: 440}   # Nutzer 28.10.
 CLOCK_MIN, CLOCK_MAX = 100, 440
 MODE_TOP = {4: 360, 3: 380, 2: 400, 1: 420, 0: 440}   # oberer Takt je Modus (mode 04 ... mode 00)
-MODE_DOWN_MARGIN = 20         # Spielraum nach unten: Wechsel in den tieferen Modus erst unter dessen Obergrenze − 20
-                              # MHz (Nutzer 10.11.; vorher 10, davor 25), „nur kleiner“: 340 bleibt mode 03, 339 → 04
+MODE_DOWN_MARGIN = 10         # Spielraum nach unten: Wechsel in den tieferen Modus erst unter dessen Obergrenze − 10
+                              # MHz (Nutzer 10.11., v2.2.18; vorher 20, davor 10, davor 25), „nur kleiner“: 350 bleibt
+                              # mode 03, 349 → 04
+MODE_DOWN_MARGIN_UP = 25      # Ausnahme (Nutzer 10.11., bt, bu A, bv ja): 25 MHz for the first step out of the current
+MODE_UP_WINDOW_S = 60 * 60    # mode when the automation switched into it from a lower mode less than 60 min ago
+                              # (mode_up) and no change of the Basisstufe was less than 60 min ago (base_changed_at)
 TENDENCY_S = 30               # Tendenz (only shown, no rule uses it): gegen den Wert von vor höchstens 30 s
 START_HOLD_S = 10 * 60        # Startpause: nach einem Start mit kalten Chips keine Takterhöhung bis ZTU−5, höchstens 10 min
 START_HOLD_BELOW = 5          # ... ZTU−5 (Nutzer 06.11.; vorher bis ZTU)
@@ -224,15 +233,18 @@ def table_level(mhz):
     return 0
 
 
-def required_level(mhz, current):
-    """Modus für einen Takt: aufwärts ab Obergrenze + 1, abwärts erst unter Obergrenze des tieferen Modus − 20 MHz
-    (mode 00→01 unter 400, 01→02 unter 380, 02→03 unter 360, 03→04 unter 340; Nutzer 10.11.)."""
+def required_level(mhz, current, first_margin=MODE_DOWN_MARGIN):
+    """Modus für einen Takt: aufwärts ab Obergrenze + 1, abwärts erst unter Obergrenze des tieferen Modus − 10 MHz
+    (mode 00→01 unter 410, 01→02 unter 390, 02→03 unter 370, 03→04 unter 350; Nutzer 10.11., v2.2.18).
+    first_margin: the margin of the first step out of the current mode only – 25 MHz in the exception of
+    Round.down_margin (00→01 unter 395, 01→02 unter 375, 02→03 unter 355, 03→04 unter 335); further steps further
+    down in the same decision use 10 MHz (Nutzer 10.11.)."""
     if current is None:
         return table_level(mhz)
     level = current
     while level > 0 and mhz >= MODE_TOP[level] + 1:
         level -= 1
-    while level < 4 and mhz < MODE_TOP[level + 1] - MODE_DOWN_MARGIN:
+    while level < 4 and mhz < MODE_TOP[level + 1] - (first_margin if level == current else MODE_DOWN_MARGIN):
         level += 1
     return level
 
@@ -354,8 +366,10 @@ class Round:
     base_seen (Basisstufe of the last round with a reading), base_change ({'from', 'to'}: a click on a Basisstufe for
     the start), base_wait (Lüfter wartet after a change of the Basisstufe: {'from', 'to', 'dir': 'runter'|'hoch',
     'since': the start, the 1.5 min count from it}, null otherwise), base_lock (Taktsperre after a change of the
-    Basisstufe: {'since', 'until'}, null when not running; Nutzer 09.11.). The shown phase is derived from heat/cool
-    at the end of the round."""
+    Basisstufe: {'since', 'until'}, null when not running; Nutzer 09.11.), mode_up ({'level', 'at'}: the automation
+    switched into this mode from a lower one, at = takeover; null once the miner reports another mode) and
+    base_changed_at (the round that detected a click on another Basisstufe) for the 25 MHz margin (Nutzer 10.11.).
+    The shown phase is derived from heat/cool at the end of the round."""
 
     def __init__(self, row, now, ac, journal):
         self.row, self.now, self.ac, self.j = row, now, ac, journal
@@ -523,6 +537,11 @@ class Round:
                 fan_why = self.base_wait_why(wait)
                 if fan_why:
                     wait = None                          # t already below ZTU (down) / above ZTO (up): fan at once
+        p = st.get('pending')
+        if (p and p['ok'] and p['kind'] == 'modus' and level_of(self.m['mode_key']) == p['value']
+                and p.get('from_level') is not None and p['value'] < p['from_level']):
+            # the miner already reports the upward mode command this start drops: taken over (Nutzer 10.11., bu A)
+            st['mode_up'] = {'level': p['value'], 'at': _iso(self.now)}
         self.drop_pending('Start (%s)' % reason)
         self.end_heat('Start (%s)' % reason, lock=False, keep_fan=bool(wait))
         self.end_cool('Start (%s)' % reason, lock=False, keep_fan=bool(wait))
@@ -615,7 +634,10 @@ class Round:
     def confirm_pending(self):
         """Übernahme prüfen (Modus: Miner meldet den Modus; Takt: Miner meldet den gesetzten Wert oder einen anderen
         Wert als vorher). Nach einem Moduswechsel wartet der nächste Taktbefehl, bis die Firmware ihren Standardtakt
-        eingestellt hat (gemeldete Punkte geändert oder Neustart, höchstens OWN_SWITCH_S)."""
+        eingestellt hat (gemeldete Punkte geändert oder Neustart, höchstens OWN_SWITCH_S).
+        A mode command taken over that went upwards (from_level, the mode reported when it was sent, higher than the
+        new level, e.g. 3 → 2 or 4 → 2) sets mode_up = {'level', 'at': now} for the 25 MHz margin (Nutzer 10.11.,
+        bt, bu A); a switch downwards does not."""
         st, m, now = self.st, self.m, self.now
         p = st.get('pending')
         if p and p['ok']:
@@ -635,6 +657,8 @@ class Round:
                     st['settle'] = {'key': calibration.mode_key(2, p['value']), 'points_before': p.get('prev_points'),
                                     'since': _iso(now), 'elapsed': m['elapsed']}
                     self.note('Modus mode %02d übernommen (%.0f s).' % (p['value'], took))
+                    if p.get('from_level') is not None and p['value'] < p['from_level']:
+                        st['mode_up'] = {'level': p['value'], 'at': _iso(now)}   # upwards (Nutzer 10.11.)
                 else:
                     st['sent_points'] = p['points']
         se = st.get('settle')
@@ -753,8 +777,10 @@ class Round:
                                  status='gesendet' if ok else 'Fehler', ok=ok, error=err, attempt=attempt,
                                  api_sent_at=sent, api_reply_at=_now(), api_ms=ms, mode_new=key, temp_before=self.t,
                                  takeover_state='offen' if ok else 'nicht gemessen')
+        # from_level: the mode reported when it was sent – an upward switch sets mode_up at its takeover (Nutzer 10.11.)
         st['pending'] = {'kind': 'modus', 'value': level, 'sent_at': _iso(self.now), 'attempt': attempt,
-                         'prev_points': list(m['points'] or []), 'log_id': log_id, 'ok': ok, 'cmd': cmd}
+                         'prev_points': list(m['points'] or []), 'log_id': log_id, 'ok': ok, 'cmd': cmd,
+                         'from_level': level_of(m['mode_key'])}
         st['mode_sent_at'] = _iso(self.now)
         self.decide('Modus %02d gesendet%s' % (level, '' if ok else ' (Fehler)'), log_id)
         self.note('Modus → mode %02d%s.' % (level, '' if ok else ' (Fehler: %s)' % err))
@@ -776,14 +802,30 @@ class Round:
                 keep.append(f)
         self.st['thermal'] = keep
 
+    def down_margin(self, current):
+        """Margin of the first step down out of the current mode (Nutzer 10.11., bt, bu A, bv ja): 25 MHz when the
+        automation switched into this mode from a lower one less than 60 min ago (mode_up, its takeover) and no change
+        of the Basisstufe was less than 60 min ago (base_changed_at); otherwise 10 MHz."""
+        st = self.st
+        up = st.get('mode_up') or {}
+        if (current is not None and up.get('level') == current and _age(up.get('at'), self.now) < MODE_UP_WINDOW_S
+                and _age(st.get('base_changed_at'), self.now) >= MODE_UP_WINDOW_S):
+            return MODE_DOWN_MARGIN_UP
+        return MODE_DOWN_MARGIN
+
+    def mode_level(self, mhz, current):
+        """Mode by the rule for a running mode: required_level with the margin of down_margin (Nutzer 10.11.) –
+        clock_mode (queue_clock, the doubled locks), Takt laut Miner weicht ab, Einstellungsseite wieder da."""
+        return required_level(mhz, current, self.down_margin(current))
+
     def clock_mode(self, value):
         """The mode decision of a clock change to value (at most 440 MHz): (current mode, mode by the rule =
-        required_level). Recorded in self.mode_switch: another mode = Moduswechsel – queue_clock queues the mode
-        command by it (also when that one then waits for the settings page, bh ja), and raise_clock and cut double
-        their lock by this very decision; they take it before queueing, as the lock end goes into the texts
-        (Nutzer 09.11.)."""
+        mode_level, i.e. required_level with the margin of down_margin, Nutzer 10.11.). Recorded in self.mode_switch:
+        another mode = Moduswechsel – queue_clock queues the mode command by it (also when that one then waits for the
+        settings page, bh ja), and raise_clock and cut double their lock by this very decision; they take it before
+        queueing, as the lock end goes into the texts (Nutzer 09.11.)."""
         current = level_of(self.m['mode_key'])
-        level = required_level(min(value, CLOCK_MAX), current)
+        level = self.mode_level(min(value, CLOCK_MAX), current)
         self.mode_switch = level != current
         return current, level
 
@@ -1487,8 +1529,9 @@ class Round:
     # --- Takt laut Miner weicht ab (Nutzer 06.11.)
     def firmware_clock(self):
         """More than 15 MHz between the clock reported by the miner and the set clock for 15 min without a break: send
-        the set clock again (mode first if needed). The 15 min start anew at ≤ 15 MHz, when the set clock changes or a
-        command is pending or queued, and after sending; without a value (run) and during Wartung as well."""
+        the set clock again (mode first if needed, by mode_level with the margin of down_margin, Nutzer 10.11.). The
+        15 min start anew at ≤ 15 MHz, when the set clock changes or a command is pending or queued, and after
+        sending; without a value (run) and during Wartung as well."""
         st, now = self.st, self.now
         clock_set, clock_now = st.get('clock_set'), st.get('clock_now')
         if (self.busy() or self.row.get('maintenance_at') or not clock_set or clock_now is None
@@ -1508,7 +1551,7 @@ class Round:
         self.note('Takt laut Miner weicht seit 15 min ab (%.0f MHz laut Miner): %s MHz erneut.' % (clock_now, clock_set))
         self.decide('Takt erneut gesendet', log_id)
         current = level_of(self.m['mode_key'])
-        level = required_level(clock_set, current)
+        level = self.mode_level(clock_set, current)      # with the margin of down_margin (Nutzer 10.11.)
         q = []
         if level != current:
             q.append({'kind': 'modus', 'value': level, 'why': 'Takt erneut: Modus'})
@@ -1587,10 +1630,12 @@ class Round:
           3. Read the miner (Wartung: fan off while the A15 is off; miner silent: 'nicht erreichbar' as restart or
              error, Heizmodus ends) – without a reading: protocol, done.
           4. Readings: restart of the miner, Basisstufe chosen (with its change from the Basisstufe of the round
-             before, base_seen; Nutzer 09.11.), Over Hot (Heizmodus ends); t, tendency (display),
+             before, base_seen; Nutzer 09.11.; another level: base_changed_at, Nutzer 10.11.), the mode (another one
+             than mode_up ends mode_up, Nutzer 10.11.), Over Hot (Heizmodus ends); t, tendency (display),
              ZeitImZieltemperatur; expired locks.
           5. Start, if due (needs reported clocks, not during Over Hot).
-          6. Not during Over Hot: takeover of the command, end of the fan wait after a change of the Basisstufe
+          6. Not during Over Hot: takeover of the command (an upward mode switch sets mode_up, Nutzer 10.11.), end
+             of the fan wait after a change of the Basisstufe
              (t below ZTU / above ZTO or 1.5 min after the start, Nutzer 09.11.; not while a start for a change of
              the Basisstufe still waits, bi ja), waiting mode switch, Takt laut
              Miner weicht ab.
@@ -1619,11 +1664,12 @@ class Round:
             # Automatik ein bzw. Umstellung auf die neue Regelung (startet ohne Lernwerte, Plan Kapitel 7); locks (with
             # raise_t, Nutzer 09.11.; the Taktsperre after a change of the Basisstufe, base_lock, Nutzer 09.11.),
             # cut_at and the ZeitImZieltemperatur stay over a start, heat/cool end in it (Nutzer 06.11.); a fan wait
-            # (base_wait) does not stay
+            # (base_wait) does not stay; the memories of the 25 MHz margin (mode_up, base_changed_at) stay
+            # (Nutzer 10.11.)
             keep = ('log', 'stock', 'fan_set', 'fan_read', 'fan_read_at', 'fan_set_at', 'elapsed', 'mode_key',
                     'maint', 'maint_ended_at', 'offline', 'over_hot', 'restart_req_seen', 'zb', 'learned_zb',
                     'auto_restart_at', 'heat', 'cool', 'locks', 'raise_t', 'cut_at', 'cut_band', 'zt_since',
-                    'learned_del_seen', 'base_lock')
+                    'learned_del_seen', 'base_lock', 'mode_up', 'base_changed_at')
             new = {k: st[k] for k in keep if k in st}
             new['learned'] = (st.get('learned') or {}) if st.get('v') == STATE_VERSION else {}
             if new.get('stock') is None:
@@ -1724,10 +1770,15 @@ class Round:
             st['start_reason'] = BASE_REASON % self.base
             # the change for the start (Nutzer 09.11.); without base_seen (older state) no change
             st['base_change'] = {'from': st.get('base_seen'), 'to': self.base}
+            if st['base_change']['from'] is not None and st['base_change']['from'] != self.base:
+                # a click on another Basisstufe: 60 min the normal 10 MHz margin (Nutzer 10.11., bv ja)
+                st['base_changed_at'] = _iso(now)
         st['base_seen'] = self.base
 
         # readings for the page and the protocol
         st['mode_key'] = m['mode_key']
+        if st.get('mode_up') and level_of(m['mode_key']) != st['mode_up'].get('level'):
+            st['mode_up'] = None                           # the mode was left: the 25 MHz margin ends (Nutzer 10.11.)
         st['points'] = list(m['points'] or [])
         st['clock_now'] = round(sum(m['points']) / len(m['points']), 1) if m['points'] else None
         stock = self.stock(m['mode_key'])
@@ -1781,7 +1832,7 @@ class Round:
                 st['mode_wait'] = None
                 current = level_of(m['mode_key'])
                 if st.get('clock_set') and current is not None:
-                    level = required_level(int(round(st['clock_set'])), current)
+                    level = self.mode_level(int(round(st['clock_set'])), current)   # margin: Nutzer 10.11.
                     if level != current:
                         st['queue'] = [{'kind': 'modus', 'value': level, 'why': 'Einstellungsseite wieder da: Modus'},
                                        {'kind': 'takt', 'value': int(round(st['clock_set'])),

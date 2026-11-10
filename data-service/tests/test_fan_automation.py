@@ -243,21 +243,20 @@ def test_start_without_learned_value_new_initial_values(miner, level, mhz, mode)
 
 # ---------------------------------------------------------------- Modus
 
-def test_mode_up_at_361_and_down_only_below_340(miner):
+def test_mode_up_at_361_and_down_only_below_350(miner):
     r = warm(miner, mhz=358)
     assert miner.level == 4
     r.go(15, temp=79)                                             # +5 → 363 → mode 03 zuerst
     assert miner.level == 3 and miner.clock() == 363 and miner.mode_sets == [3]
     assert [k for k in r.j.kinds() if k in ('modus', 'takt')][-2:] == ['modus', 'takt']
-    assert fa.MODE_DOWN_MARGIN == 20                              # Nutzer 10.11. (vorher 10, davor 25)
-    # abwärts nur kleiner als Obergrenze des tieferen Modus − 20 (Nutzer 10.11.)
-    assert fa.required_level(340, 3) == 3 and fa.required_level(339, 3) == 4     # mode 03 → 04 unter 340
-    assert fa.required_level(360, 2) == 2 and fa.required_level(359, 2) == 3     # mode 02 → 03 unter 360
-    assert fa.required_level(380, 1) == 1 and fa.required_level(379, 1) == 2     # mode 01 → 02 unter 380
-    assert fa.required_level(400, 0) == 0 and fa.required_level(399, 0) == 1     # mode 00 → 01 unter 400
-    assert fa.required_level(349, 3) == 3 and fa.required_level(369, 2) == 2     # bis v2.2.16 (10 MHz) schon tiefer
-    assert fa.required_level(389, 1) == 1 and fa.required_level(409, 0) == 0
-    assert fa.required_level(339, 0) == 4 and fa.required_level(359, 0) == 3     # mehrere Modi auf einmal
+    assert fa.MODE_DOWN_MARGIN == 10                              # Nutzer 10.11., v2.2.18 (vorher 20, davor 10, 25)
+    # abwärts nur kleiner als Obergrenze des tieferen Modus − 10 (Nutzer 10.11.)
+    assert fa.required_level(350, 3) == 3 and fa.required_level(349, 3) == 4     # mode 03 → 04 unter 350
+    assert fa.required_level(370, 2) == 2 and fa.required_level(369, 2) == 3     # mode 02 → 03 unter 370
+    assert fa.required_level(390, 1) == 1 and fa.required_level(389, 1) == 2     # mode 01 → 02 unter 390
+    assert fa.required_level(410, 0) == 0 and fa.required_level(409, 0) == 1     # mode 00 → 01 unter 410
+    assert fa.required_level(359, 2) == 3 and fa.required_level(339, 3) == 4     # bis v2.2.17 (20 MHz) noch nicht
+    assert fa.required_level(349, 0) == 4 and fa.required_level(369, 0) == 3     # mehrere Modi auf einmal
     # aufwärts unverändert ab Obergrenze + 1
     assert fa.required_level(361, 4) == 3 and fa.required_level(360, 4) == 4
     assert fa.required_level(381, 3) == 2 and fa.required_level(401, 2) == 1 and fa.required_level(421, 1) == 0
@@ -273,6 +272,244 @@ def test_clock_at_most_440(miner):
     n = len(r.events('takt'))
     r.go(300, temp=55)                                            # bei 440 MHz keine Takterhöhung mehr
     assert r.st['clock_set'] == 440 and len(r.events('takt')) == n
+
+
+# ---------------------------------------------------------------- Spielraum 25 MHz nach Wechsel aufwärts (Nutzer 10.11.)
+
+def _mode_for(r, mhz, at=None):
+    """The mode decision of a clock change to `mhz` (clock_mode, as queue_clock and the doubled locks take it) in the
+    state of r, at `at` (default: r.now)."""
+    rnd = fa.Round(row(r.st, level=r.level, **r.kw), at or r.now, r.ac, r.j)
+    rnd.m = {'mode_key': r.st['mode_key']}
+    return rnd.clock_mode(mhz)[1]
+
+
+def _up(miner, mhz=385):
+    """Basisstufe 3, the miner runs mode 03; the start (Lernwert `mhz`) switches it up to mode 02 (03 → 02, taken over
+    in the round at T0+5 s): 25 MHz margin for leaving mode 02 for 60 min (Nutzer 10.11.)."""
+    miner.level, miner.points = 3, list(STOCK['2/L3'])
+    r = warm(miner, FakeAC(level=3), level=3, mhz=mhz)
+    assert miner.mode_sets == [2] and r.st['mode_up'] == {'level': 2, 'at': (T0 + timedelta(seconds=5)).isoformat()}
+    return r
+
+
+def test_required_level_25_mhz_only_for_the_first_step():
+    """Ausnahme (Nutzer 10.11.): 00 → 01 unter 395, 01 → 02 unter 375, 02 → 03 unter 355, 03 → 04 unter 335 – nur der
+    erste Schritt aus dem jetzigen Modus, weitere Schritte in derselben Entscheidung mit 10 MHz; aufwärts
+    unverändert."""
+    up = fa.MODE_DOWN_MARGIN_UP
+    assert up == 25 and fa.MODE_UP_WINDOW_S == 3600
+    assert fa.required_level(335, 3, up) == 3 and fa.required_level(334, 3, up) == 4
+    assert fa.required_level(355, 2, up) == 2 and fa.required_level(354, 2, up) == 3
+    assert fa.required_level(375, 1, up) == 1 and fa.required_level(374, 1, up) == 2
+    assert fa.required_level(395, 0, up) == 0 and fa.required_level(394, 0, up) == 1
+    # Beispiel: mode 02 mit Ausnahme, 330 MHz: 02 → 03 (330 < 355), 03 → 04 (330 < 350) → mode 04
+    assert fa.required_level(330, 2, up) == 4
+    assert fa.required_level(350, 2, up) == 3 and fa.required_level(349, 2, up) == 4   # zweiter Schritt: unter 350
+    assert fa.required_level(369, 0, up) == 3 and fa.required_level(349, 0, up) == 4
+    assert fa.required_level(381, 3, up) == 2 and fa.required_level(361, 4, up) == 3   # aufwärts ab Obergrenze + 1
+    assert fa.required_level(354, 2) == 3 and fa.required_level(369, 2) == 3   # ohne Ausnahme: 10 MHz
+
+
+def test_down_margin_needs_an_own_switch_up_and_no_change_of_the_base_level_both_less_than_60_min():
+    """Ausnahme: der jetzige Modus kam durch einen eigenen Wechsel aufwärts vor weniger als 60 min (mode_up) und kein
+    Wechsel der Basisstufe vor weniger als 60 min (base_changed_at); sonst 10 MHz."""
+    def margin(current=2, up=10, changed=None, level=2):
+        st = {}
+        if up is not None:
+            st['mode_up'] = {'level': level, 'at': (T0 - timedelta(seconds=up)).isoformat()}
+        if changed is not None:
+            st['base_changed_at'] = (T0 - timedelta(seconds=changed)).isoformat()
+        return fa.Round(row(st, level=3), T0, FakeAC(), automation_journal.MemoryJournal()).down_margin(current)
+
+    assert margin() == 25
+    assert margin(up=3599) == 25 and margin(up=3600) == 10        # 59:59 / 60:00 nach der Übernahme
+    assert margin(changed=3599) == 10 and margin(changed=3600) == 25   # Basisstufe vor 59:59 / 60:00 gewechselt
+    assert margin(current=3) == 10 and margin(current=None) == 10   # gilt nur im Modus des Wechsels
+    assert margin(up=None) == 10 and margin(level=1) == 10
+
+
+def test_example_up_03_to_02_then_365_stays_354_mode_03_back_to_10_mhz(miner):
+    """Beispiel Nutzer 10.11. (ZTU 80, ZTO 85, Basisstufe 3 seit Stunden): +5 380 → 385 MHz, mode 03 → 02 (die Zeit
+    ist die Übernahme); danach verlässt der Takt mode 02 erst unter 355 statt 370: −20 → 365 bleibt mode 02, −5 → 360
+    und 355 bleiben (nur kleiner), 354 wäre mode 03, −5 → 350 → mode 03; 60 min nach der Übernahme 369 → mode 03. Der
+    Wechsel abwärts gibt keine Ausnahme: aus mode 03 wieder unter 350."""
+    miner.level, miner.points = 3, list(STOCK['2/L3'])
+    r = warm(miner, FakeAC(level=3), level=3, mhz=380)
+    assert miner.mode_sets == [] and r.st.get('mode_up') is None
+    r.go(5, temp=79)                                              # +5 → 385: mode 03 → 02 zuerst
+    assert miner.mode_sets == [2] and r.st.get('mode_up') is None   # gesendet, noch nicht übernommen
+    r.go(5, temp=79)                                              # Miner meldet mode 02: übernommen
+    a = r.last
+    assert r.st['mode_up'] == {'level': 2, 'at': a.isoformat()}
+    r.go(360, temp=82)                                            # 6 min in der Zieltemperatur (Sperre 6 min vorbei)
+    assert miner.clock() == 385 and r.st['clock_set'] == 385
+    assert _mode_for(r, 365) == 2 and _mode_for(r, 355) == 2 and _mode_for(r, 354) == 3
+    assert _mode_for(r, 369, a + timedelta(seconds=3599)) == 2 and _mode_for(r, 369, a + timedelta(minutes=60)) == 3
+    r.go(5, temp=89)                                              # Bereich 2: −20 → 365 bleibt mode 02
+    r.go(10, temp=89)
+    assert r.st['clock_set'] == 365 and miner.clock() == 365 and miner.mode_sets == [2] and miner.level == 2
+    r.go(125, temp=86)                                            # Bereich 1 (über 4 min in ZT), 2 min nach der
+    assert r.st['clock_set'] == 360 and miner.mode_sets == [2]    # Ankunft: −5 → 360
+    r.go(120, temp=86)                                            # −5 → 355: bleibt mode 02
+    assert r.st['clock_set'] == 355 and miner.mode_sets == [2]
+    r.go(120, temp=86)                                            # −5 → 350 → mode 03 (Takt, Modus, Takt)
+    r.go(15, temp=86)
+    assert r.st['clock_set'] == 350 and miner.mode_sets == [2, 3] and miner.level == 3 and miner.clock() == 350
+    assert r.st['mode_up'] is None                                # mode 02 verlassen, abwärts: keine neue Ausnahme
+    assert _mode_for(r, 350) == 3 and _mode_for(r, 349) == 4      # mode 03 → 04 wieder unter 350
+
+
+@pytest.mark.parametrize('offset, mode', [(3599, 2), (3600, 3)])
+def test_25_mhz_until_59_59_after_the_takeover_from_60_00_10_mhz(miner, offset, mode):
+    """Weniger als 60 min nach der Übernahme des Wechsels aufwärts: 59:59 danach −20 → 365 bleibt mode 02, ab 60:00
+    mode 03 (unter 370); ebenso 369."""
+    r = _up(miner)
+    a = T0 + timedelta(seconds=5)
+    r.go(10, temp=82)
+    assert _mode_for(r, 369, a + timedelta(seconds=offset)) == mode
+    r.now = a + timedelta(seconds=offset)
+    r.go(5, temp=89)                                              # Bereich 2: −20 → 365
+    r.go(10, temp=89)
+    assert r.st['clock_set'] == 365 and miner.clock() == 365
+    assert miner.mode_sets == [2] + ([3] if mode == 3 else []) and miner.level == mode
+
+
+def test_only_the_first_step_out_of_the_mode_uses_25_mhz(miner):
+    """mode 02 mit Ausnahme, Bereich 4: 385 −50 → 335: 02 → 03 (335 < 355), 03 → 04 (335 < 350, nicht 335) → mode 04."""
+    r = _up(miner)
+    r.go(10, temp=82)
+    r.go(15, temp=95)
+    assert r.st['clock_set'] == 335 and miner.mode_sets == [2, 4] and miner.level == 4
+
+
+def test_change_of_the_base_level_10_mhz_for_60_min_also_after_a_new_switch_up(miner):
+    """Klick auf eine andere Basisstufe: ab dann 10 MHz, mindestens 60 min – auch nach einem neuen Wechsel aufwärts;
+    ab 60:00 nach dem Klick gilt die Ausnahme wieder (bv ja)."""
+    r = _up(miner)
+    r.go(10, temp=82)
+    assert _mode_for(r, 369) == 2                                 # 25 MHz: mode 02 → 03 erst unter 355
+    x = _click(r, 5)                                              # 3 → 5: Initialwert 400 MHz, bleibt mode 02
+    assert r.st['base_changed_at'] == x.isoformat() and miner.mode_sets == [2] and r.st['mode_up']['level'] == 2
+    assert _mode_for(r, 369) == 3 and _mode_for(r, 370) == 2      # ab dem Klick 10 MHz: unter 370
+    r.go(10, temp=76)                                             # 76 °C: Taktsperre endet, +15 → 415 → mode 01
+    r.go(10, temp=76)
+    assert r.st['clock_set'] == 415 and miner.mode_sets == [2, 1] and r.st['mode_up']['level'] == 1
+    assert _mode_for(r, 389) == 2 and _mode_for(r, 380) == 2      # 10 MHz: mode 01 → 02 unter 390
+    assert _mode_for(r, 380, x + timedelta(seconds=3599)) == 2    # Klick vor 59:59: noch 10 MHz
+    assert _mode_for(r, 380, x + timedelta(seconds=3600)) == 1    # 60:00: 25 MHz (unter 375)
+
+
+def test_same_level_click_and_automatik_ein_keep_the_25_mhz(miner):
+    """bv ja: ein Klick auf dieselbe Basisstufe und „Automatik ein“ sind kein Wechsel der Basisstufe."""
+    r = _up(miner)
+    r.go(10, temp=82)
+    up = r.st['mode_up']
+    _click(r, 3)                                                  # dieselbe Stufe noch einmal
+    assert r.events('start')[-1]['trigger'] == 'Basisstufe gewählt (Stufe 3)'
+    assert r.st.get('base_changed_at') is None and r.st['mode_up'] == up and _mode_for(r, 369) == 2
+    r.go(10, temp=82, enabled=False)
+    r.go(10, temp=82, enabled=True)                               # Automatik ein
+    assert r.events('start')[-1]['trigger'] == 'Automatik ein'
+    assert r.st.get('base_changed_at') is None and r.st['mode_up'] == up and miner.mode_sets == [2]
+    r.go(5, temp=89)                                              # Bereich 2: −20 → 365 bleibt mode 02
+    r.go(10, temp=89)
+    assert r.st['clock_set'] == 365 and miner.mode_sets == [2] and miner.level == 2
+
+
+def test_same_level_click_in_the_takeover_round_keeps_the_switch_up(miner):
+    """Der Start sendet mode 02 (03 → 02); in der Runde, in der der Miner mode 02 meldet, ein Klick auf dieselbe
+    Basisstufe: der Start löst den offenen Befehl ab, der Wechsel aufwärts zählt trotzdem (bu A, bv ja)."""
+    miner.level, miner.points = 3, list(STOCK['2/L3'])
+    r = Run(miner, FakeAC(level=3), 3)
+    r.st = {'v': fa.STATE_VERSION, 'seen_at': T0.isoformat(), 'learned': {'3': dict(LW, mhz=385)}, 'level_seen': 'x',
+            'zb': list(ZT)}
+    r.kw['level_at'] = 'klick'
+    r.go(5, temp=82)
+    assert miner.mode_sets == [2] and r.st['pending']['from_level'] == 3
+    x = _click(r, 3)                                              # dieselbe Stufe in der Runde der Übernahme
+    assert r.events('start')[-1]['trigger'] == 'Basisstufe gewählt (Stufe 3)' and r.st.get('base_changed_at') is None
+    assert r.st['mode_up'] == {'level': 2, 'at': x.isoformat()} and miner.mode_sets == [2]
+    r.go(10, temp=82)
+    assert _mode_for(r, 369) == 2 and _mode_for(r, 354) == 3       # 25 MHz: mode 02 → 03 erst unter 355
+
+
+def test_both_memories_survive_automatik_ein_and_a_start(miner):
+    r = _up(miner)
+    r.go(10, temp=82)
+    _click(r, 5)
+    mem = {k: r.st[k] for k in ('mode_up', 'base_changed_at')}
+    r.go(10, temp=82, enabled=False)
+    r.go(5, temp=82, enabled=True)                                # Automatik ein: Start, Initialwert 400 (mode 02)
+    assert r.events('start')[-1]['trigger'] == 'Automatik ein' and miner.mode_sets == [2]
+    assert {k: r.st[k] for k in ('mode_up', 'base_changed_at')} == mem
+    miner.elapsed = 10                                            # Neustart des Miners: Start
+    r.go(10, temp=82)
+    assert r.events('start')[-1]['trigger'] == 'Neustart des Miners'
+    assert {k: r.st[k] for k in ('mode_up', 'base_changed_at')} == mem and _mode_for(r, 369) == 3
+
+
+def test_a_switch_down_does_not_give_the_25_mhz(miner):
+    """Start in mode 02 mit 375 MHz: mode 02 → 03 (abwärts) – keine Ausnahme, mode 03 → 04 unter 350."""
+    miner.level, miner.points = 2, list(STOCK['2/L2'])
+    r = warm(miner, FakeAC(level=3), level=3, mhz=375)
+    assert miner.mode_sets == [3] and miner.level == 3 and r.st.get('mode_up') is None
+    assert _mode_for(r, 350) == 3 and _mode_for(r, 349) == 4
+
+
+def test_a_mode_change_without_our_command_does_not_give_the_25_mhz(miner):
+    """bu A: der Nutzer stellt mode 02 selbst ein – keine Ausnahme."""
+    miner.level, miner.points = 3, list(STOCK['2/L3'])
+    r = warm(miner, FakeAC(level=3), level=3, mhz=375)            # mode 03 passt: kein Moduswechsel
+    assert miner.mode_sets == []
+    miner.level, miner.points = 2, list(STOCK['2/L2'])
+    r.go(10, temp=82)
+    assert r.st['mode_key'] == '2/L2' and r.st.get('mode_up') is None and _mode_for(r, 369) == 3
+
+
+def test_leaving_the_mode_ends_the_25_mhz_coming_back_does_not_count(miner):
+    """Nach dem eigenen Wechsel 03 → 02 stellt der Nutzer mode 01 und wieder mode 02 ein: die Ausnahme ist weg."""
+    r = _up(miner)
+    r.go(10, temp=82)
+    miner.level, miner.points = 1, list(STOCK['2/L1'])
+    r.go(5, temp=82)
+    assert r.st['mode_up'] is None
+    miner.level, miner.points = 2, list(STOCK['2/L2'])
+    r.go(5, temp=82)
+    assert r.st['mode_up'] is None and _mode_for(r, 369) == 3
+
+
+@pytest.mark.parametrize('aged, modes', [(False, [2]), (True, [2, 3])])
+def test_takt_laut_miner_resend_uses_the_margin(miner, aged, modes):
+    """„Takt laut Miner weicht ab“: der gesetzte Takt 365 wird erneut gesendet – mit Ausnahme in mode 02 ohne
+    Moduswechsel, ohne (Wechsel länger als 60 min her) erst mode 03."""
+    r = _up(miner)
+    r.go(10, temp=82)
+    r.go(5, temp=89)                                              # −20 → 365, bleibt mode 02
+    r.go(10, temp=82)
+    assert miner.clock() == 365 and miner.mode_sets == [2]
+    if aged:
+        _long_ago(r)
+    miner.points = fa.points_for(STOCK['2/L2'], 340)              # Takt laut Miner 340 MHz
+    r.go(15 * 60 + 15, temp=82)
+    assert len(r.events('firmware_takt')) == 1
+    assert miner.mode_sets == modes and miner.clock() == 365
+
+
+@pytest.mark.parametrize('aged, modes', [(False, [2]), (True, [2, 3])])
+def test_settings_page_back_uses_the_margin(miner, aged, modes):
+    """Einstellungsseite wieder da: der gewartete Moduswechsel passend zum jetzt gesetzten Takt 365 – mit Ausnahme
+    bleibt mode 02, ohne mode 03."""
+    r = _up(miner)
+    r.go(10, temp=82)
+    r.go(5, temp=89)                                              # −20 → 365, bleibt mode 02
+    r.go(10, temp=82)
+    assert r.st['clock_set'] == 365 and not r.st['queue'] and not r.st['pending']
+    if aged:
+        _long_ago(r)
+    r.st['mode_wait'] = 3                                         # ein wartender Moduswechsel von vorher
+    r.go(15, temp=82)
+    assert r.st['mode_wait'] is None and miner.mode_sets == modes
 
 
 # ---------------------------------------------------------------- Takterhöhung unter ZTU (Nutzer 06.11.)
@@ -650,13 +887,14 @@ def test_clock_below_100_is_an_error_and_not_sent(miner):
     assert len(errors) == 1                                       # nicht jede Runde, erst wieder nach 2 min
 
 
-@pytest.mark.parametrize('start, mode', [(390, 3), (389, 4)])
+@pytest.mark.parametrize('start, mode', [(400, 3), (399, 4)])
 def test_reduction_with_mode_change_clock_first_then_mode_then_clock(miner, start, mode):
     r = warm(miner, mhz=start)
     assert miner.level == 2 and miner.clock() == start
     miner.clock_sets.clear()
-    r.go(15, temp=95)                                             # Bereich 4: −50 → 340 bleibt mode 03, 339 → mode 04
-    assert miner.mode_sets[-1] == mode and miner.level == mode    # (04 erst unter 340, Nutzer 10.11.)
+    r.go(15, temp=95)                                             # Bereich 4: −50 → 350 bleibt mode 03, 349 → mode 04
+    assert miner.mode_sets[-1] == mode and miner.level == mode    # (04 erst unter 350, Nutzer 10.11., v2.2.18; der
+                                                                  # Startwechsel 04 → 02: 25 MHz nur für 02 → 03)
     assert miner.clock_sets[0] == pytest.approx(start - 50, abs=1) and miner.clock() == start - 50
     assert len(miner.clock_sets) == 2                             # Takt, Modus, Takt erneut
 
@@ -744,12 +982,20 @@ def test_plus_15_with_mode_switch_keeps_2_min(miner):
     assert 'sperre_doppelt' not in takt['details']
 
 
+def _long_ago(r):
+    """warm() reaches mode 02 by its own start switch upwards (04 → 02): 25 MHz margin for 60 min (Nutzer 10.11.). For
+    the examples with the normal 10 MHz margin that switch is more than 60 min ago."""
+    assert r.st['mode_up']['level'] == 2
+    r.st['mode_up'] = dict(r.st['mode_up'], at=(r.now - timedelta(minutes=61)).isoformat())
+    return r
+
+
 def test_band_1_reduction_with_mode_switch_locks_10_min(miner):
-    """Beispiel Nutzer 09.11. (ZTO 85, Basisstufe 3), mit 20 MHz Spielraum (Nutzer 10.11.): 385 MHz mode 02, 2 min in
-    der Zieltemperatur, 86 °C → −10 = 375, 2 min später 365 (bleibt mode 02) → je 5 min; 10:00 365 → −10 = 355
-    (< 360) → mode 03 → keine Takterhöhung bis 10:10. Die nächste Senkung in Bereich 1 trotzdem nach 2 min (bf A),
-    ohne Moduswechsel: die längere Sperre bis 10:10 bleibt (bj B)."""
-    r = warm(miner, FakeAC(level=3), level=3, mhz=385)
+    """Beispiel Nutzer 09.11. (ZTO 85, Basisstufe 3): 385 MHz mode 02, 2 min in der Zieltemperatur, 86 °C → −10 = 375
+    (bleibt mode 02) → 5 min; 10:00 375 → −10 = 365 (< 370, 10 MHz Spielraum wieder seit Nutzer 10.11.) → mode 03 →
+    keine Takterhöhung bis 10:10. Die nächste Senkung in Bereich 1 trotzdem nach 2 min (bf A), ohne Moduswechsel: die
+    längere Sperre bis 10:10 bleibt (bj B)."""
+    r = _long_ago(warm(miner, FakeAC(level=3), level=3, mhz=385))
     assert miner.level == 2
     r.go(110, temp=82)
     w = r.now
@@ -760,71 +1006,64 @@ def test_band_1_reduction_with_mode_switch_locks_10_min(miner):
         'Chiptemperatur 86 °C (Bereich 1): Takt 385 → 375 MHz, keine Takterhöhung bis %s.' % hm(
             w + timedelta(minutes=5))
     r.go(115, temp=86)
-    v = r.now
-    r.go(5, temp=86)                                              # −10 → 365: bleibt mode 02 (erst unter 360), 5 min
-    assert r.st['clock_set'] == 365 and r.st['locks']['senkung'] == (v + timedelta(minutes=5)).isoformat()
-    assert 'sperre_doppelt' not in r.events('takt')[-1]['details'] and miner.mode_sets == [2]
-    r.go(115, temp=86)
     x = r.now                                                     # 10:00
-    r.go(5, temp=86)                                              # −10 → 355 → mode 03: 10 min
+    r.go(5, temp=86)                                              # −10 → 365 → mode 03: 10 min
     until = x + timedelta(minutes=10)
-    assert r.st['clock_set'] == 355 and r.st['locks']['senkung'] == until.isoformat()
+    assert r.st['clock_set'] == 365 and r.st['locks']['senkung'] == until.isoformat()
     assert r.events('takt')[-1]['details']['sperre_doppelt'] is True
-    assert _log(r, 'Chiptemperatur 86 °C (Bereich 1)')[-1] == ('Chiptemperatur 86 °C (Bereich 1): Takt 365 → 355 MHz, '
+    assert _log(r, 'Chiptemperatur 86 °C (Bereich 1)')[-1] == ('Chiptemperatur 86 °C (Bereich 1): Takt 375 → 365 MHz, '
                                                              'keine Takterhöhung bis %s (doppelt wegen Moduswechsel).'
                                                              % hm(until))
     r.go(30, temp=86)
-    assert miner.mode_sets[-1] == 3 and miner.clock() == 355
+    assert miner.mode_sets[-1] == 3 and miner.clock() == 365
     assert r.st['hot']['next_cut_at'] == (x + timedelta(minutes=2)).isoformat()
     r.go(85, temp=86)
-    assert r.st['clock_set'] == 355
+    assert r.st['clock_set'] == 365
     y = r.now
-    r.go(5, temp=86)                                              # 10:02: nächste Senkung (355 → 345, mode 03)
+    r.go(5, temp=86)                                              # 10:02: nächste Senkung (365 → 355, mode 03)
     assert y == x + timedelta(minutes=2)                          # ohne Moduswechsel: 5 min wären 10:07 –
-    assert r.st['clock_set'] == 345 and r.st['locks']['senkung'] == until.isoformat()   # die Sperre bleibt 10:10
+    assert r.st['clock_set'] == 355 and r.st['locks']['senkung'] == until.isoformat()   # die Sperre bleibt 10:10
     assert 'sperre_doppelt' not in r.events('takt')[-1]['details']
     assert _log(r, 'Chiptemperatur 86 °C (Bereich 1)')[-1] == \
-        'Chiptemperatur 86 °C (Bereich 1): Takt 355 → 345 MHz, keine Takterhöhung bis %s.' % hm(until)
+        'Chiptemperatur 86 °C (Bereich 1): Takt 365 → 355 MHz, keine Takterhöhung bis %s.' % hm(until)
     r.go((until - r.now).total_seconds(), temp=79)                # unter ZTU: bis 10:10 keine Takterhöhung
-    assert r.st['clock_set'] == 345
+    assert r.st['clock_set'] == 355
     r.go(5, temp=79)                                              # 10:10
-    assert r.st['clock_set'] == 350
+    assert r.st['clock_set'] == 360
 
 
 def test_a_later_reduction_never_shortens_the_longer_lock(miner):
     """bj B (Nutzer 09.11.): 10:00 Bereich 1 mit Moduswechsel → keine Takterhöhung bis 10:10; 10:02 Bereich 1 ohne
     Moduswechsel → bleibt 10:10 (nicht 10:07), der Eintrag nennt 10:10 ohne „doppelt“; 10:04 Bereich 2 (5 min wären
-    10:09) → bleibt 10:10; ab 10:10 wieder normal. Takte mit 20 MHz Spielraum (Nutzer 10.11.)."""
-    r = warm(miner, FakeAC(level=3), level=3, mhz=385)
+    10:09) → bleibt 10:10; ab 10:10 wieder normal. Takte mit 10 MHz Spielraum (Nutzer 10.11., v2.2.18)."""
+    r = _long_ago(warm(miner, FakeAC(level=3), level=3, mhz=385))
     r.go(110, temp=82)
     r.go(5, temp=86)                                              # −10 → 375 (bleibt mode 02)
-    r.go(120, temp=86)                                            # −10 → 365 (bleibt mode 02)
-    assert r.st['clock_set'] == 365 and miner.mode_sets == [2]
     r.go(115, temp=86)
     x = r.now                                                     # 10:00
     until = x + timedelta(minutes=10)
-    r.go(5, temp=86)                                              # −10 → 355 → mode 03: bis 10:10
-    assert r.st['clock_set'] == 355 and r.st['locks']['senkung'] == until.isoformat()
+    r.go(5, temp=86)                                              # −10 → 365 → mode 03: bis 10:10
+    assert r.st['clock_set'] == 365 and r.st['locks']['senkung'] == until.isoformat()
     r.go(115, temp=86)
     assert r.now == x + timedelta(minutes=2)
-    r.go(5, temp=86)                                              # 10:02: −10 → 345 ohne Moduswechsel
-    assert r.st['clock_set'] == 345 and miner.mode_sets[-1] == 3 and r.st['locks']['senkung'] == until.isoformat()
+    r.go(5, temp=86)                                              # 10:02: −10 → 355 ohne Moduswechsel
+    assert r.st['clock_set'] == 355 and miner.mode_sets[-1] == 3 and r.st['locks']['senkung'] == until.isoformat()
     assert 'sperre_doppelt' not in r.events('takt')[-1]['details']
     assert _log(r, 'Chiptemperatur 86 °C (Bereich 1)')[-1] == \
-        'Chiptemperatur 86 °C (Bereich 1): Takt 355 → 345 MHz, keine Takterhöhung bis %s.' % hm(until)
+        'Chiptemperatur 86 °C (Bereich 1): Takt 365 → 355 MHz, keine Takterhöhung bis %s.' % hm(until)
     r.go(115, temp=86)
     assert r.now == x + timedelta(minutes=4)
-    r.go(5, temp=89)                                              # 10:04: Bereich 2 sofort, −20 → 325
-    assert r.st['clock_set'] == 325 and r.st['locks']['senkung'] == until.isoformat()
+    r.go(5, temp=89)                                              # 10:04: Bereich 2 sofort, −20 → 335
+    assert r.st['clock_set'] == 335 and r.st['locks']['senkung'] == until.isoformat()
     assert _log(r, 'Chiptemperatur 89 °C (Bereich 2)')[-1] == \
-        'Chiptemperatur 89 °C (Bereich 2): Takt 345 → 325 MHz, keine Takterhöhung bis %s.' % hm(until)
+        'Chiptemperatur 89 °C (Bereich 2): Takt 355 → 335 MHz, keine Takterhöhung bis %s.' % hm(until)
     r.go((until - r.now).total_seconds(), temp=79)                # unter ZTU: bis 10:10 keine Takterhöhung
-    assert r.st['clock_set'] == 325 and r.st['locks']['senkung'] == until.isoformat()
+    assert r.st['clock_set'] == 335 and r.st['locks']['senkung'] == until.isoformat()
     r.go(5, temp=79)                                              # 10:10: Sperre vorbei, wieder normal: +5
-    assert r.st['locks']['senkung'] is None and r.st['clock_set'] == 330
+    assert r.st['locks']['senkung'] is None and r.st['clock_set'] == 340
     r.go(300, temp=82)
     r.go(5, temp=86)                                              # die nächste Senkung: wieder ihre eigenen 5 min
-    assert r.st['clock_set'] == 325                               # (5 min in der Zieltemperatur: −5, Nutzer 10.11.)
+    assert r.st['clock_set'] == 335                               # (5 min in der Zieltemperatur: −5, Nutzer 10.11.)
     assert r.st['locks']['senkung'] == (r.last + timedelta(minutes=5)).isoformat()
 
 
@@ -841,32 +1080,29 @@ def test_lock_set_again_ends_later_extends_as_before(miner):
 
 def test_band_1_reduction_with_waiting_mode_switch_locks_10_min(miner):
     """bh ja: wartet der nötige Moduswechsel auf die Einstellungsseite, zählt er trotzdem – 10 min."""
-    r = warm(miner, FakeAC(level=3), level=3, mhz=385)
+    r = _long_ago(warm(miner, FakeAC(level=3), level=3, mhz=385))
     r.go(110, temp=82)
     r.go(5, temp=86)                                              # −10 → 375
-    r.go(120, temp=86)                                            # −10 → 365 (bleibt mode 02)
     r.go(115, temp=86)
     miner.web_down = True
     x = r.now
-    r.go(5, temp=86)                                              # −10 → 355 → mode 03 nötig (unter 360), wartet
-    assert r.st['clock_set'] == 355 and r.st['locks']['senkung'] == (x + timedelta(minutes=10)).isoformat()
+    r.go(5, temp=86)                                              # −10 → 365 → mode 03 nötig (unter 370), wartet
+    assert r.st['clock_set'] == 365 and r.st['locks']['senkung'] == (x + timedelta(minutes=10)).isoformat()
     r.go(30, temp=86)
     assert miner.mode_sets[-1] == 2 and len(r.events('modus_wartet')) == 1 and r.st['mode_wait'] == 3
     assert r.st['locks']['senkung'] == (x + timedelta(minutes=10)).isoformat()
 
 
-@pytest.mark.parametrize('temp, minus, band, mode', [(89, 20, 2, 3), (95, 50, 4, 4)])
-def test_higher_band_reduction_with_mode_switch_keeps_5_min(miner, temp, minus, band, mode):
-    """Nur Bereich 1 verdoppelt: Bereich 2 (375 −20 → 355, mode 03) und 4 (385 −50 → 335, mode 04) bleiben 5 min. Mit
-    20 MHz Spielraum (Nutzer 10.11.) braucht −20 dafür vorher eine Senkung in Bereich 1 (385 → 375, bleibt mode 02)."""
-    r = warm(miner, FakeAC(level=3), level=3, mhz=385)
+@pytest.mark.parametrize('temp, minus, band', [(89, 20, 2), (95, 50, 4)])
+def test_higher_band_reduction_with_mode_switch_keeps_5_min(miner, temp, minus, band):
+    """Nur Bereich 1 verdoppelt: Bereich 2 (−20 → 365, mode 03) und 4 (−50 → 335, mode 04) bleiben 5 min (10 MHz
+    Spielraum, Nutzer 10.11., v2.2.18)."""
+    r = _long_ago(warm(miner, FakeAC(level=3), level=3, mhz=385))
     r.go(110, temp=82)
-    if band == 2:
-        r.go(5, temp=86)                                          # Bereich 1: −10 → 375
-    start, x = r.st['clock_set'], r.now
-    r.go(15, temp=temp)                                           # höherer Bereich: sofort
+    x = r.now
+    r.go(15, temp=temp)
     until = x + timedelta(minutes=5)
-    assert r.st['clock_set'] == start - minus and miner.mode_sets[-1] == mode
+    assert r.st['clock_set'] == 385 - minus and miner.mode_sets[-1] == fa.table_level(385 - minus)
     assert r.st['locks']['senkung'] == until.isoformat()
     assert 'sperre_doppelt' not in r.events('takt')[-1]['details']
     assert _log(r, 'Chiptemperatur %d °C (Bereich %d)' % (temp, band))[-1].endswith(
