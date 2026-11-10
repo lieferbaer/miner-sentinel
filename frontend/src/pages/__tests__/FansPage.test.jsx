@@ -147,16 +147,19 @@ describe('FansPage status: what runs (Nutzer 06.11.)', () => {
   it('lists command, Startpause, the latest lock with its reasons, the excursion over ZTO and the learning', async () => {
     const hold = inMin(8)
     const learn = inMin(-4)
-    // ZTU 80: Startpause until 75 °C (ZTU−5); erhoehung ends before senkung, kuehlmodus has already ended
+    const erhoehung = inMin(2)
+    // ZTU 80: Startpause until 75 °C (ZTU−5); erhoehung ends before senkung, kuehlmodus has already ended; ZTO 85:
+    // no reduction at 86–87 °C while the lock after an increase runs (Nutzer 10.11.)
     mockApi({ ...automation({
       pending: { kind: 'takt', value: 300, attempt: 1 }, start_hold: { since: inMin(-1), until: hold },
-      locks: { erhoehung: inMin(2), heizmodus: null, kuehlmodus: inMin(-1), senkung: inMin(4) },
+      locks: { erhoehung, heizmodus: null, kuehlmodus: inMin(-1), senkung: inMin(4) },
       hot: { band: 2, since: inMin(-1), band_at: inMin(0), next_cut_at: inMin(2), dwell_s: 30, minus1: 15 },
       learn_since: learn, zb: [80, 85],
     }), target_low: 80, target_high: 85 })
     renderPage()
     expect(await screen.findByText('Takt 300 MHz wird übernommen · keine Takterhöhung bis 75 °C, spätestens ' +
       hhmm(hold) + ' · keine Takterhöhung bis ' + hhmm(inMin(4)) + ' (nach Erhöhung, nach Senkung) · ' +
+      'keine Senkung bei 86–87 °C bis ' + hhmm(erhoehung) + ' (nach Erhöhung) · ' +
       'über ZTO: Bereich 2 · lernt seit ' + hhmm(learn))).toBeInTheDocument()
   })
 
@@ -166,7 +169,11 @@ describe('FansPage status: what runs (Nutzer 06.11.)', () => {
       const until = inMin(3)
       mockApi(automation({ locks: { [key]: until } }))
       const view = renderPage()
-      expect(await screen.findByText('keine Takterhöhung bis ' + hhmm(until) + ' (' + reason + ')')).toBeInTheDocument()
+      // the lock after an increase also blocks reductions at ZTO+1–ZTO+2 (ZTO 85, Nutzer 10.11.)
+      expect(await screen.findByText('keine Takterhöhung bis ' + hhmm(until) + ' (' + reason + ')' +
+        (key === 'erhoehung' ? ' · keine Senkung bei 86–87 °C bis ' + hhmm(until) + ' (nach Erhöhung)' : '')))
+        .toBeInTheDocument()
+      if (key !== 'erhoehung') expect(screen.queryByText(/keine Senkung/)).not.toBeInTheDocument()
       view.unmount()
     }
   })
@@ -176,7 +183,7 @@ describe('FansPage status: what runs (Nutzer 06.11.)', () => {
       start_hold: { since: inMin(-11), until: inMin(-1) }, hot: null }))
     renderPage()
     expect(await screen.findByText('Takt regelt 82–85 °C')).toBeInTheDocument()
-    expect(screen.queryByText(/keine Takterhöhung/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/keine Takterhöhung|keine Senkung/)).not.toBeInTheDocument()
     expect(screen.queryByText(/über ZTO/)).not.toBeInTheDocument()
   })
 
@@ -272,7 +279,8 @@ describe('FansPage status: what runs (Nutzer 06.11.)', () => {
     renderPage()
     expect(await screen.findByText('Takt 250 MHz wird übernommen · Lüfter wartet: Stufe 2 bis ' + waitEnd(since) +
       ' oder unter 80 °C · keine Taktänderung bei 77–88 °C bis ' + hhmm(until) + ' (Basisstufe ' +
-      'gewählt) · keine Takterhöhung bis ' + hhmm(erhoehung) + ' (nach Erhöhung)')).toBeInTheDocument()
+      'gewählt) · keine Takterhöhung bis ' + hhmm(erhoehung) + ' (nach Erhöhung) · keine Senkung bei 86–87 °C bis ' +
+      hhmm(erhoehung) + ' (nach Erhöhung)')).toBeInTheDocument()
   })
 
   it('no fan wait without base_wait, no lock when it has expired or ended (Nutzer 09.11.)', async () => {
@@ -285,6 +293,48 @@ describe('FansPage status: what runs (Nutzer 06.11.)', () => {
       view.unmount()
     }
   })
+
+  // the lock after an increase also blocks reductions at ZTO+1–ZTO+2 (Nutzer 10.11.)
+  it('lock after an increase: no reduction at ZTO+1–ZTO+2 until its end, with the current ZTO (Nutzer 10.11.)',
+    async () => {
+      for (const [low, high, range] of [[80, 85, '86–87 °C'], [82, 86, '87–88 °C'], [80, 88, '89–90 °C']]) {
+        const until = inMin(3)
+        mockApi(based({ locks: { erhoehung: until } }, low, high))
+        const view = renderPage()
+        expect(await screen.findByText('keine Takterhöhung bis ' + hhmm(until) + ' (nach Erhöhung) · keine Senkung ' +
+          'bei ' + range + ' bis ' + hhmm(until) + ' (nach Erhöhung)')).toBeInTheDocument()
+        view.unmount()
+      }
+    })
+
+  it('no reduction block: its own end even when another lock ends later, after the locks, before the excursion',
+    async () => {
+      const erhoehung = inMin(2)
+      const senkung = inMin(4)
+      mockApi(based({ locks: { erhoehung, senkung }, hot: { band: 1 } }))
+      renderPage()
+      expect(await screen.findByText('keine Takterhöhung bis ' + hhmm(senkung) + ' (nach Erhöhung, nach Senkung) · ' +
+        'keine Senkung bei 86–87 °C bis ' + hhmm(erhoehung) + ' (nach Erhöhung) · über ZTO: Bereich 1'))
+        .toBeInTheDocument()
+    })
+
+  it('no reduction block when the lock after an increase has expired, ended or is missing (Nutzer 10.11.)',
+    async () => {
+      for (const locks of [{ erhoehung: inMin(-1) }, { erhoehung: null }, {}, undefined]) {
+        mockApi(based({ locks }))
+        const view = renderPage()
+        expect(await screen.findByText('Takt regelt 80–85 °C')).toBeInTheDocument()
+        expect(screen.queryByText(/keine Senkung/)).not.toBeInTheDocument()
+        view.unmount()
+      }
+      // the other locks and the lock after a change of the Basisstufe show no reduction block
+      const until = inMin(3)
+      mockApi(based({ locks: { erhoehung: inMin(-1), heizmodus: until, kuehlmodus: until, senkung: until } }))
+      renderPage()
+      expect(await screen.findByText('keine Takterhöhung bis ' + hhmm(until) + ' (nach Heizmodus, nach Kühlmodus, ' +
+        'nach Senkung)')).toBeInTheDocument()
+      expect(screen.queryByText(/keine Senkung/)).not.toBeInTheDocument()
+    })
 
   it('miner silent or Over Hot: nothing of the regulation, only the state', async () => {
     for (const extra of [{ offline: true }, { over_hot: true }]) {
@@ -362,11 +412,13 @@ describe('FansPage rule texts', () => {
     expect(text).toContain('Unter 80 °C sofort Takt +5 MHz bei 77–79 °C, +15 bei 75–76 °C, +20 bei 70–74 °C, ' +
       '+25 bei 60–69 °C, +40 bei 59 °C oder kälter (höchstens 440 MHz); danach keine Takterhöhung für 3 min ' +
       '(+5) bzw. 2 min (+15, +20, +25, +40). Braucht die +5 bei 77–79 °C einen Moduswechsel, verdoppelt sich die ' +
-      'Sperre: 6 statt 3 min. Diese Sperren und die nach Heiz- oder Kühlmodus enden früher ab 84 °C. ' +
-      'Die Sperre nach einer Erhöhung endet außerdem, sobald die Chiptemperatur mindestens 3 °C unter der bei der Erhöhung ' +
-      'liegt. Keine Takterhöhung, solange ein Befehl noch nicht übernommen ist.')
+      'Sperre: 6 statt 3 min. Diese Sperren enden früher über 87 °C (ab 88 °C), die nach Heiz- oder Kühlmodus ' +
+      'früher ab 84 °C. Die Sperre nach einer Erhöhung endet außerdem, sobald die Chiptemperatur mindestens 3 °C ' +
+      'unter der bei der Erhöhung liegt. Solange sie läuft, auch keine Senkung (bei 86–87 °C); eine dadurch ' +
+      'ausgebliebene Senkung kommt 2 min nach dem Ende der Sperre, wenn die Chiptemperatur dann noch über 85 °C ist, ' +
+      'beim Anstieg in einen höheren Bereich sofort. Keine Takterhöhung, solange ein Befehl noch nicht übernommen ist.')
     expect(text).toContain('Über 85 °C Takt runter: Bereich 1 (86–88 °C) −10 / −5 MHz bei einer ' +
-      'ZeitImZieltemperatur davor (ununterbrochen in 80–85 °C) bis 5 min / über 5 min, Bereich 2 ' +
+      'ZeitImZieltemperatur davor (ununterbrochen in 80–85 °C) bis 4 min / über 4 min, Bereich 2 ' +
       '(89–91 °C) −20 MHz, Bereich 3 (92–94 °C) −20 MHz, Bereich 4 (ab 95 °C) −50 MHz; mindestens 100 MHz.')
     expect(text).toContain('Nach jeder Senkung 5 min keine Takterhöhung. Braucht eine Senkung in Bereich 1 einen ' +
       'Moduswechsel, verdoppelt sich die Sperre: 10 statt 5 min. Bei Basisstufe 1: nach einer Senkung um ' +
@@ -411,6 +463,21 @@ describe('FansPage rule texts', () => {
       'verdoppelt sich die Sperre: 6 statt 3 min. Diese Sperren')
     expect(text).toContain('Nach jeder Senkung 5 min keine Takterhöhung. Braucht eine Senkung in Bereich 1 einen ' +
       'Moduswechsel, verdoppelt sich die Sperre: 10 statt 5 min. Bei Basisstufe 1:')
+  })
+
+  it('the early ends of the locks, the reduction block and Bereich 1 follow ZTU / ZTO (Nutzer 10.11.)', async () => {
+    mockApi({ ...off(), target_low: 82, target_high: 86 })
+    renderPage()
+    const text = await ruleText()
+    expect(text).toContain('Diese Sperren enden früher über 88 °C (ab 89 °C), die nach Heiz- oder Kühlmodus früher ' +
+      'ab 86 °C. Die Sperre nach einer Erhöhung endet außerdem')
+    expect(text).toContain('Solange sie läuft, auch keine Senkung (bei 87–88 °C); eine dadurch ausgebliebene ' +
+      'Senkung kommt 2 min nach dem Ende der Sperre, wenn die Chiptemperatur dann noch über 86 °C ist, beim Anstieg ' +
+      'in einen höheren Bereich sofort.')
+    expect(text).toContain('Bereich 1 (87–89 °C) −10 / −5 MHz bei einer ZeitImZieltemperatur davor (ununterbrochen ' +
+      'in 82–86 °C) bis 4 min / über 4 min')
+    expect(text).not.toContain('5 min / über 5 min')
+    expect(text).not.toContain('Diese Sperren und die nach Heiz- oder Kühlmodus')
   })
 
   it('the block after −5 follows the ZTU', async () => {

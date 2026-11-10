@@ -91,13 +91,21 @@ function logicText(lo, hi) {
     '(+5) bzw. 2 min (+15, +20, +25, +40). ' +
     // the +5 with a mode switch doubles its lock, its early ends stay (Nutzer 09.11.)
     'Braucht die +5 bei ' + (lo - 3) + '–' + (lo - 1) + ' °C einen Moduswechsel, verdoppelt sich die Sperre: 6 statt ' +
-    '3 min. Diese Sperren und die nach Heiz- oder Kühlmodus enden früher ab ' +
-    (lo + 4) + ' °C. ' +
+    // the lock after an increase ends early above ZTO+2, those after Heiz-/Kühlmodus above ZTU+3 (Nutzer 10.11.)
+    '3 min. Diese Sperren enden früher über ' + (hi + 2) + ' °C (ab ' + (hi + 3) + ' °C), die nach Heiz- oder ' +
+    'Kühlmodus früher ab ' + (lo + 4) + ' °C. ' +
     // the lock after an increase also ends 3 degrees below the temperature at that increase (Nutzer 09.11.)
     'Die Sperre nach einer Erhöhung endet außerdem, sobald die Chiptemperatur mindestens 3 °C unter der bei der Erhöhung ' +
-    'liegt. Keine Takterhöhung, solange ein Befehl noch nicht übernommen ist. ' +
+    'liegt. ' +
+    // the lock after an increase also blocks reductions; a blocked one comes 2 min after its end if still above ZTO,
+    // at once on a rise into a higher Bereich (Nutzer 10.11.)
+    'Solange sie läuft, auch keine Senkung (bei ' + (hi + 1) + '–' + (hi + 2) + ' °C); eine dadurch ausgebliebene ' +
+    'Senkung kommt 2 min nach dem Ende der Sperre, wenn die Chiptemperatur dann noch über ' + hi + ' °C ist, beim ' +
+    'Anstieg in einen höheren Bereich sofort. ' +
+    'Keine Takterhöhung, solange ein Befehl noch nicht übernommen ist. ' +
+    // Bereich 1: −10 up to 4 min ZeitImZieltemperatur, −5 over 4 min (Nutzer 10.11.)
     'Über ' + hi + ' °C Takt runter: Bereich 1 (' + (hi + 1) + '–' + (hi + 3) + ' °C) −10 / −5 MHz bei ' +
-    'einer ZeitImZieltemperatur davor (ununterbrochen in ' + range + ') bis 5 min / über 5 min, ' +
+    'einer ZeitImZieltemperatur davor (ununterbrochen in ' + range + ') bis 4 min / über 4 min, ' +
     'Bereich 2 (' + (hi + 4) + '–' + (hi + 6) + ' °C) −20 MHz, Bereich 3 (' + (hi + 7) + '–' + (hi + 9) +
     ' °C) −20 MHz, Bereich 4 (ab ' + (hi + 10) + ' °C) −50 MHz; mindestens 100 MHz. Die erste Senkung sofort ' +
     '(lag die letzte unter 3 min zurück: 3 min nach ihr, in einem höheren Bereich als bei ihr sofort), im ' +
@@ -332,8 +340,9 @@ const BASE_WAIT_MS = 90 * 1000
 
 /** What runs right now in the regulation (Nutzer 06.11.): command being taken over, the fan waiting after a change of
  * the Basisstufe (Nutzer 09.11.), Startpause, the lock of clock changes after a change of the Basisstufe (Nutzer
- * 09.11.), the clock-increase locks (latest end with the reasons), the block after −5 at Basisstufe 1 (Nutzer 09.11.),
- * the excursion over ZTO and the learning period. */
+ * 09.11.), the clock-increase locks (latest end with the reasons), no reduction at ZTO+1–ZTO+2 while the lock after an
+ * increase runs (Nutzer 10.11.), the block after −5 at Basisstufe 1 (Nutzer 09.11.), the excursion over ZTO and the
+ * learning period. */
 function runningItems(st, lo, hi, base) {
   const pending = st.pending
     ? (st.pending.kind === 'modus' ? 'Modus ' + String(st.pending.value).padStart(2, '0') : 'Takt ' + st.pending.value + ' MHz') +
@@ -361,6 +370,10 @@ function runningItems(st, lo, hi, base) {
     startHold,
     baseLock,
     lockEnd ? 'keine Takterhöhung bis ' + clockTime(lockEnd) + ' (' + locks.map((key) => LOCK_REASON[key]).join(', ') + ')'
+      : null,
+    // the lock after an increase also blocks reductions; it ends early above ZTO+2 (Nutzer 10.11.)
+    runs(st.locks?.erhoehung)
+      ? 'keine Senkung bei ' + (hi + 1) + '–' + (hi + 2) + ' °C bis ' + clockTime(st.locks.erhoehung) + ' (nach Erhöhung)'
       : null,
     cut5End > Date.now() ? 'keine Takterhöhung bei ' + (lo - 2) + '–' + (lo - 1) + ' °C bis ' + clockTime(cut5End) +
       ' (−5 um ' + clockTime(st.cut5_at) + ')' : null,

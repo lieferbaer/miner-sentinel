@@ -14,20 +14,24 @@ Taktsperre, Obergrenzen, Ertrags-Prüfung, Temperatur-Test and Takt-Messung are 
   * Clock increase below ZTU (d = ZTU − t), at the first such value: d 1–3 +5 MHz (then 3 min no increase), 4–5 +15
     (2 min), 6–10 +20 (2 min), 11–20 +25 (2 min), from 21 +40 (2 min) (Nutzer 09.11.). Not while a lock runs, during the Startpause,
     while a command is pending or queued, at 440 MHz, when more needs the waiting mode switch or while the Taktsperre
-    after a change of the Basisstufe runs (see Start). The locks after an
-    increase, after the Heizmodus and after the Kühlmodus end early at t > ZTU+3; the lock after an increase also
-    ends as soon as t is 3 Grad below the temperature at that increase (Nutzer 09.11.); the lock after a reduction
+    after a change of the Basisstufe runs (see Start). The locks after the Heizmodus and after the Kühlmodus end
+    early at t > ZTU+3; the lock after an increase ends early at t > ZTO+2 (Nutzer 10.11., bm A, bn; was ZTU+3) or as
+    soon as t is 3 Grad below the temperature at that increase (Nutzer 09.11.), and while it runs it also blocks clock
+    reductions – in practice none at ZTO+1..ZTO+2 (Nutzer 10.11., bo ja); the lock after a reduction
     (5 min) never ends early. Needs the +5 (d 1–3) or a reduction in Bereich 1 a mode switch (also one that waits for
     the settings page), its lock doubles: 6 instead of 3 min (the early ends stay), 10 instead of 5 min (the next
     reduction still after 2 min) (Nutzer 09.11.). A lock set again never shortens a running one of the same kind: the
     longer lock stays (Nutzer 09.11., bj B). At Basisstufe 1, for 30 min
     after a reduction by −5 MHz no increase at ZTU−2..ZTU−1 (a start ends this; Nutzer 09.11.).
-  * Clock reduction above ZTO, Bereich 1 = ZTO+1..+3, 2 = +4..+6, 3 = +7..+9, 4 = from +10: Bereich 1 −15/−10/−5 MHz
-    by the ZeitImZieltemperatur (time in ZTU..ZTO before t first exceeded ZTO: < 60 s / 60–300 s / > 300 s), 2 and 3
-    −20, 4 −50. At the start of an excursion at once (3 min after the last reduction if that was less than 3 min ago),
-    same Bereich every 2 min, higher Bereich at once, lower Bereich 2 min after arriving there. A due reduction
-    replaces a running command; it is not made while the Taktsperre after a change of the Basisstufe runs (the
-    excursion is followed as before, a due reduction comes as soon as the lock ends).
+  * Clock reduction above ZTO, Bereich 1 = ZTO+1..+3, 2 = +4..+6, 3 = +7..+9, 4 = from +10: Bereich 1 −10/−5 MHz
+    by the ZeitImZieltemperatur (time in ZTU..ZTO before t first exceeded ZTO: up to 4 min / over 4 min; Nutzer
+    10.11., br A; was 5 min), 2 and 3 −20, 4 −50. At the start of an excursion at once (3 min after the last reduction
+    if that was less than 3 min ago), same Bereich every 2 min, higher Bereich at once, lower Bereich 2 min after
+    arriving there. A due reduction replaces a running command; it is not made while the Taktsperre after a change of
+    the Basisstufe runs (the excursion is followed as before, a due reduction comes as soon as the lock ends) or while
+    the lock after an increase runs (the excursion is followed as before; a reduction held back by it comes 2 min
+    after the end of that lock if t is then still above ZTO, at once on a rise into a higher Bereich; then the normal
+    rules; Nutzer 10.11., bp nein, bs A).
   * Start (Basisstufe gewählt, Automatik ein, Neustart des Miners, nach Wartung, nach Over Hot): start clock = learned
     value of the Basisstufe, else the one of the same level from the remembered Zieltemperatur with the nearest middle
     (equally far: the cooler one), else the initial value (level 1 = 170, 2 = 250, 3 = 330, 4 = 380, 5 = 400,
@@ -40,7 +44,7 @@ Taktsperre, Obergrenzen, Ertrags-Prüfung, Temperatur-Test and Takt-Messung are 
     a click on the same level again: fan = Basisstufe at once, no new lock (a running one stays).
   * Startpause after a start with cold chips (Neustart, Wartung, Over Hot): no clock increase until ZTU−5, at most
     10 min. „Nicht erreichbar“ around a restart is a restart entry, not an error.
-  * Clock 100–440 MHz, the mode follows the clock (10 MHz margin downwards, Nutzer 09.11.; was 25).
+  * Clock 100–440 MHz, the mode follows the clock (20 MHz margin downwards, Nutzer 10.11.; was 10, before 25).
   * Takt laut Miner weicht ab: more than 15 MHz off the set clock for 15 min without a break → set clock sent again.
   * Fehlerrate (DH): over 10 % for 30 min without a break → automatic restart, at most one per 6 h.
   * Learning: 15 min in ZTU..ZTO at an unchanged fan level → learned value of the active level, only at a mean error
@@ -85,12 +89,16 @@ MODE_END_LOCK_S = 3 * 60      # after the end of the Heiz- or Kühlmodus: 3 min 
 # 09.11.: −4..−5 +15 / 2 min, −6..−10 +20, −11..−20 +25 – before +10 / 3 min, +15, +20)
 PLUS_TABLE = ((21, 40, 120), (11, 25, 120), (6, 20, 120), (4, 15, 120), (1, 5, 180))
 LOCK_KEYS = ('erhoehung', 'heizmodus', 'kuehlmodus', 'senkung')
-LOCK_EARLY_END = 3            # locks erhoehung/heizmodus/kuehlmodus end at t > ZTU+3; senkung never early
-LOCK_RAISE_DROP = 3           # lock erhoehung also ends at t <= raise_t − 3 (t at the increase, Nutzer 09.11.)
+LOCK_EARLY_END = 3            # locks heizmodus/kuehlmodus end at t > ZTU+3; senkung never early
+LOCK_RAISE_END = 2            # lock erhoehung ends early at t > ZTO+2 (Nutzer 10.11., bm A, bn; was t > ZTU+3) ...
+LOCK_RAISE_DROP = 3           # ... or at t <= raise_t − 3 (t at the increase, Nutzer 09.11.); while it runs it also
+                              # blocks clock reductions, i.e. none at ZTO+1..ZTO+2 (Nutzer 10.11., bo ja)
+CUT_AFTER_RAISE_S = 120       # a reduction held back by it: 2 min after its end (Nutzer 10.11., bp nein, bs A)
 # --- clock reduction above ZTO (Nutzer 06.11.)
 BAND_STEP = 3                 # Bereich 1 = ZTO+1..+3, 2 = +4..+6, 3 = +7..+9, 4 = from ZTO+10
 CUT_MINUS = {2: 20, 3: 20, 4: 50}
-ZT_LONG_S = 300               # Bereich 1 by the ZeitImZieltemperatur: 0–300 s −10, > 300 s −5 (Nutzer 08.11.)
+ZT_LONG_S = 240               # Bereich 1 by the ZeitImZieltemperatur: 0–240 s −10, > 240 s −5 (Nutzer 10.11., br A;
+                              # was 300 s, Nutzer 08.11.)
 CUT_EVERY_S = 120             # same Bereich: every 2 min; lower Bereich: 2 min after arriving there
 CUT_GAP_S = 180               # excursion start less than 3 min after the last reduction: 3 min after that one
 CUT_LOCK_S = 5 * 60           # after every reduction 5 min no clock increase (never ends early)
@@ -100,7 +108,7 @@ CUT_LOCK_S = 5 * 60           # after every reduction 5 min no clock increase (n
 # reduction still after 2 min)
 LOCK_DOUBLE_MODE = 2
 LOCK_DOUBLE_TEXT = ' (doppelt wegen Moduswechsel)'
-CUT5_MHZ = 5                  # Basisstufe 1: after a reduction by exactly −5 MHz (Bereich 1, over 5 min in ZT)
+CUT5_MHZ = 5                  # Basisstufe 1: after a reduction by exactly −5 MHz (Bereich 1, over 4 min in ZT)
 CUT5_BLOCK_S = 30 * 60        # ... 30 min no clock increase ...
 CUT5_BLOCK_D = 2              # ... at ZTU−2 and ZTU−1 (from ZTU−3 as before); a start ends it (Nutzer 09.11.)
 CUT5_BLOCK_BASE = 1
@@ -112,8 +120,8 @@ BASE_LOCK_D = 3               # ... at ZTU−3..ZTO+3; a valid t outside ends it
 START_CLOCK = {1: 170, 2: 250, 3: 330, 4: 380, 5: 400, 6: 420, 7: 440, 8: 440, 9: 440, 10: 440}   # Nutzer 28.10.
 CLOCK_MIN, CLOCK_MAX = 100, 440
 MODE_TOP = {4: 360, 3: 380, 2: 400, 1: 420, 0: 440}   # oberer Takt je Modus (mode 04 ... mode 00)
-MODE_DOWN_MARGIN = 10         # Spielraum nach unten: Wechsel in den tieferen Modus erst unter dessen Obergrenze − 10 MHz
-                              # (Nutzer 09.11.; vorher 25), „nur kleiner“: 350 bleibt mode 03, 349 → mode 04
+MODE_DOWN_MARGIN = 20         # Spielraum nach unten: Wechsel in den tieferen Modus erst unter dessen Obergrenze − 20
+                              # MHz (Nutzer 10.11.; vorher 10, davor 25), „nur kleiner“: 340 bleibt mode 03, 339 → 04
 TENDENCY_S = 30               # Tendenz (only shown, no rule uses it): gegen den Wert von vor höchstens 30 s
 START_HOLD_S = 10 * 60        # Startpause: nach einem Start mit kalten Chips keine Takterhöhung bis ZTU−5, höchstens 10 min
 START_HOLD_BELOW = 5          # ... ZTU−5 (Nutzer 06.11.; vorher bis ZTU)
@@ -217,8 +225,8 @@ def table_level(mhz):
 
 
 def required_level(mhz, current):
-    """Modus für einen Takt: aufwärts ab Obergrenze + 1, abwärts erst unter Obergrenze des tieferen Modus − 10 MHz
-    (mode 00→01 unter 410, 01→02 unter 390, 02→03 unter 370, 03→04 unter 350; Nutzer 09.11.)."""
+    """Modus für einen Takt: aufwärts ab Obergrenze + 1, abwärts erst unter Obergrenze des tieferen Modus − 20 MHz
+    (mode 00→01 unter 400, 01→02 unter 380, 02→03 unter 360, 03→04 unter 340; Nutzer 10.11.)."""
     if current is None:
         return table_level(mhz)
     level = current
@@ -250,8 +258,8 @@ def band_of(t, hi):
 
 
 def minus_band_1(dwell):
-    """Reduction in Bereich 1 by the ZeitImZieltemperatur in s: 0–300 s −10, > 300 s −5 MHz (Nutzer 08.11.; bis
-    v2.2.7 unter 60 s −15)."""
+    """Reduction in Bereich 1 by the ZeitImZieltemperatur in s: up to 4 min (0–240 s) −10, over 4 min (> 240 s) −5 MHz
+    (Nutzer 10.11., br A; was 300 s, Nutzer 08.11.; bis v2.2.7 unter 60 s −15)."""
     return 10 if dwell <= ZT_LONG_S else 5
 
 
@@ -336,8 +344,10 @@ class Round:
 
     State of the rules (Nutzer 06.11.): heat (Heizmodus, {'since'}), cool (Kühlmodus, {'since', 'plus'}),
     fan_changed_at (last change of the fan target), locks (until times of the clock-increase locks erhoehung,
-    heizmodus, kuehlmodus, senkung), raise_t (temperature at the last increase, early end of the lock erhoehung;
-    Nutzer 09.11.), hot (excursion above ZTO: Bereich, next reduction, ZeitImZieltemperatur),
+    heizmodus, kuehlmodus, senkung; erhoehung also blocks reductions, Nutzer 10.11.), raise_t (temperature at the last
+    increase, early end of the lock erhoehung; Nutzer 09.11.), hot (excursion above ZTO: Bereich, next reduction,
+    ZeitImZieltemperatur; blocked = the until time of the lock erhoehung that held back a due reduction of this
+    excursion, gone once that lock ended; Nutzer 10.11.),
     cut_at/cut_band (last reduction and its Bereich), cut5_at (last reduction by −5 MHz, cleared by every start;
     Nutzer 09.11.), zt_since (entry into ZTU..ZTO), start_hold (Startpause),
     start_reason (a start is due), fw_dev (Takt laut Miner weicht ab seit), dh_since (Fehlerrate über 10 % seit),
@@ -1158,17 +1168,20 @@ class Round:
         return until
 
     def update_locks(self):
-        """Expired locks become null; erhoehung, heizmodus and kuehlmodus end early as soon as t > ZTU+3 (only with a
-        valid temperature); erhoehung also as soon as t <= raise_t − 3, the temperature at that increase (Nutzer
-        09.11.; without raise_t, as in older states, not); senkung never ends early. The Taktsperre after a change of
-        the Basisstufe (base_lock) ends after its 3 min and for good as soon as a valid t < ZTU−3 or t > ZTO+3 –
-        with the Zieltemperatur of this round (Nutzer 09.11., bb nein)."""
-        locks, raise_t = {}, self.st.get('raise_t')
+        """Expired locks become null; heizmodus and kuehlmodus end early as soon as t > ZTU+3 (only with a valid
+        temperature); erhoehung ends early as soon as t > ZTO+2 (Nutzer 10.11., bm A, bn; was t > ZTU+3) or t <=
+        raise_t − 3, the temperature at that increase (Nutzer 09.11.; without raise_t, as in older states, not);
+        senkung never ends early. Evaluated before lower_clock, as erhoehung also blocks reductions (Nutzer 10.11.). The
+        Taktsperre after a change of the Basisstufe (base_lock) ends after its 3 min and for good as soon as a valid
+        t < ZTU−3 or t > ZTO+3 – with the Zieltemperatur of this round (Nutzer 09.11., bb nein)."""
+        locks, raise_t, t = {}, self.st.get('raise_t'), self.t
         for key in LOCK_KEYS:
             until = (self.st.get('locks') or {}).get(key)
-            early = key != 'senkung' and self.t is not None and self.t > self.lo + LOCK_EARLY_END
-            if key == 'erhoehung' and self.t is not None and raise_t is not None:
-                early = early or self.t <= raise_t - LOCK_RAISE_DROP
+            if key == 'erhoehung':
+                early = t is not None and (t > self.hi + LOCK_RAISE_END
+                                           or (raise_t is not None and t <= raise_t - LOCK_RAISE_DROP))
+            else:
+                early = key != 'senkung' and t is not None and t > self.lo + LOCK_EARLY_END
             locks[key] = until if until and _age(until, self.now) < 0 and not early else None
         self.st['locks'] = locks
         base_lock = self.st.get('base_lock')
@@ -1178,6 +1191,12 @@ class Round:
 
     def locked(self):
         return any(until and _age(until, self.now) < 0 for until in (self.st.get('locks') or {}).values())
+
+    def raise_locked(self):
+        """The lock after an increase (erhoehung) runs: its until time, else None. Of the clock-increase locks only it
+        also blocks clock reductions (Nutzer 10.11., bo ja)."""
+        until = (self.st.get('locks') or {}).get('erhoehung')
+        return until if until and _age(until, self.now) < 0 else None
 
     def base_locked(self):
         """Taktsperre after a change of the Basisstufe: no clock increase and no reduction while it runs and
@@ -1326,13 +1345,20 @@ class Round:
         3 min ago, at once if its Bereich is higher than at that one (Nutzer 08.11.); in the same Bereich every 2 min; rising into a higher Bereich at once; falling into a lower Bereich
         2 min after arriving there. The ZeitImZieltemperatur is fixed at the start of the excursion. t ≤ ZTO ends it.
         While the Taktsperre after a change of the Basisstufe runs (base_locked) the excursion is followed as always,
-        only a due reduction is not made – it stays due and comes as soon as the lock ends (Nutzer 09.11.)."""
+        only a due reduction is not made – it stays due and comes as soon as the lock ends (Nutzer 09.11.).
+        While the lock after an increase runs (raise_locked; it ends early above ZTO+2, so in practice at ZTO+1..ZTO+2)
+        the excursion is followed as always too, a due reduction is not made and marked (hot['blocked'] = the until
+        time of that lock). Once that lock has ended (expiry: its until time; early end: this round) the next
+        reduction of this excursion comes 2 min after its end, at once on a rise into a higher Bereich, a fall into a
+        lower Bereich never before those 2 min; then the normal rules (Nutzer 10.11., bo ja, bp nein, bs A). The
+        Taktsperre after a change of the Basisstufe still blocks while it runs."""
         st, t, now = self.st, self.t, self.now
         band = band_of(t, self.hi)
         hot = st.get('hot')
         if band is None:
-            st['hot'] = None
+            st['hot'] = None                             # the excursion ends, a blocked mark with it
             return
+        rose = False
         if not hot:
             dwell = int(self.zt_dwell or 0)
             hot = {'band': band, 'since': _iso(now), 'band_at': _iso(now), 'next_cut_at': _iso(now),
@@ -1342,13 +1368,27 @@ class Round:
                 hot['next_cut_at'] = _iso(datetime.fromisoformat(st['cut_at']) + timedelta(seconds=CUT_GAP_S))
             due = _age(hot['next_cut_at'], now) >= 0
         elif band > hot['band']:
-            hot, due = dict(hot, band=band, band_at=_iso(now)), True
+            hot, due, rose = dict(hot, band=band, band_at=_iso(now)), True, True
         elif band < hot['band']:
             # 2 min from the arrival in the lower Bereich (and not before a 3-min wait at the start of the excursion)
             wait = max(datetime.fromisoformat(hot['next_cut_at']), now + timedelta(seconds=CUT_EVERY_S))
             hot, due = dict(hot, band=band, band_at=_iso(now), next_cut_at=_iso(wait)), False
         else:
             due = _age(hot['next_cut_at'], now) >= 0
+        raise_until, blocked = self.raise_locked(), hot.get('blocked')
+        if raise_until:
+            if due:
+                # the lock after an increase blocks the due reduction (Nutzer 10.11., bo ja), silent like the locks
+                hot, due = dict(hot, blocked=raise_until), False
+        elif blocked:
+            # that lock has ended: the held-back reduction 2 min after its end, at once on a rise into a higher
+            # Bereich (Nutzer 10.11., bp nein, bs A)
+            hot = {k: v for k, v in hot.items() if k != 'blocked'}
+            if not rose:
+                end = datetime.fromisoformat(blocked) if _age(blocked, now) >= 0 else now   # expiry / early end
+                wait = max(datetime.fromisoformat(hot['next_cut_at']), end + timedelta(seconds=CUT_AFTER_RAISE_S))
+                hot['next_cut_at'] = _iso(wait)
+                due = _age(hot['next_cut_at'], now) >= 0
         st['hot'] = hot
         if due and st.get('clock_set') is not None and not self.base_locked():
             self.cut(hot)
@@ -1357,7 +1397,9 @@ class Round:
         """One reduction (Bereich 1 by the ZeitImZieltemperatur, 2/3 −20, 4 −50 MHz); it replaces a running command.
         Afterwards 5 min no clock increase – 10 min when a reduction in Bereich 1 needs a mode switch (clock_mode, also
         one that waits for the settings page; Nutzer 09.11., bh ja); the next one in this Bereich after 2 min (bf A). A
-        running longer lock senkung stays, the note shows its real end (lock, Nutzer 09.11., bj B)."""
+        running longer lock senkung stays, the note shows its real end (lock, Nutzer 09.11., bj B). Not called while
+        the lock after an increase or the Taktsperre after a change of the Basisstufe runs (lower_clock, Nutzer 10.11.
+        / 09.11.)."""
         st, t, now = self.st, self.t, self.now
         band = hot['band']
         # Bereich 1 from the fixed ZeitImZieltemperatur, so a running excursion follows a rule change (Nutzer 08.11., ae)
@@ -1386,9 +1428,11 @@ class Round:
 
     def raise_clock(self):
         """Clock increase below ZTU at the first such value, by the distance d = ZTU − t; then 2 or 3 min no increase
-        (ends early at t <= the temperature at this increase − 3, raise_t; Nutzer 09.11.) – 6 min when the +5 (d 1–3)
-        needs a mode switch (clock_mode, also one that waits for the settings page; its early ends stay; Nutzer 09.11.,
-        bg ja, bh ja). Not while a lock runs, during the Startpause, while a command is pending or queued, at 440 MHz
+        (ends early at t > ZTO+2, Nutzer 10.11., or at t <= the temperature at this increase − 3, raise_t; Nutzer
+        09.11.) – 6 min when the +5 (d 1–3) needs a mode switch (clock_mode, also one that waits for the settings page;
+        its early ends stay; Nutzer 09.11., bg ja, bh ja). While this lock runs also no reduction, i.e. none at
+        ZTO+1..ZTO+2; the text says so (Nutzer 10.11., bo ja). Not while a lock runs, during the Startpause, while a
+        command is pending or queued, at 440 MHz
         or when more needs the waiting mode switch. At Basisstufe 1 not at ZTU−2..ZTU−1 for 30 min after a reduction
         by −5 MHz (cut5_at; silent like the locks, Nutzer 09.11.). Not while the Taktsperre after a change of the Basisstufe
         runs at ZTU−3..ZTO+3 (base_locked, Nutzer 09.11.)."""
@@ -1414,8 +1458,8 @@ class Round:
         if double:
             lock_s *= LOCK_DOUBLE_MODE
         until = self.now + timedelta(seconds=lock_s)
-        why = 'Chiptemperatur %d °C (ZTU −%d): +%d MHz, keine Takterhöhung bis %s%s' % (
-            t, d, new - old, _hm(until), LOCK_DOUBLE_TEXT if double else '')
+        why = 'Chiptemperatur %d °C (ZTU −%d): +%d MHz, keine Takterhöhung bis %s%s, keine Senkung bei %d–%d °C' % (
+            t, d, new - old, _hm(until), LOCK_DOUBLE_TEXT if double else '', self.hi + 1, self.hi + LOCK_RAISE_END)
         details = {'sperre_bis': _iso(until)}
         if double:
             details['sperre_doppelt'] = True
@@ -1426,11 +1470,11 @@ class Round:
     def rules(self):
         """With a valid temperature, in this order: Startpause end, fan mode (its end may set a lock; not while the fan
         waits after a change of the Basisstufe and not while a start for such a change still waits, e.g. for the clock
-        points – the fan modes rest, the fan stays as it is, Nutzer 09.11., bd A, bi ja), locks (expired, early end
-        above ZTU+3, erhoehung also 3 Grad below the temperature at the increase, the Taktsperre after a change of the
-        Basisstufe outside ZTU−3..ZTO+3), clock reduction above ZTO, clock increase below ZTU (so they can follow an
-        early end in the same round; the lock after a reduction in Bereich 1 and after the +5 doubled with a mode
-        switch, Nutzer 09.11.)."""
+        points – the fan modes rest, the fan stays as it is, Nutzer 09.11., bd A, bi ja), locks (expired, heizmodus/
+        kuehlmodus early end above ZTU+3, erhoehung above ZTO+2 (Nutzer 10.11.) or 3 Grad below the temperature at the
+        increase, the Taktsperre after a change of the Basisstufe outside ZTU−3..ZTO+3), clock reduction above ZTO (not
+        while erhoehung runs, Nutzer 10.11.), clock increase below ZTU (so they can follow an early end in the same
+        round; the lock after a reduction in Bereich 1 and after the +5 doubled with a mode switch, Nutzer 09.11.)."""
         st = self.st
         self.start_hold_end()
         if not st.get('base_wait') and not self.base_changed(st.get('start_reason'), st.get('base_change')):
@@ -1552,10 +1596,11 @@ class Round:
              Miner weicht ab.
           7. Fehlerrate (automatic restart).
           8. With a valid temperature (rules): Startpause end → fan mode (Kühlmodus, Heizmodus, Basismodus; may set a
-             lock; not while the fan waits or a start for a change of the Basisstufe still waits) → locks (end
-             early above ZTU+3; erhoehung also at t <= raise_t − 3, Nutzer 09.11.; the Taktsperre after a change
-             of the Basisstufe outside ZTU−3..ZTO+3) → clock reduction above ZTO → clock increase below ZTU (both
-             not during that Taktsperre; with a mode switch the lock after a reduction in Bereich 1 and after the +5
+             lock; not while the fan waits or a start for a change of the Basisstufe still waits) → locks
+             (heizmodus/kuehlmodus end early above ZTU+3; erhoehung above ZTO+2, Nutzer 10.11., or at t <= raise_t −
+             3, Nutzer 09.11.; the Taktsperre after a change of the Basisstufe outside ZTU−3..ZTO+3) → clock
+             reduction above ZTO (not while erhoehung runs, Nutzer 10.11.) → clock increase below ZTU (both not
+             during that Taktsperre; with a mode switch the lock after a reduction in Bereich 1 and after the +5
              doubled, Nutzer 09.11.).
           9. Fan command, then miner commands (not during Over Hot), learning (valid temperature), read the fan.
          10. Phase (heizmodus | basismodus | kuehlmodus) and the protocol of the round (automation_cycle)."""
