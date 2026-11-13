@@ -69,7 +69,7 @@ describe('FansPage fan modes (v2.2.7, Nutzer 06.11.)', () => {
     renderPage()
     expect(await screen.findByText('Basismodus')).toBeInTheDocument()
     expect(screen.getByText('Takt regelt 82–85 °C')).toBeInTheDocument()
-    expect(screen.getByText('= Basisstufe')).toBeInTheDocument()
+    expect(screen.queryByText(/Basisstufe/)).not.toBeInTheDocument()   // Nutzer 13.11.: no Basisstufe in the fan card
     expect(toneOf('Status')).toBe('default')
     expect(toneOf('Lüfter läuft auf')).toBe('default')
   })
@@ -78,7 +78,7 @@ describe('FansPage fan modes (v2.2.7, Nutzer 06.11.)', () => {
     mockApi(automation({ phase: 'kuehlmodus', t: 88, cool: { since: inMin(-1), plus: 1 } }))
     const { unmount } = renderPage()
     expect(await screen.findByText('Kühlmodus')).toBeInTheDocument()
-    expect(screen.getByText('Basisstufe 3 · Kühlmodus +1')).toBeInTheDocument()
+    expect(screen.getByText('Kühlmodus +1')).toBeInTheDocument()
     expect(screen.getByText('endet bei 81 °C oder kälter')).toBeInTheDocument()
     expect(toneOf('Status')).toBe('warning')
     expect(toneOf('Lüfter läuft auf')).toBe('warning')
@@ -88,14 +88,15 @@ describe('FansPage fan modes (v2.2.7, Nutzer 06.11.)', () => {
     mockApi(automation({ phase: 'kuehlmodus', t: 93, fan_target: 5, fan_set: 5, fan_read: 4,
       fan_set_at: inMin(0), fan_read_at: inMin(0), cool: { since: inMin(-2), plus: 2 } }))
     renderPage()
-    expect(await screen.findByText('Basisstufe 3 · Kühlmodus +2 · Rückmeldung folgt')).toBeInTheDocument()
+    expect(await screen.findByText('Kühlmodus +2 · Rückmeldung folgt')).toBeInTheDocument()
   })
 
   it('Kühlmodus at level 10 (Basisstufe 10): no plus shown', async () => {
     mockApi({ ...automation({ phase: 'kuehlmodus', fan_target: 10, fan_set: 10, fan_read: 10,
       cool: { since: inMin(-1), plus: 1 } }), level: 10 })
     renderPage()
-    expect(await screen.findByText('= Basisstufe · Kühlmodus')).toBeInTheDocument()
+    expect(await screen.findAllByText('Kühlmodus')).toHaveLength(2)   // status card and fan card (no Basisstufe, Nutzer 13.11.)
+    expect(screen.queryByText(/Kühlmodus \+/)).not.toBeInTheDocument()
   })
 
   it('Heizmodus: fan below the Basisstufe, calm tone, ends from ZTU−4', async () => {
@@ -103,7 +104,7 @@ describe('FansPage fan modes (v2.2.7, Nutzer 06.11.)', () => {
       heat: { since: inMin(-3) } }))
     const { unmount } = renderPage()
     expect(await screen.findByText('Heizmodus')).toBeInTheDocument()
-    expect(screen.getByText('Basisstufe 3 · Heizmodus −2')).toBeInTheDocument()
+    expect(screen.getByText('Heizmodus −2')).toBeInTheDocument()
     expect(screen.getByText('endet ab 78 °C')).toBeInTheDocument()
     expect(toneOf('Status')).toBe('default')
     expect(toneOf('Lüfter läuft auf')).toBe('default')
@@ -113,14 +114,15 @@ describe('FansPage fan modes (v2.2.7, Nutzer 06.11.)', () => {
     mockApi(automation({ phase: 'heizmodus', t: 68, fan_target: 1, fan_set: 2, fan_read: 2,
       heat: { since: inMin(-3) } }))
     renderPage()
-    expect(await screen.findByText('Basisstufe 3 · Heizmodus −1 · wird Stufe 1')).toBeInTheDocument()
+    expect(await screen.findByText('Heizmodus −1 · wird Stufe 1')).toBeInTheDocument()
   })
 
   it('Heizmodus at Basisstufe 1: no minus shown', async () => {
     mockApi({ ...automation({ phase: 'heizmodus', t: 60, fan_target: 1, fan_set: 1, fan_read: 1,
       heat: { since: inMin(-3) } }), level: 1 })
     renderPage()
-    expect(await screen.findByText('= Basisstufe · Heizmodus')).toBeInTheDocument()
+    expect(await screen.findAllByText('Heizmodus')).toHaveLength(2)   // status card and fan card (no Basisstufe, Nutzer 13.11.)
+    expect(screen.queryByText(/Heizmodus −/)).not.toBeInTheDocument()
   })
 
   it('old phases and states are not shown any more (Korrekturphase, Ausnahme, Takt-Messung, Lüfterstoß)', async () => {
@@ -815,21 +817,21 @@ describe('FansPage Lernwerte', () => {
         })
       }
       if (url === '/api/fans/status/') {
-        return status(url).then((res) => ({ data: { ...res.data, devices: [{ ...res.data.devices[0], temperature_c: 21.5 }] } }))
+        return status(url).then((res) => ({ data: { ...res.data, devices: [{ ...res.data.devices[0], temperature_c: 21.5, humidity_pct: 48.2 }] } }))
       }
       return status(url)
     })
     return render(<LiveProvider><MemoryRouter><FansPage /></MemoryRouter></LiveProvider>)
   }
 
-  it('Fan speed of the A15 (live poll) after the room temperature in the fan card (Nutzer 06.11.)', async () => {
+  it('fan card: Fan first, then Raum and Luftfeuchte, then the mode, no Basisstufe (Nutzer 13.11.)', async () => {
     renderWithLive(automation({}))
-    expect(await screen.findByText('Basisstufe 3 · Raum 21,5 °C · Fan speed 1.520 rpm')).toBeInTheDocument()
+    expect(await screen.findByText('Fan 1.520 rpm · Raum 21,5 °C · Luftfeuchte 48,2 %')).toBeInTheDocument()
   })
 
   it('Fan speed unbekannt instead of the old value in the Wartung (Nutzer 06.11.)', async () => {
     renderWithLive({ ...automation({ phase: 'wartung' }), maintenance: { fan_before: 3 } })
-    expect(await screen.findByText('Wartung · danach wieder Stufe 3 · Raum 21,5 °C · Fan speed unbekannt'))
+    expect(await screen.findByText('Fan unbekannt · Raum 21,5 °C · Luftfeuchte 48,2 % · Wartung · danach wieder Stufe 3'))
       .toBeInTheDocument()
     expect(screen.queryByText(/1\.520 rpm/)).not.toBeInTheDocument()
   })
@@ -837,7 +839,7 @@ describe('FansPage Lernwerte', () => {
   it('Fan speed unbekannt while the A15 does not answer or restarts (Nutzer 06.11.)', async () => {
     for (const offline of [true, 'neustart']) {
       const view = renderWithLive(automation({ offline }))
-      expect(await screen.findByText('Basisstufe 3 · Raum 21,5 °C · Fan speed unbekannt')).toBeInTheDocument()
+      expect(await screen.findByText('Fan unbekannt · Raum 21,5 °C · Luftfeuchte 48,2 %')).toBeInTheDocument()
       expect(screen.queryByText(/1\.520 rpm/)).not.toBeInTheDocument()
       view.unmount()
     }
@@ -847,7 +849,7 @@ describe('FansPage Lernwerte', () => {
     mockApi(automation({}))
     renderPage()
     expect(await screen.findByText('Basismodus')).toBeInTheDocument()
-    expect(screen.queryByText(/Fan speed/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/Fan /)).not.toBeInTheDocument()
   })
 })
 

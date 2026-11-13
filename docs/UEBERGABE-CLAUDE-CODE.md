@@ -269,7 +269,7 @@ Alte Protokolleinträge `messung_start`/`messung_ende` und Phase `messung` bleib
   (Rücklesen nach `READ_BACK_S = 5` s); markiert ist die vom Controller gemeldete Stufe. Bei aktiver Automatik wählen die Buttons
   die Automatik-Stufe; An/Aus und Port gesperrt.
 - Automatik-Bereich: **5 Karten** (Hashrate mit Fehlerrate wie Übersicht – erste Karte seit v2.0.0; Heißester Chip mit den Temperaturen der weiteren Boards, Zieltemperatur
-  und zuletzt Tendenz (seit v2.2.13 ohne die Wörter „weitere Boards“ und ohne „Regelwert“, Nutzer 09.11.); Takt laut Miner mit gesetzt · Modus · Standard; Lüfter läuft auf (aktive Stufe vs. Basisstufe, Kühlmodus +n / Heizmodus −n, Raum (v2.1.5) · Fan speed der A15 in rpm (Nutzer 06.11.; in der Wartung und solange die A15
+  und zuletzt Tendenz (seit v2.2.13 ohne die Wörter „weitere Boards“ und ohne „Regelwert“, Nutzer 09.11.); Takt laut Miner mit gesetzt · Modus · Standard; Lüfter läuft auf (seit v2.2.19, Nutzer 13.11.: „Fan … rpm · Raum … °C · Luftfeuchte … %“, danach Kühlmodus +n / Heizmodus −n, keine Basisstufe mehr; Fan = Fan speed der A15 (Nutzer 06.11.; in der Wartung und solange die A15
   nicht antwortet „unbekannt“ statt des letzten Werts));
   Status mit Modus (Heiz-, Basis-, Kühlmodus), laufendem Befehl, „Lüfter wartet: Stufe N bis HH:MM:SS oder unter/über …“ (v2.2.16) und „keine Taktänderung bei 77–88 °C bis HH:MM (Basisstufe gewählt)“ (v2.2.15), „keine Senkung bei 86–87 °C bis HH:MM (nach Erhöhung)“ (v2.2.17), Startpause, Takterhöhungssperren mit Uhrzeit und Grund, Bereich über ZTO,
   Lernperiode; v2.2.7). Kleine Zeile wiederholt den großen Wert nicht. Auf dem Handy
